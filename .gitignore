@@ -1,0 +1,13 @@
+# Sensitive / local only
+*.env
+.env.*
+dashboard_b64.txt
+dashboard_index.ts
+
+# SQL chunks (large imports, not needed in repo)
+chunk_*.sql
+import_leads.sql
+
+# OS
+.DS_Store
+Thumbs.db

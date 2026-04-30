@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orchestrator Agent</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0a;color:#d4d4d4;height:100vh;display:flex;overflow:hidden}
+#app{display:flex;flex:1;overflow:hidden}
+
+/* ── Sidebar ── */
+#sidebar{width:220px;flex-shrink:0;background:#111;border-right:1px solid #1e1e1e;display:flex;flex-direction:column}
+.sidebar-brand{padding:20px 18px 16px;border-bottom:1px solid #1e1e1e}
+.sidebar-brand .logo{font-size:20px;margin-bottom:4px}
+.sidebar-brand h1{font-size:13px;font-weight:700;color:#fff;line-height:1.3}
+.sidebar-brand p{font-size:11px;color:#555;margin-top:2px}
+nav{padding:12px 8px;flex:1;display:flex;flex-direction:column;gap:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:7px;cursor:pointer;border:none;background:none;color:#666;font-size:13px;text-align:left;width:100%;transition:background .15s,color .15s;-webkit-appearance:none;appearance:none}
+.nav-item:hover{background:#1a1a1a;color:#ccc}
+.nav-item.active{background:#1d4ed820;color:#60a5fa}
+.nav-item .icon{font-size:15px;width:18px;text-align:center;flex-shrink:0}
+.nav-divider{height:1px;background:#1a1a1a;margin:8px 2px}
+.sidebar-footer{padding:12px 10px;border-top:1px solid #1e1e1e}
+.provider-badge{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;margin-bottom:2px}
+.provider-badge .label{font-size:11px;color:#555;flex:1}
+.provider-badge .pvd-model{font-size:10px;color:#333;font-family:monospace;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#2a2a2a;flex-shrink:0}
+.dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e88}
+.dot.warn{background:#f59e0b;box-shadow:0 0 5px #f59e0b88}
+
+/* ── Main ── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.page{display:none;flex:1;flex-direction:column;overflow:hidden}
+.page.active{display:flex}
+.page-header{padding:20px 28px 16px;flex-shrink:0;border-bottom:1px solid #141414}
+.page-header h2{font-size:17px;font-weight:700;color:#fff}
+.page-header p{font-size:12px;color:#444;margin-top:3px}
+
+/* ── Chat ── */
+#chatPage{padding:0}
+.messages{flex:1;overflow-y:auto;padding:24px 28px;display:flex;flex-direction:column;gap:14px}
+.msg{max-width:72%;padding:12px 16px;border-radius:14px;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
+.msg.ai{align-self:flex-start;background:#171717;color:#d4d4d4;border-bottom-left-radius:4px;border:1px solid #1e1e1e}
+.msg-meta{font-size:10px;opacity:.45;margin-bottom:5px;text-transform:uppercase;letter-spacing:.06em;display:flex;gap:8px;align-items:center}
+.msg-meta .pvd{background:#ffffff0f;border-radius:3px;padding:1px 5px}
+.typing-indicator{align-self:flex-start;color:#444;font-size:13px;padding:4px 0}
+.stream-cursor{display:inline-block;color:#60a5fa;animation:blink 1s step-end infinite;font-size:13px;margin-left:1px;vertical-align:baseline}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.msg.ai .chat-fb{display:flex;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid #1a1a1a}
+.input-bar{padding:16px 28px;border-top:1px solid #1a1a1a;display:flex;gap:10px;flex-shrink:0;background:#0a0a0a}
+.input-bar textarea{flex:1;background:#111;border:1px solid #222;border-radius:10px;padding:11px 14px;color:#d4d4d4;font-size:14px;resize:none;outline:none;line-height:1.5;font-family:inherit;transition:border-color .15s}
+.input-bar textarea:focus{border-color:#333}
+.send-btn{background:#1d4ed8;border:none;border-radius:10px;color:#fff;padding:0 22px;font-size:14px;cursor:pointer;font-weight:500;transition:background .15s}
+.send-btn:hover{background:#2563eb}
+.send-btn:disabled{background:#1a1a1a;color:#444;cursor:not-allowed}
+.chat-session-bar{padding:8px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.session-info{font-size:11px;color:#333;flex:1}
+.new-session-btn{font-size:11px;color:#444;background:none;border:1px solid #1e1e1e;border-radius:5px;padding:3px 10px;cursor:pointer;transition:all .15s}
+.new-session-btn:hover{color:#aaa;border-color:#333}
+
+/* ── Agents split layout ── */
+.agents-split{display:flex;flex:1;overflow:hidden}
+.agent-list{width:210px;flex-shrink:0;border-right:1px solid #1a1a1a;overflow-y:auto;padding:8px}
+.agent-list-item{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:8px;cursor:pointer;border:1px solid transparent;transition:background .15s}
+.agent-list-item:hover{background:#161616}
+.agent-list-item.active{background:#1d4ed812;border-color:#1d4ed830}
+.ali-dot{width:7px;height:7px;border-radius:50%;background:#2a2a2a;flex-shrink:0}
+.ali-dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e88}
+.ali-name{flex:1;font-size:13px;color:#aaa;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-list-item.active .ali-name{color:#93c5fd}
+.ali-pvd{font-size:10px;color:#333;background:#161616;border-radius:3px;padding:1px 5px;white-space:nowrap}
+.agent-editor{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-width:0}
+.ae-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2a2a2a;font-size:13px}
+.ae-top{padding:18px 24px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.ae-icon{width:36px;height:36px;border-radius:9px;background:#1a1a1a;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.ae-top h3{flex:1;font-size:15px;font-weight:700;color:#fff}
+.ae-toggle{display:flex;align-items:center;gap:7px}
+.ae-toggle span{font-size:11px;color:#555}
+.ts-wrap{position:relative;display:inline-block;width:36px;height:20px}
+.ts-wrap input{opacity:0;width:0;height:0;position:absolute}
+.ts-slider{position:absolute;inset:0;background:#222;border-radius:20px;cursor:pointer;transition:background .2s}
+.ts-slider:before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#444;border-radius:50%;transition:transform .2s}
+.ts-wrap input:checked+.ts-slider{background:#22c55e}
+.ts-wrap input:checked+.ts-slider:before{transform:translateX(16px);background:#fff}
+.ae-body{padding:20px 24px;display:flex;flex-direction:column;gap:14px}
+.ae-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ae-field label{display:block;font-size:11px;color:#555;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+.ae-field input,.ae-field select{width:100%;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:8px 11px;color:#d4d4d4;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.ae-field input:focus,.ae-field select:focus{border-color:#333}
+.ae-field select option{background:#111}
+.ae-prompt-label{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.ae-prompt-label span:first-child{font-size:11px;color:#555;text-transform:uppercase;letter-spacing:.05em;flex:1}
+.ae-char{font-size:10px;color:#333}
+.ae-prompt-wrap textarea{width:100%;min-height:160px;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;color:#d4d4d4;font-size:13px;font-family:inherit;padding:11px 13px;resize:vertical;line-height:1.65;outline:none;transition:border-color .15s}
+.ae-prompt-wrap textarea:focus{border-color:#333}
+.ae-test-section{border-top:1px solid #141414;padding:16px 24px;flex-shrink:0}
+.ae-test-hd{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+.ae-test-msgs{min-height:60px;max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.ae-tmsg{padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;max-width:85%}
+.ae-tmsg.user{align-self:flex-end;background:#1d4ed8;color:#fff}
+.ae-tmsg.ai{align-self:flex-start;background:#171717;color:#d4d4d4;border:1px solid #1e1e1e}
+.ae-test-bar{display:flex;gap:8px}
+.ae-test-bar input{flex:1;background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#d4d4d4;padding:8px 12px;font-size:13px;outline:none;transition:border-color .15s}
+.ae-test-bar input:focus{border-color:#333}
+.ae-footer{padding:14px 24px;border-top:1px solid #141414;display:flex;gap:8px;justify-content:space-between;flex-shrink:0}
+.ae-save-msg{font-size:12px;color:#555;align-self:center}
+.btn-danger{padding:8px 16px;background:none;border:1px solid #ef444430;border-radius:7px;color:#ef4444;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.btn-danger:hover{background:#ef444412;border-color:#ef4444}
+.agent-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.agent-icon.chat{background:#1d4ed815}
+.agent-icon.crm{background:#7c3aed15}
+.agent-icon.account{background:#05966915}
+.agent-icon.code{background:#d9770615}
+
+/* ── Config & API ── */
+.scroll-page{overflow-y:auto;padding:20px 28px;flex:1;display:flex;flex-direction:column;gap:0}
+.section-label{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;margin-top:24px}
+.section-label:first-child{margin-top:0}
+.card-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:4px}
+.card{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:18px 20px}
+.card-hd{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.card-hd h4{font-size:14px;font-weight:600;color:#fff;flex:1}
+label.lbl{display:block;font-size:11px;color:#555;margin-bottom:5px;margin-top:14px}
+label.lbl:first-child{margin-top:0}
+.irow{display:flex;gap:6px}
+input[type=text],input[type=password],input[type=number],textarea.field{width:100%;flex:1;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:9px 12px;color:#d4d4d4;font-size:13px;font-family:monospace;outline:none;transition:border-color .15s}
+input:focus,textarea.field:focus{border-color:#333}
+textarea.field{resize:vertical;line-height:1.5;font-family:inherit;font-size:13px;min-height:90px}
+select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7px;padding:9px 12px;font-size:13px;cursor:pointer;outline:none;width:100%}
+.chk-row{display:flex;align-items:center;gap:8px;margin:12px 0}
+.chk-row input[type=checkbox]{accent-color:#22c55e;cursor:pointer;width:15px;height:15px;flex-shrink:0}
+.chk-row span{font-size:13px;color:#888}
+.btn-primary{padding:9px 20px;background:#1d4ed8;border:none;border-radius:7px;color:#fff;font-size:13px;cursor:pointer;font-weight:500;transition:background .15s;-webkit-appearance:none;appearance:none}
+.btn-primary:hover{background:#2563eb}
+.btn-secondary{padding:9px 20px;background:#1a1a1a;border:1px solid #222;border-radius:7px;color:#888;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.btn-secondary:hover{background:#222;color:#ccc}
+.btn-full{width:100%;padding:10px;border-radius:7px;font-size:13px;cursor:pointer;border:none;margin-top:10px;-webkit-appearance:none;appearance:none}
+.status-txt{font-size:12px;color:#555;min-height:16px;margin-top:8px}
+.ok{color:#22c55e}
+.err{color:#ef4444}
+.show-btn{background:#1a1a1a;border:1px solid #1e1e1e;color:#666;border-radius:7px;padding:0 12px;cursor:pointer;font-size:12px;white-space:nowrap;transition:all .15s;-webkit-appearance:none;appearance:none}
+.show-btn:hover{color:#aaa;border-color:#333}
+.default-bar{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.default-bar label{font-size:13px;color:#888}
+.default-bar select{width:auto}
+.agent-llm-table{width:100%;border-collapse:collapse}
+.agent-llm-table th{font-size:10px;color:#444;text-align:left;padding:0 10px 10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}
+.agent-llm-table td{padding:8px 10px;vertical-align:middle;border-top:1px solid #1a1a1a}
+.agent-llm-table td select,.agent-llm-table td input{padding:7px 10px}
+.sm-btn{padding:7px 14px;background:#1d4ed8;border:none;border-radius:6px;color:#fff;font-size:12px;cursor:pointer;-webkit-appearance:none;appearance:none}
+.sm-btn:hover{background:#2563eb}
+
+/* ── Model picker ── */
+.model-select{display:none;width:100%;margin-top:6px;padding:7px 10px;background:#161616;border:1px solid #333;border-radius:6px;color:#ccc;font-size:12px;font-family:monospace;cursor:pointer;outline:none}
+.model-select option{background:#1a1a1a;color:#ccc}
+
+/* ── Logs page (Dify-inspired) ── */
+.logs-toolbar{padding:14px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.logs-filter{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:6px 12px;color:#888;font-size:12px;cursor:pointer;outline:none}
+.logs-refresh{background:none;border:1px solid #1e1e1e;border-radius:7px;padding:6px 12px;color:#555;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.logs-refresh:hover{color:#aaa;border-color:#333}
+.logs-count{font-size:12px;color:#333;margin-left:auto}
+.logs-body{flex:1;overflow-y:auto;padding:0}
+.log-row{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;align-items:center;padding:10px 28px;border-bottom:1px solid #0f0f0f;gap:12px;transition:background .12s}
+.log-row:hover{background:#0d0d0d}
+.log-row-hd{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;padding:8px 28px;border-bottom:1px solid #1e1e1e;gap:12px}
+.log-row-hd span{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:.07em}
+.fb-btns{display:flex;gap:4px}
+.fb-btn{background:none;border:1px solid #1e1e1e;border-radius:5px;padding:2px 7px;font-size:13px;cursor:pointer;color:#444;transition:all .15s;-webkit-appearance:none;appearance:none}
+.fb-btn:hover{border-color:#444;color:#ccc}
+.fb-btn.good.active{border-color:#22c55e;background:#22c55e18;color:#22c55e}
+.fb-btn.bad.active{border-color:#ef4444;background:#ef444418;color:#ef4444}
+.log-role{font-size:11px;padding:2px 8px;border-radius:4px;text-align:center;font-weight:500}
+.log-role.user{background:#1d4ed815;color:#60a5fa}
+.log-role.assistant{background:#05966915;color:#34d399}
+.log-agent{font-size:11px;color:#555;font-family:monospace}
+.log-content{font-size:13px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-time{font-size:11px;color:#333;text-align:right;font-family:monospace}
+.log-empty{padding:60px;text-align:center;color:#333;font-size:14px}
+
+/* ── Data page ── */
+.data-page{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.data-tabs{display:flex;gap:4px;padding:16px 28px 0;border-bottom:1px solid #141414;flex-shrink:0}
+.data-tab{padding:8px 18px;border-radius:7px 7px 0 0;font-size:13px;cursor:pointer;border:none;background:none;color:#555;border-bottom:2px solid transparent;transition:all .15s;-webkit-appearance:none;appearance:none;margin-bottom:-1px}
+.data-tab:hover{color:#aaa}
+.data-tab.active{color:#60a5fa;border-bottom-color:#60a5fa;background:#1d4ed808}
+.data-toolbar{padding:14px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap}
+.data-toolbar input,.data-toolbar select{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:6px 11px;color:#aaa;font-size:12px;outline:none;transition:border-color .15s}
+.data-toolbar input{width:160px}
+.data-toolbar input:focus,.data-toolbar select:focus{border-color:#333}
+.data-toolbar input::placeholder{color:#333}
+.data-search-btn{padding:6px 14px;background:#1d4ed8;border:none;border-radius:7px;color:#fff;font-size:12px;cursor:pointer;-webkit-appearance:none;appearance:none}
+.data-search-btn:hover{background:#2563eb}
+.data-count{font-size:12px;color:#333;margin-left:auto}
+.data-table-wrap{flex:1;overflow:auto;padding:0 28px}
+.data-table{width:100%;border-collapse:collapse;font-size:12px}
+.data-table th{font-size:10px;color:#444;text-align:left;padding:10px 10px 8px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #1a1a1a;position:sticky;top:0;background:#0a0a0a;white-space:nowrap}
+.data-table td{padding:9px 10px;border-bottom:1px solid #0d0d0d;color:#888;vertical-align:top;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.data-table tr:hover td{background:#0d0d0d;color:#aaa}
+.data-table td.name{color:#ccc;font-weight:500}
+.data-table td.num{font-family:monospace;color:#666}
+.data-table td.spend{color:#34d399}
+.data-tags{display:flex;flex-wrap:wrap;gap:3px;max-width:300px}
+.dtag{font-size:10px;padding:1px 6px;border-radius:3px;background:#1a1a1a;color:#555;border:1px solid #222;white-space:nowrap}
+.dtag.google{background:#1d4ed812;color:#60a5fa;border-color:#1d4ed830}
+.dtag.potential{background:#05966912;color:#34d399;border-color:#05966930}
+.dtag.meta{background:#7c3aed12;color:#a78bfa;border-color:#7c3aed30}
+.data-pagination{padding:12px 28px;border-top:1px solid #141414;display:flex;align-items:center;gap:6px;flex-shrink:0}
+.pg-btn{padding:5px 11px;background:#111;border:1px solid #1e1e1e;border-radius:6px;color:#666;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.pg-btn:hover{border-color:#333;color:#aaa}
+.pg-btn.active{background:#1d4ed820;border-color:#1d4ed840;color:#60a5fa}
+.pg-btn:disabled{opacity:.3;cursor:default}
+.pg-info{font-size:12px;color:#333;margin:0 6px}
+
+/* ── Markdown in chat ── */
+.msg.ai .md h1,.msg.ai .md h2,.msg.ai .md h3{color:#fff;font-weight:600;margin:12px 0 6px;line-height:1.3}
+.msg.ai .md h1{font-size:15px}.msg.ai .md h2{font-size:14px}.msg.ai .md h3{font-size:13px}
+.msg.ai .md p{margin:6px 0;line-height:1.65}
+.msg.ai .md ul,.msg.ai .md ol{padding-left:18px;margin:6px 0}
+.msg.ai .md li{margin:3px 0;line-height:1.55}
+.msg.ai .md code{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;padding:1px 5px;font-family:monospace;font-size:12px;color:#86efac}
+.msg.ai .md pre{background:#111;border:1px solid #222;border-radius:8px;padding:12px 14px;overflow-x:auto;margin:8px 0}
+.msg.ai .md pre code{background:none;border:none;padding:0;font-size:12px;color:#d4d4d4}
+.msg.ai .md strong{color:#e5e7eb;font-weight:600}
+.msg.ai .md em{color:#9ca3af;font-style:italic}
+.msg.ai .md blockquote{border-left:3px solid #333;padding-left:10px;color:#666;margin:6px 0}
+.msg.ai .md table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px}
+.msg.ai .md th{background:#1a1a1a;color:#aaa;padding:6px 10px;border:1px solid #222;text-align:left}
+.msg.ai .md td{padding:5px 10px;border:1px solid #1a1a1a;color:#888}
+.msg.ai .md hr{border:none;border-top:1px solid #1e1e1e;margin:10px 0}
+.msg.ai .md a{color:#60a5fa;text-decoration:none}
+/* ── Log expand modal ── */
+.log-modal-bg{display:none;position:fixed;inset:0;background:#00000088;z-index:200;align-items:center;justify-content:center}
+.log-modal-bg.open{display:flex}
+.log-modal{background:#111;border:1px solid #1e1e1e;border-radius:12px;width:680px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 60px #000a}
+.log-modal-hd{padding:18px 22px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.log-modal-hd h4{flex:1;font-size:14px;font-weight:600;color:#fff}
+.log-modal-body{flex:1;overflow-y:auto;padding:18px 22px;font-size:13px;color:#aaa;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+/* ── Stats bar ── */
+.data-stats{display:flex;gap:12px;padding:12px 28px;border-bottom:1px solid #141414;flex-shrink:0;flex-wrap:wrap}
+.dstat{background:#111;border:1px solid #1a1a1a;border-radius:8px;padding:10px 16px;min-width:110px}
+.dstat .dstat-val{font-size:18px;font-weight:700;color:#fff;font-family:monospace}
+.dstat .dstat-lbl{font-size:10px;color:#444;margin-top:3px;text-transform:uppercase;letter-spacing:.05em}
+.dstat.green .dstat-val{color:#34d399}
+.dstat.blue .dstat-val{color:#60a5fa}
+.dstat.amber .dstat-val{color:#f59e0b}
+/* ── API integration status strip ── */
+.int-status-strip{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.int-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;border:1px solid #1e1e1e;background:#111;color:#555}
+.int-chip.on{border-color:#05966940;color:#34d399;background:#05966910}
+.int-chip .dot{width:5px;height:5px}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div class="sidebar-brand">
+    <div class="logo">🧠</div>
+    <h1>Orchestrator Agent</h1>
+    <p>Multi-Agent Brain</p>
+  </div>
+  <nav>
+    <button class="nav-item active" onclick="showPage('chat',this)">
+      <span class="icon">💬</span> 对话
+    </button>
+    <button class="nav-item" onclick="showPage('agents',this)">
+      <span class="icon">🤖</span> Agents
+    </button>
+    <button class="nav-item" onclick="showPage('logs',this)">
+      <span class="icon">📋</span> 日志
+    </button>
+    <button class="nav-item" onclick="showPage('data',this)">
+      <span class="icon">🗄️</span> 数据
+    </button>
+    <div class="nav-divider"></div>
+    <button class="nav-item" onclick="showPage('llm',this)">
+      <span class="icon">⚙️</span> LLM 配置
+    </button>
+    <button class="nav-item" onclick="showPage('api',this)">
+      <span class="icon">🔌</span> API 对接
+    </button>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="provider-badge">
+      <div class="dot" id="dot-anthropic"></div>
+      <span class="label">Anthropic</span>
+      <span class="pvd-model" id="pvdm-anthropic"></span>
+    </div>
+    <div class="provider-badge">
+      <div class="dot" id="dot-openai"></div>
+      <span class="label">OpenAI</span>
+      <span class="pvd-model" id="pvdm-openai"></span>
+    </div>
+    <div class="provider-badge">
+      <div class="dot" id="dot-google"></div>
+      <span class="label">Google</span>
+      <span class="pvd-model" id="pvdm-google"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Chat -->
+  <div class="page active" id="chatPage">
+    <div class="chat-session-bar">
+      <span class="session-info" id="sessionInfo">Session: —</span>
+      <button class="new-session-btn" onclick="newSession()">+ 新对话</button>
+    </div>
+    <div class="messages" id="messages">
+      <div class="msg ai">
+        <div class="msg-meta">orchestrator</div>
+        你好，我是 Orchestrator Agent。消息会自动路由给最合适的 Agent。
+      </div>
+    </div>
+    <div class="input-bar">
+      <textarea id="inputBox" rows="2" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMsg()">发送</button>
+    </div>
+  </div>
+
+  <!-- Agents -->
+  <div class="page" id="agentsPage">
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div><h2>Agents</h2><p>管理各 Agent 的定义、LLM 分配与启用状态</p></div>
+      <button class="btn-primary" style="font-size:12px;padding:7px 16px" onclick="newAgent()">+ 新建</button>
+    </div>
+    <div class="agents-split">
+      <div class="agent-list" id="agentList"><p style="color:#333;font-size:12px;padding:8px">加载中…</p></div>
+      <div class="agent-editor" id="agentEditor">
+        <div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs (Dify-inspired) -->
+  <div class="page" id="logsPage">
+    <div class="page-header">
+      <h2>对话日志</h2>
+      <p>所有对话记录，显示路由 Agent 与 Provider</p>
+    </div>
+    <div class="logs-toolbar">
+      <select class="logs-filter" id="logsAgentFilter" onchange="loadLogs()">
+        <option value="">全部 Agent</option>
+      </select>
+      <select class="logs-filter" id="logsRoleFilter" onchange="loadLogs()">
+        <option value="">全部角色</option>
+        <option value="user">User</option>
+        <option value="assistant">Assistant</option>
+      </select>
+      <select class="logs-filter" id="logsFeedbackFilter" onchange="loadLogs()">
+        <option value="">全部评价</option>
+        <option value="bad">👎 差评</option>
+        <option value="good">👍 好评</option>
+        <option value="none">未评价</option>
+      </select>
+      <button class="logs-refresh" onclick="reloadLogs()">↻ 刷新</button>
+      <span class="logs-count" id="logsCount"></span>
+    </div>
+    <div class="log-row-hd">
+      <span>角色</span><span>Agent</span><span>内容</span><span>时间</span><span>评价</span>
+    </div>
+    <div class="logs-body" id="logsBody">
+      <div class="log-empty">加载中…</div>
+    </div>
+  </div>
+
+  <!-- Data -->
+  <div class="page" id="dataPage">
+    <div class="data-page">
+      <div class="data-tabs">
+        <button class="data-tab active" id="dtab-leads" onclick="switchDataTab('leads')">📋 Leads</button>
+        <button class="data-tab" id="dtab-adreports" onclick="switchDataTab('adreports')">📊 广告报告</button>
+      </div>
+
+      <!-- Leads toolbar -->
+      <div class="data-toolbar" id="dt-leads">
+        <input type="text" id="dLeadsSearch" placeholder="姓名 / 电话搜索…" onkeydown="if(event.key==='Enter')loadLeads(1)">
+        <input type="date" id="dLeadsFrom" onchange="loadLeads(1)">
+        <span style="color:#333;font-size:12px">—</span>
+        <input type="date" id="dLeadsTo" onchange="loadLeads(1)">
+        <input type="text" id="dLeadsLabel" placeholder="标签筛选 e.g. Google" onkeydown="if(event.key==='Enter')loadLeads(1)">
+        <button class="data-search-btn" onclick="loadLeads(1)">搜索</button>
+        <button class="data-search-btn" style="background:#059669" onclick="exportCSV('leads')">↓ 导出</button>
+        <span class="data-count" id="dLeadsCount"></span>
+      </div>
+
+      <!-- Ad Reports toolbar -->
+      <div class="data-toolbar" id="dt-adreports" style="display:none">
+        <input type="text" id="dAdsSearch" placeholder="活动名称搜索…" onkeydown="if(event.key==='Enter')loadAdReports(1)">
+        <input type="date" id="dAdsFrom" onchange="loadAdReports(1)">
+        <span style="color:#333;font-size:12px">—</span>
+        <input type="date" id="dAdsTo" onchange="loadAdReports(1)">
+        <button class="data-search-btn" onclick="loadAdReports(1)">搜索</button>
+        <button class="data-search-btn" style="background:#059669" onclick="exportCSV('adreports')">↓ 导出</button>
+        <span class="data-count" id="dAdsCount"></span>
+      </div>
+
+      <!-- Stats bar -->
+      <div class="data-stats" id="dataStats" style="display:none"></div>
+
+      <div class="data-table-wrap" id="dataTableWrap">
+        <p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>
+      </div>
+      <div class="data-pagination" id="dataPagination"></div>
+    </div>
+  </div>
+
+  <!-- LLM Config -->
+  <div class="page" id="llmPage">
+    <div class="scroll-page">
+      <p class="section-label">全局默认 Provider</p>
+      <div class="default-bar">
+        <label>选择默认：</label>
+        <select id="defaultSel">
+          <option value="anthropic">Anthropic · Claude</option>
+          <option value="openai">OpenAI · GPT</option>
+          <option value="google">Google · Gemini</option>
+        </select>
+        <button class="btn-primary" onclick="saveDefault()">保存</button>
+        <span id="defaultMsg" class="status-txt"></span>
+      </div>
+
+      <p class="section-label">API Keys</p>
+      <p id="syncMsg" style="font-size:12px;color:#444;margin-bottom:12px">正在读取…</p>
+      <div class="card-row">
+        <!-- Anthropic -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="cdot-anthropic"></div><h4>Anthropic · Claude</h4></div>
+          <div class="chk-row"><input type="checkbox" id="active-anthropic" onchange="toggleActive('anthropic',this.checked)"><span>启用</span></div>
+          <label class="lbl">API Key</label>
+          <div class="irow">
+            <input type="password" id="key-anthropic" placeholder="sk-ant-…">
+            <button class="show-btn" onclick="toggleShow('anthropic')">显示</button>
+          </div>
+          <label class="lbl">Model</label>
+          <div class="irow">
+            <input type="text" id="model-anthropic" placeholder="claude-sonnet-4-6" style="flex:1">
+            <button class="show-btn" onclick="fetchModels('anthropic')">获取</button>
+          </div>
+          <select id="models-anthropic" class="model-select" onchange="selectModel('anthropic',this.value)"><option value="">— 获取后选择 —</option></select>
+          <button class="btn-full btn-primary" onclick="saveProvider('anthropic')">保存</button>
+          <div id="msg-anthropic" class="status-txt"></div>
+        </div>
+        <!-- OpenAI -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="cdot-openai"></div><h4>OpenAI · GPT</h4></div>
+          <div class="chk-row"><input type="checkbox" id="active-openai" onchange="toggleActive('openai',this.checked)"><span>启用</span></div>
+          <label class="lbl">API Key</label>
+          <div class="irow">
+            <input type="password" id="key-openai" placeholder="sk-…">
+            <button class="show-btn" onclick="toggleShow('openai')">显示</button>
+          </div>
+          <label class="lbl">Model</label>
+          <div class="irow">
+            <input type="text" id="model-openai" placeholder="gpt-4o" style="flex:1">
+            <button class="show-btn" onclick="fetchModels('openai')">获取</button>
+          </div>
+          <select id="models-openai" class="model-select" onchange="selectModel('openai',this.value)"><option value="">— 获取后选择 —</option></select>
+          <button class="btn-full btn-primary" onclick="saveProvider('openai')">保存</button>
+          <div id="msg-openai" class="status-txt"></div>
+        </div>
+        <!-- Google -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="cdot-google"></div><h4>Google · Gemini</h4></div>
+          <div class="chk-row"><input type="checkbox" id="active-google" onchange="toggleActive('google',this.checked)"><span>启用</span></div>
+          <label class="lbl">API Key</label>
+          <div class="irow">
+            <input type="password" id="key-google" placeholder="AIzaSy…">
+            <button class="show-btn" onclick="toggleShow('google')">显示</button>
+          </div>
+          <label class="lbl">Model</label>
+          <div class="irow">
+            <input type="text" id="model-google" placeholder="gemini-1.5-pro" style="flex:1">
+            <button class="show-btn" onclick="fetchModels('google')">获取</button>
+          </div>
+          <select id="models-google" class="model-select" onchange="selectModel('google',this.value)"><option value="">— 获取后选择 —</option></select>
+          <button class="btn-full btn-primary" onclick="saveProvider('google')">保存</button>
+          <div id="msg-google" class="status-txt"></div>
+        </div>
+      </div>
+
+      <p class="section-label">Agent LLM 分配</p>
+      <div class="card" style="padding:16px 20px">
+        <table class="agent-llm-table">
+          <thead><tr>
+            <th style="width:130px">Agent</th>
+            <th>Provider（留空=全局默认）</th>
+            <th>Model（留空=默认）</th>
+            <th></th>
+          </tr></thead>
+          <tbody id="agentLLMTable">
+            <tr><td colspan="4" style="color:#333;font-size:13px;padding:8px">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Integrations (BotPress-inspired status) -->
+  <div class="page" id="apiPage">
+    <div class="scroll-page">
+      <p class="section-label">连接状态</p>
+      <div class="int-status-strip" id="intStatusStrip">
+        <span style="color:#333;font-size:12px">加载中…</span>
+      </div>
+
+      <p class="section-label">外部 API 对接</p>
+      <div class="card-row">
+        <!-- WhatsApp -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="idot-whatsapp"></div><h4>WhatsApp</h4></div>
+          <div class="chk-row"><input type="checkbox" id="iactive-whatsapp" onchange="toggleIntegration('whatsapp',this.checked)"><span>启用</span></div>
+          <label class="lbl">Webhook URL（填入 Meta 后台）</label>
+          <div class="irow">
+            <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:#555;background:#080808" value="https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook">
+            <button class="show-btn" onclick="copyWAUrl()" style="white-space:nowrap">复制</button>
+          </div>
+          <label class="lbl">Phone Number ID</label>
+          <input type="text" id="int-whatsapp-phone_number_id" placeholder="1234567890">
+          <label class="lbl">Access Token（永久 Token）</label>
+          <input type="password" id="int-whatsapp-access_token" placeholder="EAAx…">
+          <label class="lbl">Webhook Verify Token（自定义，填入 Meta 后台）</label>
+          <input type="text" id="int-whatsapp-webhook_verify_token" placeholder="例：my_secret_token_2024">
+          <button class="btn-full btn-primary" onclick="saveIntegration('whatsapp',['phone_number_id','access_token','webhook_verify_token'])">保存</button>
+          <div id="imsg-whatsapp" class="status-txt"></div>
+        </div>
+        <!-- Email SMTP -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="idot-email_smtp"></div><h4>Email (SMTP)</h4></div>
+          <div class="chk-row"><input type="checkbox" id="iactive-email_smtp" onchange="toggleIntegration('email_smtp',this.checked)"><span>启用</span></div>
+          <label class="lbl">SMTP Host</label>
+          <input type="text" id="int-email_smtp-host" placeholder="smtp.gmail.com">
+          <label class="lbl">Port</label>
+          <input type="number" id="int-email_smtp-port" placeholder="587">
+          <label class="lbl">Username</label>
+          <input type="text" id="int-email_smtp-username" placeholder="you@gmail.com">
+          <label class="lbl">Password / App Password</label>
+          <input type="password" id="int-email_smtp-password" placeholder="••••••••">
+          <label class="lbl">From Address</label>
+          <input type="text" id="int-email_smtp-from_address" placeholder="you@gmail.com">
+          <button class="btn-full btn-primary" onclick="saveIntegration('email_smtp',['host','port','username','password','from_address'])">保存</button>
+          <div id="imsg-email_smtp" class="status-txt"></div>
+        </div>
+        <!-- SendGrid -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="idot-sendgrid"></div><h4>SendGrid</h4></div>
+          <div class="chk-row"><input type="checkbox" id="iactive-sendgrid" onchange="toggleIntegration('sendgrid',this.checked)"><span>启用</span></div>
+          <label class="lbl">API Key</label>
+          <input type="password" id="int-sendgrid-api_key" placeholder="SG.…">
+          <label class="lbl">From Address</label>
+          <input type="text" id="int-sendgrid-from_address" placeholder="noreply@yourdomain.com">
+          <button class="btn-full btn-primary" onclick="saveIntegration('sendgrid',['api_key','from_address'])">保存</button>
+          <div id="imsg-sendgrid" class="status-txt"></div>
+        </div>
+        <!-- Telegram -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="idot-telegram"></div><h4>Telegram Bot</h4></div>
+          <div class="chk-row"><input type="checkbox" id="iactive-telegram" onchange="toggleIntegration('telegram',this.checked)"><span>启用</span></div>
+          <label class="lbl">Bot Token</label>
+          <input type="password" id="int-telegram-bot_token" placeholder="123456:ABC…">
+          <label class="lbl">Default Chat ID</label>
+          <input type="text" id="int-telegram-chat_id" placeholder="-100123456789">
+          <button class="btn-full btn-primary" onclick="saveIntegration('telegram',['bot_token','chat_id'])">保存</button>
+          <div id="imsg-telegram" class="status-txt"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<!-- Log expand modal -->
+<div class="log-modal-bg" id="logModal" onclick="if(event.target===this)closeLogModal()">
+  <div class="log-modal">
+    <div class="log-modal-hd">
+      <h4 id="logModalTitle">对话内容</h4>
+      <button style="background:none;border:none;color:#555;font-size:18px;cursor:pointer;padding:4px" onclick="closeLogModal()">✕</button>
+    </div>
+    <div class="log-modal-body" id="logModalBody"></div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL  = 'https://ontumerafhimxvqtsijr.supabase.co'
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
+const EDGE_URL      = `${SUPABASE_URL}/functions/v1/orchestrator`
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON)
+const AGENT_ICONS   = {chat:'💬', crm:'🤝', account:'📊', code:'💻', cpl:'💰', cpr:'🎯', frequency:'🔁', marketing:'📣'}
+const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT', google:'Google · Gemini'}
+
+let sessionId = crypto.randomUUID()
+document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
+
+function newSession() {
+  sessionId = crypto.randomUUID()
+  document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
+  document.getElementById('messages').innerHTML = `
+    <div class="msg ai"><div class="msg-meta">orchestrator</div>新对话已开始。</div>`
+}
+
+// ── Page nav ──────────────────────────────────────────────────────────
+const pageLoaded = {}
+function showPage(id, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
+  document.getElementById(id+'Page').classList.add('active')
+  btn.classList.add('active')
+  if (!pageLoaded[id]) { pageLoaded[id] = true; loadPage(id) }
+}
+function loadPage(id) {
+  if (id === 'agents') loadAgents()
+  if (id === 'llm')    loadLLM()
+  if (id === 'api')    loadIntegrations()
+  if (id === 'logs')   { initLogsAgentFilter(); loadLogs() }
+  if (id === 'data')   initDataPage()
+}
+
+// ── Sidebar dots ──────────────────────────────────────────────────────
+async function loadSidebarDots() {
+  try {
+    const {data} = await db.from('provider_config').select('provider,active,model')
+    ;(data||[]).forEach(r => {
+      const dot = document.getElementById('dot-'+r.provider)
+      if (dot) dot.className = 'dot' + (r.active ? ' on' : '')
+      const mdl = document.getElementById('pvdm-'+r.provider)
+      if (mdl) mdl.textContent = r.active && r.model ? r.model.split('/').pop() : ''
+    })
+  } catch {}
+}
+loadSidebarDots()
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function esc(t) { return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
+function fmtTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return d.toLocaleDateString('zh') + ' ' + d.toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────
+document.getElementById('inputBox').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg() }
+})
+
+function addMsg(role, text, agent='', provider='') {
+  const box = document.getElementById('messages')
+  const div = document.createElement('div')
+  div.className = 'msg ' + (role === 'user' ? 'user' : 'ai')
+  if (role !== 'user') {
+    const md = typeof marked !== 'undefined' ? marked.parse(text) : esc(text)
+    div.innerHTML = `<div class="msg-meta">${agent ? esc(agent) : 'AI'}</div><div class="md">${md}</div>`
+  } else {
+    div.textContent = text
+  }
+  box.appendChild(div)
+  box.scrollTop = box.scrollHeight
+  return div
+}
+
+// ── Streaming helpers ────────────────────────────────────────────────
+function createStreamBubble() {
+  const box = document.getElementById('messages')
+  const div = document.createElement('div')
+  div.className = 'msg ai'
+  div.innerHTML = `<div class="msg-meta">AI</div><div class="md"></div><span class="stream-cursor">▌</span>`
+  box.appendChild(div)
+  box.scrollTop = box.scrollHeight
+  return div
+}
+function updateStreamBubble(div, text, agentName) {
+  const md = typeof marked !== 'undefined' ? marked.parse(text) : esc(text)
+  if (agentName) { const m = div.querySelector('.msg-meta'); if (m) m.textContent = AGENT_ICONS[agentName] ? (AGENT_ICONS[agentName]+' '+agentName) : agentName }
+  const mdEl = div.querySelector('.md'); if (mdEl) mdEl.innerHTML = md
+  const box = document.getElementById('messages'); box.scrollTop = box.scrollHeight
+}
+function finalizeStreamBubble(div, convId, agentId) {
+  const cursor = div.querySelector('.stream-cursor'); if (cursor) cursor.remove()
+  if (agentId) { const m = div.querySelector('.msg-meta'); if (m) m.textContent = (AGENT_ICONS[agentId]||'🤖') + ' ' + agentId }
+  if (convId) {
+    const fb = document.createElement('div'); fb.className = 'chat-fb'
+    fb.innerHTML = `<button class="fb-btn good" onclick="submitFeedback('${convId}','good',this)">👍</button><button class="fb-btn bad" onclick="submitFeedback('${convId}','bad',this)">👎</button>`
+    div.appendChild(fb)
+  }
+}
+
+async function sendMsg() {
+  const box = document.getElementById('inputBox')
+  const msg = box.value.trim()
+  if (!msg) return
+  box.value = ''
+  addMsg('user', msg)
+  const btn = document.getElementById('sendBtn')
+  btn.disabled = true
+  const bubble = createStreamBubble()
+  try {
+    const res = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, session_id: sessionId, stream: true })
+    })
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+    const reader  = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = '', fullText = ''
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n'); buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice(6).trim(); if (!raw) continue
+        try {
+          const evt = JSON.parse(raw)
+          if (evt.chunk !== undefined) {
+            fullText += evt.chunk
+            updateStreamBubble(bubble, fullText, null)
+          } else if (evt.done) {
+            sessionId = evt.session_id || sessionId
+            document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
+            updateStreamBubble(bubble, fullText, evt.agent)
+            finalizeStreamBubble(bubble, evt.conversation_id, evt.agent)
+          } else if (evt.error) {
+            updateStreamBubble(bubble, '⚠️ ' + evt.error, null)
+            const cursor = bubble.querySelector('.stream-cursor'); if (cursor) cursor.remove()
+          }
+        } catch { /* skip malformed */ }
+      }
+    }
+  } catch(e) {
+    updateStreamBubble(bubble, '⚠️ 连接失败：' + e.message, null)
+    const cursor = bubble.querySelector('.stream-cursor'); if (cursor) cursor.remove()
+  }
+  btn.disabled = false
+  box.focus()
+}
+
+// ── Agents ────────────────────────────────────────────────────────────
+async function loadAgents() {
+  try {
+    const {data:agents} = await db.from('agents').select('*').order('id')
+
+    const list = document.getElementById('agentList')
+    list.innerHTML = (agents||[]).map(a => `
+      <div class="agent-list-item" id="ali-${esc(a.id)}" onclick='selectAgent(${JSON.stringify(a).replace(/'/g,"&#39;")})'>
+        <span class="ali-dot${a.active?' on':''}"></span>
+        <span class="ali-name">${esc(a.name)}</span>
+        <span class="ali-pvd">${esc(a.provider||'—')}</span>
+      </div>`).join('')
+    if (_currentAgentId) {
+      const cur = (agents||[]).find(a => a.id === _currentAgentId)
+      if (cur) { selectAgent(cur); highlightListItem(cur.id) }
+    }
+  } catch(e) {
+    document.getElementById('agentList').innerHTML = `<p style="color:#ef4444;font-size:12px;padding:8px">加载失败</p>`
+  }
+}
+
+let _currentAgentId = null
+let _aeTestConvId = null
+
+function highlightListItem(id) {
+  document.querySelectorAll('.agent-list-item').forEach(el => el.classList.remove('active'))
+  const el = document.getElementById('ali-'+id)
+  if (el) el.classList.add('active')
+}
+
+function selectAgent(agent) {
+  if (typeof agent === 'string') agent = JSON.parse(agent)
+  _currentAgentId = agent.id
+  _aeTestConvId = null
+  highlightListItem(agent.id)
+  const editor = document.getElementById('agentEditor')
+  const icon = AGENT_ICONS[agent.id] || '🤖'
+  editor.innerHTML = `
+    <div class="ae-top">
+      <div class="ae-icon">${icon}</div>
+      <h3>${esc(agent.name)}</h3>
+      <div class="ae-toggle">
+        <span>${agent.active ? '已启用' : '已停用'}</span>
+        <label class="ts-wrap" title="启用/停用">
+          <input type="checkbox" id="aeActive" ${agent.active?'checked':''} onchange="aeToggleActive()">
+          <span class="ts-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="ae-body">
+      <input type="hidden" id="aeId" value="${esc(agent.id)}">
+      <div class="ae-field">
+        <label>Agent 名称</label>
+        <input type="text" id="aeName" value="${esc(agent.name||'')}" placeholder="Chat Agent">
+      </div>
+      <div class="ae-field">
+        <label>描述</label>
+        <input type="text" id="aeDesc" value="${esc(agent.description||'')}" placeholder="简短说明职责">
+      </div>
+      <div class="ae-row">
+        <div class="ae-field">
+          <label>Provider</label>
+          <select id="aeProvider" onchange="aeProviderChanged()">
+            <option value="">（全局默认）</option>
+            <option value="anthropic"${agent.provider==='anthropic'?' selected':''}>Anthropic</option>
+            <option value="openai"${agent.provider==='openai'?' selected':''}>OpenAI</option>
+            <option value="google"${agent.provider==='google'?' selected':''}>Google</option>
+          </select>
+        </div>
+        <div class="ae-field">
+          <label>Model</label>
+          <select id="aeModel">
+            <option value="">${agent.model || '（Provider 默认）'}</option>
+          </select>
+        </div>
+      </div>
+      <div class="ae-field">
+        <div class="ae-prompt-label">
+          <span>System Prompt</span>
+          <span class="ae-char" id="aeChar">0 字</span>
+        </div>
+        <div class="ae-prompt-wrap">
+          <textarea id="aePrompt" rows="9" oninput="aeUpdateChar()" placeholder="You are a helpful assistant…">${esc(agent.system_prompt||'')}</textarea>
+        </div>
+      </div>
+    </div>
+    <div class="ae-test-section">
+      <div class="ae-test-hd">── 测试对话</div>
+      <div class="ae-test-msgs" id="aeTestMsgs"></div>
+      <div class="ae-test-bar">
+        <input type="text" id="aeTestInput" placeholder="输入测试消息…" onkeydown="if(event.key==='Enter')aeTestSend()">
+        <button class="btn-primary" style="padding:8px 14px;font-size:12px;white-space:nowrap" onclick="aeTestSend()">发送</button>
+      </div>
+    </div>
+    <div class="ae-footer">
+      <button class="btn-danger" onclick="deleteAgent()">删除</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="ae-save-msg" id="aeSaveMsg"></span>
+        <button class="btn-primary" onclick="saveAgent()">保存更改</button>
+      </div>
+    </div>`
+  aeUpdateChar()
+  if (agent.provider) aeProviderChanged(agent.model)
+}
+
+function aeUpdateChar() {
+  const ta = document.getElementById('aePrompt')
+  const el = document.getElementById('aeChar')
+  if (ta && el) el.textContent = ta.value.length + ' 字'
+}
+
+async function aeToggleActive() {
+  const chk = document.getElementById('aeActive')
+  const lbl = chk?.closest('.ae-toggle')?.querySelector('span')
+  if (lbl) lbl.textContent = chk.checked ? '已启用' : '已停用'
+  const id = document.getElementById('aeId')?.value
+  if (id) {
+    await db.from('agents').update({active: chk.checked, updated_at: new Date().toISOString()}).eq('id', id)
+    const dot = document.querySelector(`#ali-${id} .ali-dot`)
+    if (dot) { dot.classList.toggle('on', chk.checked) }
+  }
+}
+
+async function aeProviderChanged(preselect) {
+  const provider = document.getElementById('aeProvider')?.value
+  const modelSel = document.getElementById('aeModel')
+  if (!modelSel) return
+  if (!provider) { modelSel.innerHTML = '<option value="">（Provider 默认）</option>'; return }
+  modelSel.innerHTML = '<option value="">加载中…</option>'
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'list_models', provider }) })
+    const { models } = await r.json()
+    modelSel.innerHTML = '<option value="">（Provider 默认）</option>' +
+      (models||[]).map(m => `<option value="${esc(m)}"${m===preselect?' selected':''}>${esc(m)}</option>`).join('')
+  } catch { modelSel.innerHTML = '<option value="">（加载失败）</option>' }
+}
+
+async function aeTestSend() {
+  const input = document.getElementById('aeTestInput')
+  const msgs = document.getElementById('aeTestMsgs')
+  const msg = input?.value.trim()
+  if (!msg || !msgs) return
+  input.value = ''
+  const agentId = document.getElementById('aeId')?.value
+  const addMsg = (role, text) => {
+    const d = document.createElement('div')
+    d.className = `ae-tmsg ${role}`
+    d.textContent = text
+    msgs.appendChild(d)
+    msgs.scrollTop = msgs.scrollHeight
+  }
+  addMsg('user', msg)
+  const typing = document.createElement('div')
+  typing.className = 'ae-tmsg ai'; typing.textContent = '…'; msgs.appendChild(typing)
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ message: msg, session_id: _aeTestConvId, target_agent: agentId }) })
+    const data = await r.json()
+    _aeTestConvId = data.session_id
+    typing.textContent = data.response || data.error || '无响应'
+  } catch(e) { typing.textContent = '请求失败：' + e.message }
+}
+
+async function saveAgent() {
+  const id = document.getElementById('aeId')?.value
+  if (!id) return
+  const data = {
+    name:          document.getElementById('aeName')?.value.trim(),
+    description:   document.getElementById('aeDesc')?.value.trim(),
+    system_prompt: document.getElementById('aePrompt')?.value.trim(),
+    provider:      document.getElementById('aeProvider')?.value || null,
+    model:         document.getElementById('aeModel')?.value || null,
+    active:        document.getElementById('aeActive')?.checked ?? true,
+    updated_at:    new Date().toISOString(),
+  }
+  const msg = document.getElementById('aeSaveMsg')
+  msg.textContent = '保存中…'; msg.className = 'ae-save-msg'
+  const {error} = await db.from('agents').update(data).eq('id', id)
+  if (error) { msg.className = 'ae-save-msg err'; msg.textContent = error.message; return }
+  msg.className = 'ae-save-msg ok'; msg.textContent = '✓ 已保存'
+  const li = document.getElementById('ali-'+id)
+  if (li) {
+    li.querySelector('.ali-name').textContent = data.name
+    li.querySelector('.ali-pvd').textContent = data.provider || '—'
+  }
+  setTimeout(() => { if (msg) msg.textContent = '' }, 3000)
+}
+
+async function deleteAgent() {
+  const id = document.getElementById('aeId')?.value
+  const name = document.getElementById('aeName')?.value
+  if (!id) return
+  if (!confirm(`确定删除 Agent「${name}」？此操作不可撤销。`)) return
+  await db.from('agents').delete().eq('id', id)
+  _currentAgentId = null
+  document.getElementById('agentEditor').innerHTML = '<div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>'
+  pageLoaded['agents'] = false
+  loadAgents()
+}
+
+async function newAgent() {
+  const id = 'agent_' + Date.now()
+  const {error} = await db.from('agents').insert({
+    id, name: '新 Agent', description: '', system_prompt: '', active: true,
+  })
+  if (error) { alert('创建失败：' + error.message); return }
+  pageLoaded['agents'] = false
+  _currentAgentId = id
+  await loadAgents()
+}
+
+// ── Data page ─────────────────────────────────────────────────────────
+let _dataTab = 'leads'
+const DATA_PAGE_SIZE = 50
+
+function initDataPage() {
+  switchDataTab(_dataTab, true)
+}
+
+function switchDataTab(tab, force = false) {
+  if (_dataTab === tab && !force) return
+  _dataTab = tab
+  document.querySelectorAll('.data-tab').forEach(el => el.classList.remove('active'))
+  const tabEl = document.getElementById('dtab-' + tab)
+  if (tabEl) tabEl.classList.add('active')
+  document.getElementById('dt-leads').style.display      = tab === 'leads'     ? 'flex' : 'none'
+  document.getElementById('dt-adreports').style.display  = tab === 'adreports' ? 'flex' : 'none'
+  if (tab === 'leads')     loadLeads(1)
+  if (tab === 'adreports') loadAdReports(1)
+}
+
+function dataTagHtml(labels) {
+  if (!labels) return ''
+  const tags = [...labels.matchAll(/\[([^\]]+)\]/g)].map(m => m[1])
+  return tags.map(t => {
+    const cls = /google/i.test(t) ? 'google' : /potential|follow/i.test(t) ? 'potential' : /meta|facebook/i.test(t) ? 'meta' : ''
+    return `<span class="dtag ${cls}">${esc(t)}</span>`
+  }).join('')
+}
+
+function renderPagination(page, total, onPage) {
+  const totalPages = Math.ceil(total / DATA_PAGE_SIZE)
+  const pg = document.getElementById('dataPagination')
+  if (totalPages <= 1) { pg.innerHTML = ''; return }
+  const pages = []
+  for (let i = 1; i <= totalPages; i++) {
+    if (i === 1 || i === totalPages || Math.abs(i - page) <= 2) pages.push(i)
+    else if (pages[pages.length-1] !== '…') pages.push('…')
+  }
+  pg.innerHTML = `
+    <button class="pg-btn" onclick="${onPage}(${page-1})" ${page<=1?'disabled':''}>←</button>
+    ${pages.map(p => p === '…'
+      ? `<span class="pg-info">…</span>`
+      : `<button class="pg-btn ${p===page?'active':''}" onclick="${onPage}(${p})">${p}</button>`
+    ).join('')}
+    <button class="pg-btn" onclick="${onPage}(${page+1})" ${page>=totalPages?'disabled':''}>→</button>
+    <span class="pg-info">${page} / ${totalPages} 页，共 ${total} 条</span>`
+}
+
+function showDataStats(stats) {
+  const el = document.getElementById('dataStats')
+  if (!stats?.length) { el.style.display = 'none'; return }
+  el.style.display = 'flex'
+  el.innerHTML = stats.map(s => `
+    <div class="dstat ${s.cls||''}">
+      <div class="dstat-val">${s.val}</div>
+      <div class="dstat-lbl">${s.lbl}</div>
+    </div>`).join('')
+}
+
+let _leadsCache = [], _adsCache = []
+
+async function loadLeads(page = 1) {
+  const wrap = document.getElementById('dataTableWrap')
+  wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>'
+  const search = document.getElementById('dLeadsSearch')?.value.trim()
+  const from   = document.getElementById('dLeadsFrom')?.value
+  const to     = document.getElementById('dLeadsTo')?.value
+  const label  = document.getElementById('dLeadsLabel')?.value.trim()
+  try {
+    let q = db.from('leads').select('*', { count: 'exact' })
+      .order('date', { ascending: false })
+      .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
+    if (search) q = q.or(`name.ilike.%${search}%,phone.ilike.%${search}%`)
+    if (from)   q = q.gte('date', from)
+    if (to)     q = q.lte('date', to)
+    if (label)  q = q.ilike('labels', `%${label}%`)
+    const { data, count, error } = await q
+    if (error) throw error
+    _leadsCache = data || []
+    document.getElementById('dLeadsCount').textContent = `共 ${count} 条`
+    // Stats
+    const googleCount = (data||[]).filter(r => r.labels?.includes('[Google]')).length
+    const potentialCount = (data||[]).filter(r => r.labels?.includes('[potential]')).length
+    showDataStats([
+      { val: count, lbl: '总 Leads', cls: 'blue' },
+      { val: googleCount, lbl: 'Google 来源' },
+      { val: potentialCount, lbl: '潜在客户', cls: 'green' },
+    ])
+    if (!data?.length) { wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">无数据</p>'; return }
+    wrap.innerHTML = `<table class="data-table">
+      <thead><tr><th>日期</th><th>姓名</th><th>电话</th><th>标签</th></tr></thead>
+      <tbody>${data.map(r => `<tr>
+        <td class="num">${r.date||''}</td>
+        <td class="name">${esc(r.name||'')}</td>
+        <td class="num">${esc(r.phone||'')}</td>
+        <td><div class="data-tags">${dataTagHtml(r.labels)}</div></td>
+      </tr>`).join('')}</tbody>
+    </table>`
+    renderPagination(page, count, 'loadLeads')
+  } catch(e) {
+    wrap.innerHTML = `<p style="color:#ef4444;font-size:13px;padding:40px 0;text-align:center">加载失败：${esc(e.message)}</p>`
+  }
+}
+
+async function loadAdReports(page = 1) {
+  const wrap = document.getElementById('dataTableWrap')
+  wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>'
+  const search = document.getElementById('dAdsSearch')?.value.trim()
+  const from   = document.getElementById('dAdsFrom')?.value
+  const to     = document.getElementById('dAdsTo')?.value
+  try {
+    let q = db.from('ad_reports').select('campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts', { count: 'exact' })
+      .order('amount_spent_myr', { ascending: false })
+      .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
+    if (search) q = q.ilike('campaign_name', `%${search}%`)
+    if (from)   q = q.gte('day', from)
+    if (to)     q = q.lte('day', to)
+    const { data, count, error } = await q
+    if (error) throw error
+    _adsCache = data || []
+    document.getElementById('dAdsCount').textContent = `共 ${count} 条`
+    // Stats
+    const totalSpend = (data||[]).reduce((s,r) => s + (Number(r.amount_spent_myr)||0), 0)
+    const totalResults = (data||[]).reduce((s,r) => s + (Number(r.results)||0), 0)
+    const avgFreq = (data||[]).length ? ((data||[]).reduce((s,r)=>s+(Number(r.frequency)||0),0)/(data||[]).length) : 0
+    showDataStats([
+      { val: 'MYR ' + totalSpend.toFixed(0), lbl: '总花费', cls: 'amber' },
+      { val: totalResults, lbl: '总结果', cls: 'blue' },
+      { val: totalSpend > 0 && totalResults > 0 ? 'MYR ' + (totalSpend/totalResults).toFixed(2) : '—', lbl: '平均 CPR', cls: 'green' },
+      { val: avgFreq.toFixed(2), lbl: '平均频率', cls: avgFreq > 3 ? 'amber' : '' },
+    ])
+    if (!data?.length) { wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">无数据</p>'; return }
+    wrap.innerHTML = `<table class="data-table">
+      <thead><tr><th>活动名称</th><th>日期</th><th>花费(MYR)</th><th>结果</th><th>CPR</th><th>频率</th><th>CPM</th><th>CTR</th><th>点击</th><th>新联系</th></tr></thead>
+      <tbody>${data.map(r => `<tr>
+        <td class="name" style="max-width:200px" title="${esc(r.campaign_name||'')}">${esc(r.campaign_name||'')}</td>
+        <td class="num">${r.day||''}</td>
+        <td class="spend">${r.amount_spent_myr!=null?Number(r.amount_spent_myr).toFixed(2):''}</td>
+        <td class="num">${r.results??''}</td>
+        <td class="num">${r.cost_per_result!=null?Number(r.cost_per_result).toFixed(2):''}</td>
+        <td class="num" style="color:${Number(r.frequency)>3?'#f59e0b':'#666'}">${r.frequency!=null?Number(r.frequency).toFixed(2):''}</td>
+        <td class="num">${r.cpm!=null?Number(r.cpm).toFixed(2):''}</td>
+        <td class="num">${r.ctr_all!=null?(Number(r.ctr_all)*100).toFixed(2)+'%':''}</td>
+        <td class="num">${r.link_clicks??''}</td>
+        <td class="num">${r.new_messaging_contacts??''}</td>
+      </tr>`).join('')}</tbody>
+    </table>`
+    renderPagination(page, count, 'loadAdReports')
+  } catch(e) {
+    wrap.innerHTML = `<p style="color:#ef4444;font-size:13px;padding:40px 0;text-align:center">加载失败：${esc(e.message)}</p>`
+  }
+}
+
+function exportCSV(tab) {
+  const data = tab === 'leads' ? _leadsCache : _adsCache
+  if (!data?.length) { alert('没有数据可导出，请先搜索'); return }
+  const keys = Object.keys(data[0])
+  const csv = [keys.join(','), ...data.map(r => keys.map(k => {
+    const v = r[k] ?? ''
+    return String(v).includes(',') ? `"${String(v).replace(/"/g,'""')}"` : String(v)
+  }).join(','))].join('\n')
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `${tab}_${new Date().toISOString().slice(0,10)}.csv`
+  a.click()
+}
+
+function openLogModal(title, content) {
+  document.getElementById('logModalTitle').textContent = title
+  document.getElementById('logModalBody').textContent = content
+  document.getElementById('logModal').classList.add('open')
+}
+function closeLogModal() { document.getElementById('logModal').classList.remove('open') }
+
+// ── Logs (Dify-inspired) ───────────────────────────────────────────────
+let _logsAgentFilterInited = false
+async function initLogsAgentFilter() {
+  if (_logsAgentFilterInited) return
+  _logsAgentFilterInited = true
+  const sel = document.getElementById('logsAgentFilter')
+  if (!sel) return
+  try {
+    const {data:agents} = await db.from('agents').select('id,name').order('id')
+    const cur = sel.value
+    sel.innerHTML = '<option value="">全部 Agent</option>' +
+      (agents||[]).map(a => `<option value="${esc(a.id)}"${a.id===cur?' selected':''}>${esc(a.name)}</option>`).join('')
+  } catch { /* keep default */ }
+}
+
+async function loadLogs() {
+  const body = document.getElementById('logsBody')
+  body.innerHTML = '<div class="log-empty">加载中…</div>'
+  try {
+    let q = db.from('conversations').select('*').order('created_at', {ascending:false}).limit(200)
+    const af = document.getElementById('logsAgentFilter')?.value
+    const rf = document.getElementById('logsRoleFilter')?.value
+    const ff = document.getElementById('logsFeedbackFilter')?.value
+    if (af) q = q.eq('agent', af)
+    if (rf) q = q.eq('role', rf)
+    if (ff === 'good') q = q.eq('feedback', 'good')
+    else if (ff === 'bad') q = q.eq('feedback', 'bad')
+    else if (ff === 'none') q = q.is('feedback', null)
+    const {data, error} = await q
+    if (error) throw error
+    if (!data?.length) { body.innerHTML = '<div class="log-empty">暂无记录</div>'; return }
+    document.getElementById('logsCount').textContent = data.length + ' 条'
+    body.innerHTML = data.map(r => {
+      const fbBtns = r.role === 'assistant' ? `
+        <div class="fb-btns">
+          <button class="fb-btn good${r.feedback==='good'?' active':''}" onclick="submitFeedback('${r.id}','good',this)">👍</button>
+          <button class="fb-btn bad${r.feedback==='bad'?' active':''}" onclick="submitFeedback('${r.id}','bad',this)">👎</button>
+        </div>` : '<span></span>'
+      return `
+      <div class="log-row">
+        <span class="log-role ${r.role}">${r.role==='user'?'User':'AI'}</span>
+        <span class="log-agent">${esc(r.agent||'—')}</span>
+        <span class="log-content" style="cursor:pointer" title="点击查看全文" onclick='openLogModal(${JSON.stringify((r.role==="user"?"👤 ":"🤖 ")+(r.agent||"")+" · "+new Date(r.created_at).toLocaleString())}, ${JSON.stringify(r.content||"")})'>${esc(r.content)}</span>
+        <span class="log-time">${fmtTime(r.created_at)}</span>
+        ${fbBtns}
+      </div>`
+    }).join('')
+  } catch(e) {
+    body.innerHTML = `<div class="log-empty" style="color:#ef4444">加载失败：${esc(e.message)}</div>`
+  }
+}
+function reloadLogs() { pageLoaded['logs'] = false; _logsAgentFilterInited = false; initLogsAgentFilter(); loadLogs() }
+
+async function submitFeedback(id, val, btn) {
+  const row = btn.closest('.fb-btns')
+  const current = btn.classList.contains('active') ? null : val
+  await db.from('conversations').update({feedback: current}).eq('id', id)
+  row.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'))
+  if (current) {
+    btn.classList.add('active')
+    // 触发学习（静默后台，不阻塞 UI）
+    fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'learn', conversation_id: id, feedback: current })
+    }).catch(() => {})
+  }
+}
+
+// ── LLM Config ────────────────────────────────────────────────────────
+async function loadLLM() {
+  try {
+    const [{data:providers}, {data:pref}, {data:agents}] = await Promise.all([
+      db.from('provider_config').select('*'),
+      db.from('user_prefs').select('value').eq('key','default_provider').maybeSingle(),
+      db.from('agents').select('id,name,provider,model').order('id'),
+    ])
+    if (pref?.value) document.getElementById('defaultSel').value = pref.value
+    ;(providers||[]).forEach(r => {
+      const p = r.provider
+      if (r.api_key) document.getElementById('key-'+p).value = r.api_key
+      if (r.model)   document.getElementById('model-'+p).value = r.model
+      const cb = document.getElementById('active-'+p)
+      if (cb) cb.checked = !!r.active
+      ;['cdot-','dot-'].forEach(pre => {
+        const el = document.getElementById(pre+p)
+        if (el) el.className = 'dot'+(r.active?' on':'')
+      })
+    })
+    document.getElementById('agentLLMTable').innerHTML = (agents||[]).map(a => `
+      <tr>
+        <td style="font-size:13px;color:#bbb">${esc(a.name)}</td>
+        <td>
+          <select id="allm-${a.id}">
+            <option value="">（全局默认）</option>
+            <option value="anthropic" ${a.provider==='anthropic'?'selected':''}>Anthropic</option>
+            <option value="openai"    ${a.provider==='openai'?'selected':''}>OpenAI</option>
+            <option value="google"    ${a.provider==='google'?'selected':''}>Google</option>
+          </select>
+        </td>
+        <td><input type="text" id="amdl-${a.id}" value="${esc(a.model||'')}" placeholder="默认"></td>
+        <td><button class="sm-btn" onclick="saveAgentLLM('${a.id}')">保存</button></td>
+      </tr>`).join('')
+    document.getElementById('syncMsg').textContent = '✓ 已从 Supabase 同步'
+    document.getElementById('syncMsg').style.color = '#22c55e'
+  } catch(e) {
+    document.getElementById('syncMsg').textContent = '⚠ 读取失败（'+e.message+'）— 仍可直接填写保存'
+    document.getElementById('syncMsg').style.color = '#f59e0b'
+  }
+}
+
+function toggleShow(p) {
+  const el = document.getElementById('key-'+p)
+  el.type = el.type==='password'?'text':'password'
+}
+
+async function fetchModels(p) {
+  const key = document.getElementById('key-'+p).value.trim()
+  const listEl = document.getElementById('models-'+p)
+  if (!key) { listEl.innerHTML = '<span style="font-size:12px;color:#ef4444">请先填写 API Key</span>'; return }
+  listEl.innerHTML = '<span style="font-size:12px;color:#555">获取中…</span>'
+  try {
+    const res  = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'list_models', provider:p, api_key:key})})
+    const data = await res.json()
+    if (data.error) { listEl.innerHTML = `<span style="font-size:12px;color:#ef4444">${esc(data.error)}</span>`; return }
+    const current = document.getElementById('model-'+p).value.trim()
+    const models = data.models || []
+    listEl.innerHTML = `<option value="">— 选择模型 —</option>` +
+      models.map(m => `<option value="${esc(m)}"${m===current?' selected':''}>${esc(m)}</option>`).join('')
+    listEl.style.display = 'block'
+  } catch(e) {
+    listEl.style.display = 'none'
+    alert('获取模型失败：' + e.message)
+  }
+}
+
+function selectModel(p, model) {
+  if (model) document.getElementById('model-'+p).value = model
+}
+async function toggleActive(p, active) {
+  ;['cdot-','dot-'].forEach(pre => { const el=document.getElementById(pre+p); if(el) el.className='dot'+(active?' on':'') })
+  await db.from('provider_config').update({active}).eq('provider',p)
+  loadSidebarDots()
+}
+async function saveProvider(p) {
+  const key   = document.getElementById('key-'+p).value.trim()
+  const model = document.getElementById('model-'+p).value.trim()
+  const msgEl = document.getElementById('msg-'+p)
+  if (!key) { msgEl.className='status-txt err'; msgEl.textContent='请输入 API Key'; return }
+  msgEl.className='status-txt'; msgEl.textContent='保存中…'
+  const {error} = await db.from('provider_config').update({api_key:key,model,active:true}).eq('provider',p)
+  msgEl.className = 'status-txt '+(error?'err':'ok')
+  msgEl.textContent = error ? error.message : '✓ 已保存，已启用'
+  if (!error) {
+    const cb = document.getElementById('active-'+p)
+    if (cb) cb.checked = true
+    loadSidebarDots()
+  }
+}
+async function saveAgentLLM(id) {
+  const provider = document.getElementById('allm-'+id).value || null
+  const model    = document.getElementById('amdl-'+id).value.trim() || null
+  const btn = document.querySelector(`#allm-${id}`)?.closest('tr')?.querySelector('.sm-btn')
+  const {error} = await db.from('agents').update({provider,model,updated_at:new Date().toISOString()}).eq('id',id)
+  if (btn) { btn.textContent=error?'✗ 失败':'✓ 已保存'; setTimeout(()=>btn.textContent='保存',2000) }
+}
+async function saveDefault() {
+  const p = document.getElementById('defaultSel').value
+  const m = document.getElementById('defaultMsg')
+  m.textContent='保存中…'; m.className='status-txt'
+  const {error} = await db.from('user_prefs').upsert({key:'default_provider',value:p,confidence:1.0},{onConflict:'key'})
+  m.className='status-txt '+(error?'err':'ok')
+  m.textContent = error ? error.message : `✓ 已设为 ${PROVIDER_LABELS[p]}`
+}
+
+// ── API Integrations ──────────────────────────────────────────────────
+const INT_LABELS = {whatsapp:'WhatsApp', email_smtp:'Email SMTP', sendgrid:'SendGrid', telegram:'Telegram'}
+
+function copyWAUrl() {
+  const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook'
+  navigator.clipboard.writeText(url).then(() => {
+    const btn = event.target
+    const orig = btn.textContent
+    btn.textContent = '已复制 ✓'
+    setTimeout(() => btn.textContent = orig, 2000)
+  })
+}
+async function loadIntegrations() {
+  try {
+    const {data} = await db.from('api_integrations').select('*')
+    // Status strip
+    const strip = document.getElementById('intStatusStrip')
+    strip.innerHTML = (data||[]).map(r =>
+      `<span class="int-chip${r.active?' on':''}"><span class="dot${r.active?' on':''}"></span>${INT_LABELS[r.service]||r.service}</span>`
+    ).join('')
+    ;(data||[]).forEach(r => {
+      const cb = document.getElementById('iactive-'+r.service)
+      if (cb) cb.checked = !!r.active
+      const dot = document.getElementById('idot-'+r.service)
+      if (dot) dot.className = 'dot'+(r.active?' on':'')
+      Object.entries(r.credentials||{}).forEach(([k,v]) => {
+        const el = document.getElementById(`int-${r.service}-${k}`)
+        if (el && v) el.value = v
+      })
+    })
+  } catch {}
+}
+async function toggleIntegration(service, active) {
+  const dot = document.getElementById('idot-'+service)
+  if (dot) dot.className = 'dot'+(active?' on':'')
+  await db.from('api_integrations').update({active}).eq('service',service)
+  loadIntegrations()
+}
+async function saveIntegration(service, keys) {
+  const credentials = {}
+  keys.forEach(k => { const el=document.getElementById(`int-${service}-${k}`); if(el?.value.trim()) credentials[k]=el.value.trim() })
+  const active = document.getElementById('iactive-'+service)?.checked
+  const msg = document.getElementById('imsg-'+service)
+  msg.className='status-txt'; msg.textContent='保存中…'
+  const {error} = await db.from('api_integrations').update({credentials,active,updated_at:new Date().toISOString()}).eq('service',service)
+  msg.className='status-txt '+(error?'err':'ok')
+  msg.textContent = error ? error.message : '✓ 已保存'
+  if (!error) loadIntegrations()
+}
+</script>
+</body>
+</html>
