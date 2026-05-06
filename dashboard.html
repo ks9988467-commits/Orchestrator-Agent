@@ -253,6 +253,19 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .int-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;border:1px solid #1e1e1e;background:#111;color:#555}
 .int-chip.on{border-color:#05966940;color:#34d399;background:#05966910}
 .int-chip .dot{width:5px;height:5px}
+/* ── Finance status badges ── */
+.fin-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
+.fin-badge.pending{background:#f59e0b18;color:#f59e0b;border:1px solid #f59e0b30}
+.fin-badge.paid{background:#22c55e18;color:#22c55e;border:1px solid #22c55e30}
+.fin-badge.overdue{background:#ef444418;color:#ef4444;border:1px solid #ef444430}
+.fin-badge.cancelled{background:#33333318;color:#555;border:1px solid #33333330}
+.fin-form label{display:block;font-size:11px;color:#555;margin:12px 0 5px}
+.fin-form label:first-child{margin-top:0}
+.fin-form input,.fin-form select,.fin-form textarea{width:100%;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:9px 12px;color:#d4d4d4;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.fin-form input:focus,.fin-form select:focus,.fin-form textarea:focus{border-color:#333}
+.fin-form select{cursor:pointer}
+.fin-form .fin-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fin-actions{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -277,6 +290,9 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </button>
     <button class="nav-item" onclick="showPage('data',this)">
       <span class="icon">🗄️</span> 数据
+    </button>
+    <button class="nav-item" onclick="showPage('finance',this)">
+      <span class="icon">💰</span> 财务
     </button>
     <div class="nav-divider"></div>
     <button class="nav-item" onclick="showPage('llm',this)">
@@ -575,8 +591,57 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </div>
   </div>
 
+  <!-- Finance -->
+  <div class="page" id="financePage">
+    <div class="data-page">
+      <div class="data-tabs">
+        <button class="data-tab active" id="ftab-invoices" onclick="switchFinanceTab('invoices')">🧾 发票</button>
+        <button class="data-tab" id="ftab-receipts" onclick="switchFinanceTab('receipts')">📄 回单</button>
+      </div>
+
+      <!-- Invoice toolbar -->
+      <div class="data-toolbar" id="ft-invoices">
+        <input type="text" id="fInvSearch" placeholder="供应商 / 发票号…" onkeydown="if(event.key==='Enter')loadInvoices(1)">
+        <select id="fInvStatus" onchange="loadInvoices(1)">
+          <option value="">全部状态</option>
+          <option value="pending">待付</option>
+          <option value="paid">已付</option>
+          <option value="overdue">逾期</option>
+          <option value="cancelled">取消</option>
+        </select>
+        <button class="data-search-btn" onclick="loadInvoices(1)">搜索</button>
+        <button class="data-search-btn" style="background:#059669" onclick="showFinanceModal('invoice')">+ 新增发票</button>
+        <span class="data-count" id="fInvCount"></span>
+      </div>
+
+      <!-- Receipt toolbar -->
+      <div class="data-toolbar" id="ft-receipts" style="display:none">
+        <input type="text" id="fRecSearch" placeholder="供应商 / 回单号…" onkeydown="if(event.key==='Enter')loadReceipts(1)">
+        <button class="data-search-btn" onclick="loadReceipts(1)">搜索</button>
+        <button class="data-search-btn" style="background:#059669" onclick="showFinanceModal('receipt')">+ 新增回单</button>
+        <span class="data-count" id="fRecCount"></span>
+      </div>
+
+      <div class="data-table-wrap" id="financeTableWrap">
+        <p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>
+      </div>
+      <div class="data-pagination" id="financePagination"></div>
+    </div>
+  </div>
+
 </div><!-- /main -->
 </div><!-- /app -->
+
+<!-- Finance Modal -->
+<div class="log-modal-bg" id="financeModal" onclick="if(event.target===this)closeFinanceModal()">
+  <div class="log-modal" style="max-width:520px;width:90%">
+    <div class="log-modal-hd">
+      <h4 id="financeModalTitle">新增发票</h4>
+      <button style="background:none;border:none;color:#555;font-size:18px;cursor:pointer;padding:4px" onclick="closeFinanceModal()">✕</button>
+    </div>
+    <div class="log-modal-body" id="financeModalBody" style="padding:20px"></div>
+  </div>
+</div>
 
 <!-- Log expand modal -->
 <div class="log-modal-bg" id="logModal" onclick="if(event.target===this)closeLogModal()">
@@ -617,11 +682,12 @@ function showPage(id, btn) {
   if (!pageLoaded[id]) { pageLoaded[id] = true; loadPage(id) }
 }
 function loadPage(id) {
-  if (id === 'agents') loadAgents()
-  if (id === 'llm')    loadLLM()
-  if (id === 'api')    loadIntegrations()
-  if (id === 'logs')   { initLogsAgentFilter(); loadLogs() }
-  if (id === 'data')   initDataPage()
+  if (id === 'agents')  loadAgents()
+  if (id === 'llm')     loadLLM()
+  if (id === 'api')     loadIntegrations()
+  if (id === 'logs')    { initLogsAgentFilter(); loadLogs() }
+  if (id === 'data')    initDataPage()
+  if (id === 'finance') initFinancePage()
 }
 
 // ── Sidebar dots ──────────────────────────────────────────────────────
@@ -1353,6 +1419,287 @@ async function saveIntegration(service, keys) {
   msg.className='status-txt '+(error?'err':'ok')
   msg.textContent = error ? error.message : '✓ 已保存'
   if (!error) loadIntegrations()
+}
+
+// ── Finance Page ──────────────────────────────────────────────────────
+let finTab = 'invoices'
+const FIN_PAGE_SIZE = 20
+let finInvPage = 1, finRecPage = 1
+
+function initFinancePage() {
+  loadInvoices(1)
+}
+
+function switchFinanceTab(tab) {
+  finTab = tab
+  document.getElementById('ftab-invoices').className = 'data-tab' + (tab==='invoices'?' active':'')
+  document.getElementById('ftab-receipts').className = 'data-tab' + (tab==='receipts'?' active':'')
+  document.getElementById('ft-invoices').style.display = tab==='invoices' ? '' : 'none'
+  document.getElementById('ft-receipts').style.display = tab==='receipts' ? '' : 'none'
+  if (tab==='invoices') loadInvoices(1)
+  else loadReceipts(1)
+}
+
+const STATUS_LABELS = {pending:'待付', paid:'已付', overdue:'逾期', cancelled:'取消'}
+const METHOD_LABELS = {bank_transfer:'银行转账', cash:'现金', cheque:'支票', online:'线上付款', other:'其他'}
+
+async function loadInvoices(page=1) {
+  finInvPage = page
+  const wrap = document.getElementById('financeTableWrap')
+  const search = document.getElementById('fInvSearch').value.trim()
+  const status = document.getElementById('fInvStatus').value
+  wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>'
+
+  let q = db.from('invoices').select('*', {count:'exact'})
+    .order('invoice_date', {ascending:false})
+    .range((page-1)*FIN_PAGE_SIZE, page*FIN_PAGE_SIZE-1)
+  if (search) q = q.or(`vendor.ilike.%${search}%,invoice_no.ilike.%${search}%`)
+  if (status) q = q.eq('status', status)
+
+  const {data, count, error} = await q
+  document.getElementById('fInvCount').textContent = error ? '' : `共 ${count} 条`
+  if (error) { wrap.innerHTML = `<p style="color:#ef4444;padding:20px">${error.message}</p>`; return }
+
+  if (!data.length) { wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">暂无发票</p>'; return }
+
+  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:1px solid #1e1e1e">
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">发票号</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">供应商</th>
+      <th style="padding:10px 12px;text-align:right;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">金额</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">发票日期</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">到期日</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">状态</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">操作</th>
+    </tr></thead>
+    <tbody>
+      ${data.map(r => `<tr style="border-bottom:1px solid #0f0f0f" onmouseover="this.style.background='#0d0d0d'" onmouseout="this.style.background=''">
+        <td style="padding:10px 12px;color:#888;font-family:monospace;font-size:12px">${esc(r.invoice_no)}</td>
+        <td style="padding:10px 12px;color:#ccc">${esc(r.vendor)}</td>
+        <td style="padding:10px 12px;text-align:right;color:#fff;font-family:monospace">${r.currency} ${Number(r.amount).toFixed(2)}</td>
+        <td style="padding:10px 12px;color:#666;font-family:monospace;font-size:12px">${r.invoice_date||''}</td>
+        <td style="padding:10px 12px;color:#666;font-family:monospace;font-size:12px">${r.due_date||'—'}</td>
+        <td style="padding:10px 12px"><span class="fin-badge ${r.status}">${STATUS_LABELS[r.status]||r.status}</span></td>
+        <td style="padding:10px 12px;display:flex;gap:6px">
+          <button class="show-btn" onclick="editInvoice('${r.id}')">编辑</button>
+          <button class="show-btn" style="color:#ef444488" onclick="deleteInvoice('${r.id}')">删除</button>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`
+
+  renderFinPagination(count, page, 'invoices')
+}
+
+async function loadReceipts(page=1) {
+  finRecPage = page
+  const wrap = document.getElementById('financeTableWrap')
+  const search = document.getElementById('fRecSearch').value.trim()
+  wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>'
+
+  let q = db.from('payment_receipts').select('*, invoices(invoice_no)', {count:'exact'})
+    .order('payment_date', {ascending:false})
+    .range((page-1)*FIN_PAGE_SIZE, page*FIN_PAGE_SIZE-1)
+  if (search) q = q.or(`vendor.ilike.%${search}%,receipt_no.ilike.%${search}%`)
+
+  const {data, count, error} = await q
+  document.getElementById('fRecCount').textContent = error ? '' : `共 ${count} 条`
+  if (error) { wrap.innerHTML = `<p style="color:#ef4444;padding:20px">${error.message}</p>`; return }
+
+  if (!data.length) { wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">暂无回单</p>'; return }
+
+  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:1px solid #1e1e1e">
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">回单号</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">供应商</th>
+      <th style="padding:10px 12px;text-align:right;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">付款金额</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">付款日期</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">付款方式</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">关联发票</th>
+      <th style="padding:10px 12px;text-align:left;font-size:10px;color:#444;font-weight:500;text-transform:uppercase;letter-spacing:.06em">操作</th>
+    </tr></thead>
+    <tbody>
+      ${data.map(r => `<tr style="border-bottom:1px solid #0f0f0f" onmouseover="this.style.background='#0d0d0d'" onmouseout="this.style.background=''">
+        <td style="padding:10px 12px;color:#888;font-family:monospace;font-size:12px">${esc(r.receipt_no||'—')}</td>
+        <td style="padding:10px 12px;color:#ccc">${esc(r.vendor)}</td>
+        <td style="padding:10px 12px;text-align:right;color:#fff;font-family:monospace">${r.currency} ${Number(r.amount_paid).toFixed(2)}</td>
+        <td style="padding:10px 12px;color:#666;font-family:monospace;font-size:12px">${r.payment_date||''}</td>
+        <td style="padding:10px 12px;color:#666">${METHOD_LABELS[r.payment_method]||r.payment_method||'—'}</td>
+        <td style="padding:10px 12px;color:#555;font-family:monospace;font-size:12px">${r.invoices?.invoice_no||'—'}</td>
+        <td style="padding:10px 12px;display:flex;gap:6px">
+          <button class="show-btn" onclick="editReceipt('${r.id}')">编辑</button>
+          <button class="show-btn" style="color:#ef444488" onclick="deleteReceipt('${r.id}')">删除</button>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`
+
+  renderFinPagination(count, page, 'receipts')
+}
+
+function renderFinPagination(total, page, type) {
+  const pages = Math.ceil(total / FIN_PAGE_SIZE)
+  const el = document.getElementById('financePagination')
+  if (pages <= 1) { el.innerHTML = ''; return }
+  let html = ''
+  for (let i=1; i<=pages; i++) {
+    html += `<button class="data-search-btn" style="${i===page?'background:#1d4ed8':'background:#1a1a1a;color:#555'};margin:0 2px;padding:5px 11px" onclick="type==='invoices'?loadInvoices(${i}):loadReceipts(${i})">${i}</button>`
+  }
+  el.innerHTML = `<div style="padding:12px 28px;display:flex;align-items:center;gap:4px">${html}</div>`
+}
+
+// Invoice Modal
+function showFinanceModal(type, data={}) {
+  document.getElementById('financeModalTitle').textContent = type==='invoice' ? (data.id?'编辑发票':'新增发票') : (data.id?'编辑回单':'新增回单')
+  const body = document.getElementById('financeModalBody')
+  if (type==='invoice') {
+    body.innerHTML = `<div class="fin-form">
+      <div class="fin-row">
+        <div><label>发票号 *</label><input id="fi-invoice_no" placeholder="INV-001" value="${esc(data.invoice_no||'')}"></div>
+        <div><label>供应商 *</label><input id="fi-vendor" placeholder="Facebook Ads" value="${esc(data.vendor||'')}"></div>
+      </div>
+      <div class="fin-row">
+        <div><label>金额 *</label><input id="fi-amount" type="number" step="0.01" placeholder="0.00" value="${data.amount||''}"></div>
+        <div><label>货币</label><select id="fi-currency">
+          <option value="MYR" ${(data.currency||'MYR')==='MYR'?'selected':''}>MYR</option>
+          <option value="USD" ${data.currency==='USD'?'selected':''}>USD</option>
+          <option value="SGD" ${data.currency==='SGD'?'selected':''}>SGD</option>
+        </select></div>
+      </div>
+      <div class="fin-row">
+        <div><label>发票日期 *</label><input id="fi-invoice_date" type="date" value="${data.invoice_date||''}"></div>
+        <div><label>到期日</label><input id="fi-due_date" type="date" value="${data.due_date||''}"></div>
+      </div>
+      <div class="fin-row">
+        <div><label>状态</label><select id="fi-status">
+          <option value="pending" ${(data.status||'pending')==='pending'?'selected':''}>待付</option>
+          <option value="paid" ${data.status==='paid'?'selected':''}>已付</option>
+          <option value="overdue" ${data.status==='overdue'?'selected':''}>逾期</option>
+          <option value="cancelled" ${data.status==='cancelled'?'selected':''}>取消</option>
+        </select></div>
+        <div><label>类别</label><input id="fi-category" placeholder="广告费 / 服务费…" value="${esc(data.category||'')}"></div>
+      </div>
+      <label>备注</label><textarea id="fi-notes" rows="2" style="resize:vertical">${esc(data.notes||'')}</textarea>
+      <label>发票文件 URL</label><input id="fi-file_url" placeholder="https://…" value="${esc(data.file_url||'')}">
+      <div id="fi-msg" class="status-txt"></div>
+      <div class="fin-actions">
+        <button class="btn-secondary" onclick="closeFinanceModal()">取消</button>
+        <button class="btn-primary" onclick="saveInvoice('${data.id||''}')">保存</button>
+      </div>
+    </div>`
+  } else {
+    body.innerHTML = `<div class="fin-form">
+      <div class="fin-row">
+        <div><label>回单号</label><input id="fr-receipt_no" placeholder="REC-001" value="${esc(data.receipt_no||'')}"></div>
+        <div><label>供应商 *</label><input id="fr-vendor" placeholder="Facebook Ads" value="${esc(data.vendor||'')}"></div>
+      </div>
+      <div class="fin-row">
+        <div><label>付款金额 *</label><input id="fr-amount_paid" type="number" step="0.01" placeholder="0.00" value="${data.amount_paid||''}"></div>
+        <div><label>货币</label><select id="fr-currency">
+          <option value="MYR" ${(data.currency||'MYR')==='MYR'?'selected':''}>MYR</option>
+          <option value="USD" ${data.currency==='USD'?'selected':''}>USD</option>
+          <option value="SGD" ${data.currency==='SGD'?'selected':''}>SGD</option>
+        </select></div>
+      </div>
+      <div class="fin-row">
+        <div><label>付款日期 *</label><input id="fr-payment_date" type="date" value="${data.payment_date||''}"></div>
+        <div><label>付款方式</label><select id="fr-payment_method">
+          <option value="">—</option>
+          <option value="bank_transfer" ${data.payment_method==='bank_transfer'?'selected':''}>银行转账</option>
+          <option value="cash" ${data.payment_method==='cash'?'selected':''}>现金</option>
+          <option value="cheque" ${data.payment_method==='cheque'?'selected':''}>支票</option>
+          <option value="online" ${data.payment_method==='online'?'selected':''}>线上付款</option>
+          <option value="other" ${data.payment_method==='other'?'selected':''}>其他</option>
+        </select></div>
+      </div>
+      <label>关联发票 ID（可选）</label><input id="fr-invoice_id" placeholder="粘贴发票 UUID…" value="${esc(data.invoice_id||'')}">
+      <label>回单图片/文件 URL</label><input id="fr-receipt_url" placeholder="https://…" value="${esc(data.receipt_url||'')}">
+      <label>备注</label><textarea id="fr-notes" rows="2" style="resize:vertical">${esc(data.notes||'')}</textarea>
+      <div id="fr-msg" class="status-txt"></div>
+      <div class="fin-actions">
+        <button class="btn-secondary" onclick="closeFinanceModal()">取消</button>
+        <button class="btn-primary" onclick="saveReceipt('${data.id||''}')">保存</button>
+      </div>
+    </div>`
+  }
+  document.getElementById('financeModal').style.display = 'flex'
+}
+
+function closeFinanceModal() {
+  document.getElementById('financeModal').style.display = 'none'
+}
+
+async function saveInvoice(id) {
+  const msg = document.getElementById('fi-msg')
+  const payload = {
+    invoice_no: document.getElementById('fi-invoice_no').value.trim(),
+    vendor:     document.getElementById('fi-vendor').value.trim(),
+    amount:     parseFloat(document.getElementById('fi-amount').value),
+    currency:   document.getElementById('fi-currency').value,
+    invoice_date: document.getElementById('fi-invoice_date').value,
+    due_date:   document.getElementById('fi-due_date').value || null,
+    status:     document.getElementById('fi-status').value,
+    category:   document.getElementById('fi-category').value.trim() || null,
+    notes:      document.getElementById('fi-notes').value.trim() || null,
+    file_url:   document.getElementById('fi-file_url').value.trim() || null,
+    updated_at: new Date().toISOString()
+  }
+  if (!payload.invoice_no || !payload.vendor || !payload.amount || !payload.invoice_date) {
+    msg.className='status-txt err'; msg.textContent='请填写必填项（发票号、供应商、金额、日期）'; return
+  }
+  const {error} = id
+    ? await db.from('invoices').update(payload).eq('id', id)
+    : await db.from('invoices').insert(payload)
+  msg.className = 'status-txt ' + (error ? 'err' : 'ok')
+  msg.textContent = error ? error.message : '✓ 已保存'
+  if (!error) { setTimeout(closeFinanceModal, 600); loadInvoices(finInvPage) }
+}
+
+async function saveReceipt(id) {
+  const msg = document.getElementById('fr-msg')
+  const payload = {
+    receipt_no:     document.getElementById('fr-receipt_no').value.trim() || null,
+    vendor:         document.getElementById('fr-vendor').value.trim(),
+    amount_paid:    parseFloat(document.getElementById('fr-amount_paid').value),
+    currency:       document.getElementById('fr-currency').value,
+    payment_date:   document.getElementById('fr-payment_date').value,
+    payment_method: document.getElementById('fr-payment_method').value || null,
+    invoice_id:     document.getElementById('fr-invoice_id').value.trim() || null,
+    receipt_url:    document.getElementById('fr-receipt_url').value.trim() || null,
+    notes:          document.getElementById('fr-notes').value.trim() || null,
+    updated_at:     new Date().toISOString()
+  }
+  if (!payload.vendor || !payload.amount_paid || !payload.payment_date) {
+    msg.className='status-txt err'; msg.textContent='请填写必填项（供应商、金额、付款日期）'; return
+  }
+  const {error} = id
+    ? await db.from('payment_receipts').update(payload).eq('id', id)
+    : await db.from('payment_receipts').insert(payload)
+  msg.className = 'status-txt ' + (error ? 'err' : 'ok')
+  msg.textContent = error ? error.message : '✓ 已保存'
+  if (!error) { setTimeout(closeFinanceModal, 600); loadReceipts(finRecPage) }
+}
+
+async function editInvoice(id) {
+  const {data} = await db.from('invoices').select('*').eq('id', id).single()
+  if (data) showFinanceModal('invoice', data)
+}
+
+async function editReceipt(id) {
+  const {data} = await db.from('payment_receipts').select('*').eq('id', id).single()
+  if (data) showFinanceModal('receipt', data)
+}
+
+async function deleteInvoice(id) {
+  if (!confirm('确认删除此发票？')) return
+  await db.from('invoices').delete().eq('id', id)
+  loadInvoices(finInvPage)
+}
+
+async function deleteReceipt(id) {
+  if (!confirm('确认删除此回单？')) return
+  await db.from('payment_receipts').delete().eq('id', id)
+  loadReceipts(finRecPage)
 }
 </script>
 </body>
