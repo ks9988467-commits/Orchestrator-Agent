@@ -158,6 +158,34 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .model-select{display:none;width:100%;margin-top:6px;padding:7px 10px;background:#161616;border:1px solid #333;border-radius:6px;color:#ccc;font-size:12px;font-family:monospace;cursor:pointer;outline:none}
 .model-select option{background:#1a1a1a;color:#ccc}
 
+/* ── Skills page ── */
+.skills-layout{display:flex;flex:1;overflow:hidden}
+.skills-agents{width:200px;flex-shrink:0;border-right:1px solid #1a1a1a;overflow-y:auto;padding:8px}
+.skills-agent-btn{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:none;width:100%;text-align:left;transition:background .15s;-webkit-appearance:none}
+.skills-agent-btn:hover{background:#161616}
+.skills-agent-btn.active{background:#1d4ed812;border-color:#1d4ed830}
+.skills-agent-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0}
+.skills-agent-name{flex:1;font-size:13px;color:#aaa;font-weight:500}
+.skills-agent-btn.active .skills-agent-name{color:#93c5fd}
+.skills-badge{font-size:10px;background:#1e1e1e;color:#444;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
+.skills-badge.has{background:#22c55e18;color:#22c55e}
+.skills-panel{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.skills-toolbar{padding:14px 20px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.skills-toolbar h3{font-size:14px;font-weight:600;color:#fff;flex:1}
+.skills-body{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:8px}
+.skill-card{background:#111;border:1px solid #1e1e1e;border-radius:9px;padding:13px 16px;display:flex;align-items:flex-start;gap:12px;transition:border-color .15s}
+.skill-card:hover{border-color:#2a2a2a}
+.skill-type{font-size:14px;flex-shrink:0;margin-top:1px}
+.skill-content{flex:1;min-width:0}
+.skill-text{font-size:13px;color:#ccc;line-height:1.6;word-break:break-word}
+.skill-meta{font-size:11px;color:#333;margin-top:5px;font-family:monospace}
+.skill-del{background:none;border:1px solid #1e1e1e;border-radius:6px;color:#444;padding:4px 9px;font-size:12px;cursor:pointer;flex-shrink:0;transition:all .15s;-webkit-appearance:none}
+.skill-del:hover{border-color:#ef444460;color:#ef4444;background:#ef444410}
+.skills-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#2a2a2a;gap:8px}
+.skills-empty p{font-size:13px}
+.skills-empty span{font-size:32px}
+.skills-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2a2a2a;font-size:13px}
+
 /* ── Logs page (Dify-inspired) ── */
 .logs-toolbar{padding:14px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .logs-filter{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:6px 12px;color:#888;font-size:12px;cursor:pointer;outline:none}
@@ -319,6 +347,9 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </button>
     <button class="nav-item" onclick="showPage('data',this)">
       <span class="icon">🗄️</span> 数据
+    </button>
+    <button class="nav-item" onclick="showPage('skills',this)">
+      <span class="icon">🧠</span> 技能库
     </button>
     <div class="nav-divider"></div>
     <button class="nav-item" onclick="showPage('llm',this)">
@@ -617,6 +648,22 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </div>
   </div>
 
+  <!-- ── Skills Page ── -->
+  <div class="page" id="skillsPage">
+    <div class="page-header">
+      <h2>🧠 Agent 技能库</h2>
+      <p>Agents 从用户反馈中积累的技能和避坑规则</p>
+    </div>
+    <div class="skills-layout">
+      <!-- Agent list -->
+      <div class="skills-agents" id="skillsAgentList"></div>
+      <!-- Skills panel -->
+      <div class="skills-panel" id="skillsPanel">
+        <div class="skills-placeholder">← 选择一个 Agent 查看技能</div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /main -->
 </div><!-- /app -->
 
@@ -733,6 +780,7 @@ function loadPage(id) {
   if (id === 'api')    loadIntegrations()
   if (id === 'logs')   { initLogsAgentFilter(); loadLogs() }
   if (id === 'data')   initDataPage()
+  if (id === 'skills') loadSkillsPage()
 }
 
 // ── Sidebar dots ──────────────────────────────────────────────────────
@@ -1616,6 +1664,163 @@ async function saveIntegration(service, keys) {
   msg.className='status-txt '+(error?'err':'ok')
   msg.textContent = error ? error.message : '✓ 已保存'
   if (!error) loadIntegrations()
+}
+
+// ── Toast notifications ──────────────────────────────────────────────
+function toast(msg, type='success') {
+  let t = document.getElementById('toastEl')
+  if (!t) {
+    t = document.createElement('div')
+    t.id = 'toastEl'
+    t.style.cssText = 'position:fixed;bottom:28px;right:28px;padding:10px 18px;border-radius:8px;font-size:13px;z-index:9999;transition:opacity .3s;pointer-events:none;font-family:inherit'
+    document.body.appendChild(t)
+  }
+  t.textContent = msg
+  t.style.background = type === 'error' ? '#ef444422' : '#22c55e22'
+  t.style.color = type === 'error' ? '#ef4444' : '#22c55e'
+  t.style.border = `1px solid ${type === 'error' ? '#ef444440' : '#22c55e40'}`
+  t.style.opacity = '1'
+  clearTimeout(t._timer)
+  t._timer = setTimeout(() => { t.style.opacity = '0' }, 2500)
+}
+
+// ── Skills Page ──────────────────────────────────────────────────────
+const AGENT_META = {
+  chat:      { icon: '💬', label: 'Chat Agent' },
+  crm:       { icon: '👥', label: 'CRM Agent' },
+  account:   { icon: '💰', label: 'Account Agent' },
+  code:      { icon: '💻', label: 'Code Agent' },
+  cpl:       { icon: '📊', label: 'CPL Agent' },
+  cpr:       { icon: '📈', label: 'CPR Agent' },
+  frequency: { icon: '🔁', label: 'Frequency Agent' },
+}
+let skillsCurrentAgent = null
+let skillsData = {}   // { agentId: [skill rows] }
+
+async function loadSkillsPage() {
+  const listEl = document.getElementById('skillsAgentList')
+  listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#333;font-size:12px">加载中…</div>'
+
+  // Load all agents + all skills in parallel
+  const [{ data: agents }, { data: skills }] = await Promise.all([
+    db.from('agents').select('id,name,active').order('id'),
+    db.from('agent_skills').select('id,agent,skill,created_at').order('created_at', { ascending: false })
+  ])
+
+  // Group skills by agent
+  skillsData = {}
+  ;(skills || []).forEach(s => {
+    if (!skillsData[s.agent]) skillsData[s.agent] = []
+    skillsData[s.agent].push(s)
+  })
+
+  // Render agent list
+  listEl.innerHTML = ''
+  ;(agents || []).forEach(a => {
+    const cnt = (skillsData[a.id] || []).length
+    const meta = AGENT_META[a.id] || { icon: '🤖', label: a.name }
+    const btn = document.createElement('button')
+    btn.className = 'skills-agent-btn' + (skillsCurrentAgent === a.id ? ' active' : '')
+    btn.dataset.id = a.id
+    btn.innerHTML = `
+      <span class="skills-agent-icon">${meta.icon}</span>
+      <span class="skills-agent-name">${meta.label}</span>
+      <span class="skills-badge${cnt > 0 ? ' has' : ''}">${cnt}</span>`
+    btn.onclick = () => selectSkillsAgent(a.id, meta, btn)
+    listEl.appendChild(btn)
+  })
+
+  // If an agent was previously selected, re-render its panel
+  if (skillsCurrentAgent) {
+    const activeBtn = listEl.querySelector(`[data-id="${skillsCurrentAgent}"]`)
+    if (activeBtn) renderSkillsPanel(skillsCurrentAgent, AGENT_META[skillsCurrentAgent] || { icon: '🤖', label: skillsCurrentAgent })
+  }
+}
+
+function selectSkillsAgent(agentId, meta, btn) {
+  document.querySelectorAll('.skills-agent-btn').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+  skillsCurrentAgent = agentId
+  renderSkillsPanel(agentId, meta)
+}
+
+function renderSkillsPanel(agentId, meta) {
+  const panel = document.getElementById('skillsPanel')
+  const list = skillsData[agentId] || []
+
+  const clearBtn = list.length > 0
+    ? `<button class="btn-danger" style="font-size:12px;padding:6px 14px" onclick="clearAgentSkills('${agentId}')">清空全部</button>`
+    : ''
+
+  panel.innerHTML = `
+    <div class="skills-toolbar">
+      <h3>${meta.icon} ${meta.label} <span style="font-size:12px;color:#444;font-weight:400">— ${list.length} 条技能</span></h3>
+      ${clearBtn}
+    </div>
+    <div class="skills-body" id="skillsBody-${agentId}">
+      ${list.length === 0
+        ? `<div class="skills-empty"><span>🌱</span><p>还没有积累任何技能</p><p style="font-size:11px;color:#222">给对话评分后自动学习</p></div>`
+        : list.map(s => renderSkillCard(s)).join('')
+      }
+    </div>`
+}
+
+function renderSkillCard(s) {
+  const isAvoid = s.skill.toLowerCase().startsWith('avoid')
+  const icon = isAvoid ? '⚠️' : '✅'
+  const date = new Date(s.created_at).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return `
+    <div class="skill-card" id="skill-${s.id}">
+      <span class="skill-type">${icon}</span>
+      <div class="skill-content">
+        <div class="skill-text">${escHtml(s.skill)}</div>
+        <div class="skill-meta">${date}</div>
+      </div>
+      <button class="skill-del" onclick="deleteSkill(${s.id},'${s.agent}')">删除</button>
+    </div>`
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+async function deleteSkill(id, agentId) {
+  const card = document.getElementById('skill-'+id)
+  if (card) { card.style.opacity='0.4'; card.style.pointerEvents='none' }
+  const { error } = await db.from('agent_skills').delete().eq('id', id)
+  if (error) {
+    toast('删除失败', 'error')
+    if (card) { card.style.opacity=''; card.style.pointerEvents='' }
+    return
+  }
+  // Remove from local cache
+  if (skillsData[agentId]) {
+    skillsData[agentId] = skillsData[agentId].filter(s => s.id !== id)
+  }
+  // Re-render panel + update badge
+  const meta = AGENT_META[agentId] || { icon: '🤖', label: agentId }
+  renderSkillsPanel(agentId, meta)
+  updateSkillsBadge(agentId)
+  toast('技能已删除', 'success')
+}
+
+async function clearAgentSkills(agentId) {
+  if (!confirm(`确定清空 ${AGENT_META[agentId]?.label || agentId} 的全部技能？此操作不可撤销。`)) return
+  const { error } = await db.from('agent_skills').delete().eq('agent', agentId)
+  if (error) { toast('清空失败', 'error'); return }
+  skillsData[agentId] = []
+  const meta = AGENT_META[agentId] || { icon: '🤖', label: agentId }
+  renderSkillsPanel(agentId, meta)
+  updateSkillsBadge(agentId)
+  toast('已清空技能库', 'success')
+}
+
+function updateSkillsBadge(agentId) {
+  const btn = document.querySelector(`.skills-agent-btn[data-id="${agentId}"] .skills-badge`)
+  if (!btn) return
+  const cnt = (skillsData[agentId] || []).length
+  btn.textContent = cnt
+  btn.className = 'skills-badge' + (cnt > 0 ? ' has' : '')
 }
 </script>
 </body>
