@@ -670,14 +670,17 @@ async function sendOtp() {
   const errEl = document.getElementById('lockOtpErr')
   if (!email) { errEl.textContent = '请输入邮箱'; return }
   errEl.textContent = '发送中…'
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 15000)
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'send_otp', email }) })
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'send_otp', email }), signal: ctrl.signal })
+    clearTimeout(timer)
     const d = await r.json()
     if (d.ok) {
       document.getElementById('lockOtpStep1').style.display = 'none'
       document.getElementById('lockOtpStep2').style.display = 'block'
     } else { errEl.textContent = d.error || '发送失败' }
-  } catch(e) { errEl.textContent = '网络错误，请重试' }
+  } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
 }
 async function verifyOtp() {
   const email = document.getElementById('lockEmailInput').value.trim()
@@ -685,14 +688,17 @@ async function verifyOtp() {
   const errEl = document.getElementById('lockCodeErr')
   if (!code) { errEl.textContent = '请输入验证码'; return }
   errEl.textContent = '验证中…'
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 15000)
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'verify_otp', email, code }) })
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'verify_otp', email, code }), signal: ctrl.signal })
+    clearTimeout(timer)
     const d = await r.json()
     if (d.ok) {
       localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
       document.getElementById('lockScreen').classList.add('hidden')
     } else { errEl.textContent = d.error || '验证码错误' }
-  } catch(e) { errEl.textContent = '网络错误，请重试' }
+  } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
 }
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1412,6 +1418,7 @@ async function submitFeedback(id, val, btn) {
   const row = btn.closest('.fb-btns, .chat-fb')
   const current = btn.classList.contains('active') ? null : val
   await db.from('conversations').update({feedback: current}).eq('id', id)
+  if (!row) return
   row.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'))
   if (current) {
     btn.classList.add('active')
@@ -1514,7 +1521,11 @@ async function saveProvider(p) {
   const keyEl = document.getElementById('key-'+p)
   const key   = keyEl.dataset.masked === 'true' ? null : keyEl.value.trim()
   const model = document.getElementById('model-'+p).value.trim()
-  const active = document.getElementById('active-'+p)?.checked ?? true
+  const cb    = document.getElementById('active-'+p)
+  // 如果填了新 key，自动启用；否则读复选框状态
+  let active = cb?.checked ?? true
+  if (key) active = true
+  if (cb) cb.checked = active
   const msgEl = document.getElementById('msg-'+p)
   if (key === '') { msgEl.className='status-txt err'; msgEl.textContent='请输入 API Key'; return }
   msgEl.className='status-txt'; msgEl.textContent='保存中…'
@@ -1524,6 +1535,7 @@ async function saveProvider(p) {
   msgEl.className = 'status-txt '+(error?'err':'ok')
   msgEl.textContent = error ? error.message : '✓ 已保存'
   if (!error) {
+    ;['cdot-','dot-'].forEach(pre => { const el=document.getElementById(pre+p); if(el) el.className='dot'+(active?' on':'') })
     loadSidebarDots()
   }
 }
