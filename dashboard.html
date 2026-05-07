@@ -253,9 +253,32 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .int-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;border:1px solid #1e1e1e;background:#111;color:#555}
 .int-chip.on{border-color:#05966940;color:#34d399;background:#05966910}
 .int-chip .dot{width:5px;height:5px}
+
+/* ── Lock Screen ── */
+#lockScreen{position:fixed;inset:0;z-index:9999;background:#0a0a0a;display:flex;align-items:center;justify-content:center}
+#lockScreen.hidden{display:none}
+.lock-card{background:#111;border:1px solid #1e1e1e;border-radius:16px;padding:40px 36px;width:340px;text-align:center}
+.lock-logo{font-size:36px;margin-bottom:12px}
+.lock-title{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
+.lock-sub{font-size:12px;color:#555;margin-bottom:28px}
+.lock-input{width:100%;background:#0a0a0a;border:1px solid #222;border-radius:8px;padding:11px 14px;color:#d4d4d4;font-size:14px;outline:none;text-align:center;letter-spacing:2px;font-family:inherit;transition:border-color .15s}
+.lock-input:focus{border-color:#1d4ed8}
+.lock-btn{width:100%;margin-top:14px;background:#1d4ed8;border:none;border-radius:8px;color:#fff;padding:11px;font-size:14px;cursor:pointer;font-weight:600;transition:background .15s}
+.lock-btn:hover{background:#2563eb}
+.lock-err{font-size:12px;color:#ef4444;margin-top:10px;min-height:18px}
 </style>
 </head>
 <body>
+<div id="lockScreen">
+  <div class="lock-card">
+    <div class="lock-logo">🧠</div>
+    <div class="lock-title">Orchestrator Agent</div>
+    <div class="lock-sub">请输入访问密码</div>
+    <input id="lockInput" type="password" class="lock-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')checkLock()">
+    <button class="lock-btn" onclick="checkLock()">进入</button>
+    <div class="lock-err" id="lockErr"></div>
+  </div>
+</div>
 <div id="app">
 
 <!-- Sidebar -->
@@ -434,10 +457,10 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <!-- Anthropic -->
         <div class="card">
           <div class="card-hd"><div class="dot" id="cdot-anthropic"></div><h4>Anthropic · Claude</h4></div>
-          <div class="chk-row"><input type="checkbox" id="active-anthropic" onchange="toggleActive('anthropic',this.checked)"><span>启用</span></div>
+          <div class="chk-row"><input type="checkbox" id="active-anthropic"><span>启用</span></div>
           <label class="lbl">API Key</label>
           <div class="irow">
-            <input type="password" id="key-anthropic" placeholder="sk-ant-…">
+            <input type="password" id="key-anthropic" placeholder="sk-ant-…" onfocus="if(this.dataset.masked==='true'){this.value='';this.dataset.masked='false'}">
             <button class="show-btn" onclick="toggleShow('anthropic')">显示</button>
           </div>
           <label class="lbl">Model</label>
@@ -452,10 +475,10 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <!-- OpenAI -->
         <div class="card">
           <div class="card-hd"><div class="dot" id="cdot-openai"></div><h4>OpenAI · GPT</h4></div>
-          <div class="chk-row"><input type="checkbox" id="active-openai" onchange="toggleActive('openai',this.checked)"><span>启用</span></div>
+          <div class="chk-row"><input type="checkbox" id="active-openai"><span>启用</span></div>
           <label class="lbl">API Key</label>
           <div class="irow">
-            <input type="password" id="key-openai" placeholder="sk-…">
+            <input type="password" id="key-openai" placeholder="sk-…" onfocus="if(this.dataset.masked==='true'){this.value='';this.dataset.masked='false'}">
             <button class="show-btn" onclick="toggleShow('openai')">显示</button>
           </div>
           <label class="lbl">Model</label>
@@ -470,10 +493,10 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <!-- Google -->
         <div class="card">
           <div class="card-hd"><div class="dot" id="cdot-google"></div><h4>Google · Gemini</h4></div>
-          <div class="chk-row"><input type="checkbox" id="active-google" onchange="toggleActive('google',this.checked)"><span>启用</span></div>
+          <div class="chk-row"><input type="checkbox" id="active-google"><span>启用</span></div>
           <label class="lbl">API Key</label>
           <div class="irow">
-            <input type="password" id="key-google" placeholder="AIzaSy…">
+            <input type="password" id="key-google" placeholder="AIzaSy…" onfocus="if(this.dataset.masked==='true'){this.value='';this.dataset.masked='false'}">
             <button class="show-btn" onclick="toggleShow('google')">显示</button>
           </div>
           <label class="lbl">Model</label>
@@ -521,7 +544,7 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
           <label class="lbl">Webhook URL（填入 Meta 后台）</label>
           <div class="irow">
             <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:#555;background:#080808" value="https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook">
-            <button class="show-btn" onclick="copyWAUrl()" style="white-space:nowrap">复制</button>
+            <button class="show-btn" onclick="copyWAUrl(this)" style="white-space:nowrap">复制</button>
           </div>
           <label class="lbl">Phone Number ID</label>
           <input type="text" id="int-whatsapp-phone_number_id" placeholder="1234567890">
@@ -590,6 +613,33 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 </div>
 
 <script>
+// ── Lock Screen ───────────────────────────────────────────────────────
+const LOCK_PWD = 'orchestrator2024'
+const LOCK_KEY = 'oa_unlocked'
+const LOCK_TTL = 24 * 60 * 60 * 1000
+;(function(){
+  try {
+    const s = localStorage.getItem(LOCK_KEY)
+    if (s && Date.now() < JSON.parse(s).exp) {
+      document.getElementById('lockScreen').classList.add('hidden')
+    }
+  } catch {}
+})()
+function checkLock() {
+  const v = document.getElementById('lockInput').value
+  if (v === LOCK_PWD) {
+    localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
+    document.getElementById('lockScreen').classList.add('hidden')
+    document.getElementById('lockInput').value = ''
+    document.getElementById('lockErr').textContent = ''
+  } else {
+    document.getElementById('lockErr').textContent = '密码错误，请重试'
+    document.getElementById('lockInput').value = ''
+    document.getElementById('lockInput').focus()
+  }
+}
+// ─────────────────────────────────────────────────────────────────────
+
 const SUPABASE_URL  = 'https://ontumerafhimxvqtsijr.supabase.co'
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
 const EDGE_URL      = `${SUPABASE_URL}/functions/v1/orchestrator`
@@ -598,7 +648,6 @@ const AGENT_ICONS   = {chat:'💬', crm:'🤝', account:'📊', code:'💻', cpl
 const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT', google:'Google · Gemini'}
 
 let sessionId = crypto.randomUUID()
-document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
 
 function newSession() {
   sessionId = crypto.randomUUID()
@@ -636,8 +685,6 @@ async function loadSidebarDots() {
     })
   } catch {}
 }
-loadSidebarDots()
-
 // ── Helpers ───────────────────────────────────────────────────────────
 function esc(t) { return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
 function fmtTime(ts) {
@@ -647,8 +694,12 @@ function fmtTime(ts) {
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────
-document.getElementById('inputBox').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg() }
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
+  loadSidebarDots()
+  document.getElementById('inputBox').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg() }
+  })
 })
 
 function addMsg(role, text, agent='', provider='') {
@@ -683,11 +734,27 @@ function updateStreamBubble(div, text, agentName) {
   const box = document.getElementById('messages'); box.scrollTop = box.scrollHeight
 }
 function finalizeStreamBubble(div, convId, agentId) {
-  const cursor = div.querySelector('.stream-cursor'); if (cursor) cursor.remove()
-  if (agentId) { const m = div.querySelector('.msg-meta'); if (m) m.textContent = (AGENT_ICONS[agentId]||'🤖') + ' ' + agentId }
+  const cursor = div.querySelector('.stream-cursor')
+  if (cursor) cursor.remove()
+  if (agentId) {
+    const m = div.querySelector('.msg-meta')
+    if (m) m.textContent = (AGENT_ICONS[agentId]||'🤖') + ' ' + agentId
+  }
   if (convId) {
-    const fb = document.createElement('div'); fb.className = 'chat-fb'
-    fb.innerHTML = `<button class="fb-btn good" onclick="submitFeedback('${convId}','good',this)">👍</button><button class="fb-btn bad" onclick="submitFeedback('${convId}','bad',this)">👎</button>`
+    const fb = document.createElement('div')
+    fb.className = 'chat-fb'
+    const goodBtn = document.createElement('button')
+    goodBtn.className = 'fb-btn good'
+    goodBtn.textContent = '👍'
+    goodBtn.dataset.convId = String(convId)
+    goodBtn.addEventListener('click', function() { submitFeedback(this.dataset.convId, 'good', this) })
+    const badBtn = document.createElement('button')
+    badBtn.className = 'fb-btn bad'
+    badBtn.textContent = '👎'
+    badBtn.dataset.convId = String(convId)
+    badBtn.addEventListener('click', function() { submitFeedback(this.dataset.convId, 'bad', this) })
+    fb.appendChild(goodBtn)
+    fb.appendChild(badBtn)
     div.appendChild(fb)
   }
 }
@@ -711,29 +778,33 @@ async function sendMsg() {
     const reader  = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = '', fullText = ''
-    while (true) {
-      const { done, value } = await reader.read(); if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n'); buf = lines.pop() ?? ''
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const raw = line.slice(6).trim(); if (!raw) continue
-        try {
-          const evt = JSON.parse(raw)
-          if (evt.chunk !== undefined) {
-            fullText += evt.chunk
-            updateStreamBubble(bubble, fullText, null)
-          } else if (evt.done) {
-            sessionId = evt.session_id || sessionId
-            document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
-            updateStreamBubble(bubble, fullText, evt.agent)
-            finalizeStreamBubble(bubble, evt.conversation_id, evt.agent)
-          } else if (evt.error) {
-            updateStreamBubble(bubble, '⚠️ ' + evt.error, null)
-            const cursor = bubble.querySelector('.stream-cursor'); if (cursor) cursor.remove()
-          }
-        } catch { /* skip malformed */ }
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n'); buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim(); if (!raw) continue
+          try {
+            const evt = JSON.parse(raw)
+            if (evt.chunk !== undefined) {
+              fullText += evt.chunk
+              updateStreamBubble(bubble, fullText, null)
+            } else if (evt.done) {
+              sessionId = evt.session_id || sessionId
+              document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
+              updateStreamBubble(bubble, fullText, evt.agent)
+              finalizeStreamBubble(bubble, evt.conversation_id, evt.agent)
+            } else if (evt.error) {
+              updateStreamBubble(bubble, '⚠️ ' + evt.error, null)
+            }
+          } catch { /* skip malformed */ }
+        }
       }
+    } finally {
+      const cursor = bubble.querySelector('.stream-cursor')
+      if (cursor) cursor.remove()
     }
   } catch(e) {
     updateStreamBubble(bubble, '⚠️ 连接失败：' + e.message, null)
@@ -748,9 +819,11 @@ async function loadAgents() {
   try {
     const {data:agents} = await db.from('agents').select('*').order('id')
 
+    _agentsMap = {}
+    ;(agents||[]).forEach(a => _agentsMap[a.id] = a)
     const list = document.getElementById('agentList')
     list.innerHTML = (agents||[]).map(a => `
-      <div class="agent-list-item" id="ali-${esc(a.id)}" onclick='selectAgent(${JSON.stringify(a).replace(/'/g,"&#39;")})'>
+      <div class="agent-list-item" id="ali-${esc(a.id)}" onclick="selectAgentById('${esc(a.id)}')">
         <span class="ali-dot${a.active?' on':''}"></span>
         <span class="ali-name">${esc(a.name)}</span>
         <span class="ali-pvd">${esc(a.provider||'—')}</span>
@@ -766,11 +839,17 @@ async function loadAgents() {
 
 let _currentAgentId = null
 let _aeTestConvId = null
+let _agentsMap = {}
 
 function highlightListItem(id) {
   document.querySelectorAll('.agent-list-item').forEach(el => el.classList.remove('active'))
   const el = document.getElementById('ali-'+id)
   if (el) el.classList.add('active')
+}
+
+function selectAgentById(id) {
+  const agent = _agentsMap[id]
+  if (agent) selectAgent(agent)
 }
 
 function selectAgent(agent) {
@@ -815,7 +894,7 @@ function selectAgent(agent) {
         <div class="ae-field">
           <label>Model</label>
           <select id="aeModel">
-            <option value="">${agent.model || '（Provider 默认）'}</option>
+            <option value="${esc(agent.model||'')}" selected>${esc(agent.model) || '（Provider 默认）'}</option>
           </select>
         </div>
       </div>
@@ -845,7 +924,6 @@ function selectAgent(agent) {
       </div>
     </div>`
   aeUpdateChar()
-  if (agent.provider) aeProviderChanged(agent.model)
 }
 
 function aeUpdateChar() {
@@ -871,14 +949,14 @@ async function aeProviderChanged(preselect) {
   const modelSel = document.getElementById('aeModel')
   if (!modelSel) return
   if (!provider) { modelSel.innerHTML = '<option value="">（Provider 默认）</option>'; return }
-  modelSel.innerHTML = '<option value="">加载中…</option>'
+  modelSel.innerHTML = '<option value="" disabled selected>获取中…</option>'
   try {
     const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ action:'list_models', provider }) })
     const { models } = await r.json()
     modelSel.innerHTML = '<option value="">（Provider 默认）</option>' +
       (models||[]).map(m => `<option value="${esc(m)}"${m===preselect?' selected':''}>${esc(m)}</option>`).join('')
-  } catch { modelSel.innerHTML = '<option value="">（加载失败）</option>' }
+  } catch { modelSel.innerHTML = '<option value="" disabled selected>加载失败</option>' }
 }
 
 async function aeTestSend() {
@@ -888,23 +966,70 @@ async function aeTestSend() {
   if (!msg || !msgs) return
   input.value = ''
   const agentId = document.getElementById('aeId')?.value
-  const addMsg = (role, text) => {
+  const appendTestMsg = (role, text, html) => {
     const d = document.createElement('div')
     d.className = `ae-tmsg ${role}`
-    d.textContent = text
+    if (html) d.innerHTML = html
+    else d.textContent = text
     msgs.appendChild(d)
     msgs.scrollTop = msgs.scrollHeight
+    return d
   }
-  addMsg('user', msg)
-  const typing = document.createElement('div')
-  typing.className = 'ae-tmsg ai'; typing.textContent = '…'; msgs.appendChild(typing)
+  appendTestMsg('user', msg)
+  // Streaming bubble for AI response
+  const bubble = document.createElement('div')
+  bubble.className = 'ae-tmsg ai'
+  bubble.innerHTML = '<span class="stream-cursor">▌</span>'
+  msgs.appendChild(bubble)
+  msgs.scrollTop = msgs.scrollHeight
   try {
     const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ message: msg, session_id: _aeTestConvId, target_agent: agentId }) })
-    const data = await r.json()
-    _aeTestConvId = data.session_id
-    typing.textContent = data.response || data.error || '无响应'
-  } catch(e) { typing.textContent = '请求失败：' + e.message }
+      body: JSON.stringify({ message: msg, session_id: _aeTestConvId, target_agent: agentId, stream: true }) })
+    if (!r.ok || !r.body) {
+      const data = await r.json().catch(() => ({}))
+      _aeTestConvId = data.session_id || _aeTestConvId
+      const text = data.response || data.error || '无响应'
+      const md = typeof marked !== 'undefined' ? marked.parse(text) : esc(text)
+      bubble.innerHTML = md
+      return
+    }
+    const reader = r.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = '', fullText = ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n'); buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim(); if (!raw) continue
+          try {
+            const evt = JSON.parse(raw)
+            if (evt.chunk !== undefined) {
+              fullText += evt.chunk
+              const md = typeof marked !== 'undefined' ? marked.parse(fullText) : esc(fullText)
+              bubble.innerHTML = md + '<span class="stream-cursor">▌</span>'
+              msgs.scrollTop = msgs.scrollHeight
+            } else if (evt.done) {
+              _aeTestConvId = evt.session_id || _aeTestConvId
+              const md = typeof marked !== 'undefined' ? marked.parse(fullText) : esc(fullText)
+              bubble.innerHTML = md
+            } else if (evt.error) {
+              bubble.innerHTML = esc('⚠️ ' + evt.error)
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } finally {
+      const cursor = bubble.querySelector('.stream-cursor')
+      if (cursor) cursor.remove()
+    }
+  } catch(e) {
+    bubble.textContent = '请求失败：' + e.message
+    const cursor = bubble.querySelector('.stream-cursor')
+    if (cursor) cursor.remove()
+  }
 }
 
 async function saveAgent() {
@@ -924,10 +1049,14 @@ async function saveAgent() {
   const {error} = await db.from('agents').update(data).eq('id', id)
   if (error) { msg.className = 'ae-save-msg err'; msg.textContent = error.message; return }
   msg.className = 'ae-save-msg ok'; msg.textContent = '✓ 已保存'
+  pageLoaded['agents'] = false
   const li = document.getElementById('ali-'+id)
   if (li) {
     li.querySelector('.ali-name').textContent = data.name
     li.querySelector('.ali-pvd').textContent = data.provider || '—'
+  }
+  if (_agentsMap[id]) {
+    _agentsMap[id] = { ..._agentsMap[id], ...data }
   }
   setTimeout(() => { if (msg) msg.textContent = '' }, 3000)
 }
@@ -937,7 +1066,8 @@ async function deleteAgent() {
   const name = document.getElementById('aeName')?.value
   if (!id) return
   if (!confirm(`确定删除 Agent「${name}」？此操作不可撤销。`)) return
-  await db.from('agents').delete().eq('id', id)
+  const { error } = await db.from('agents').delete().eq('id', id)
+  if (error) { alert('删除失败：' + error.message); return }
   _currentAgentId = null
   document.getElementById('agentEditor').innerHTML = '<div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>'
   pageLoaded['agents'] = false
@@ -953,6 +1083,8 @@ async function newAgent() {
   pageLoaded['agents'] = false
   _currentAgentId = id
   await loadAgents()
+  const newLi = document.getElementById('ali-' + id)
+  if (newLi) newLi.click()
 }
 
 // ── Data page ─────────────────────────────────────────────────────────
@@ -977,8 +1109,12 @@ function switchDataTab(tab, force = false) {
 
 function dataTagHtml(labels) {
   if (!labels) return ''
-  const tags = [...labels.matchAll(/\[([^\]]+)\]/g)].map(m => m[1])
-  return tags.map(t => {
+  const matches = [...String(labels).matchAll(/\[([^\]]+)\]/g)]
+  if (matches.length === 0) {
+    return `<span class="dtag">${esc(String(labels))}</span>`
+  }
+  return matches.map(m => {
+    const t = m[1]
     const cls = /google/i.test(t) ? 'google' : /potential|follow/i.test(t) ? 'potential' : /meta|facebook/i.test(t) ? 'meta' : ''
     return `<span class="dtag ${cls}">${esc(t)}</span>`
   }).join('')
@@ -1081,10 +1217,10 @@ async function loadAdReports(page = 1) {
     const totalResults = (data||[]).reduce((s,r) => s + (Number(r.results)||0), 0)
     const avgFreq = (data||[]).length ? ((data||[]).reduce((s,r)=>s+(Number(r.frequency)||0),0)/(data||[]).length) : 0
     showDataStats([
-      { val: 'MYR ' + totalSpend.toFixed(0), lbl: '总花费', cls: 'amber' },
-      { val: totalResults, lbl: '总结果', cls: 'blue' },
-      { val: totalSpend > 0 && totalResults > 0 ? 'MYR ' + (totalSpend/totalResults).toFixed(2) : '—', lbl: '平均 CPR', cls: 'green' },
-      { val: avgFreq.toFixed(2), lbl: '平均频率', cls: avgFreq > 3 ? 'amber' : '' },
+      { val: 'MYR ' + totalSpend.toFixed(0), lbl: '本页合计花费', cls: 'amber' },
+      { val: totalResults, lbl: '本页合计结果', cls: 'blue' },
+      { val: totalSpend > 0 && totalResults > 0 ? 'MYR ' + (totalSpend/totalResults).toFixed(2) : '—', lbl: '本页均 CPR', cls: 'green' },
+      { val: avgFreq.toFixed(2), lbl: '本页均频', cls: avgFreq > 3 ? 'amber' : '' },
     ])
     if (!data?.length) { wrap.innerHTML = '<p style="color:#333;font-size:13px;padding:40px 0;text-align:center">无数据</p>'; return }
     wrap.innerHTML = `<table class="data-table">
@@ -1108,22 +1244,55 @@ async function loadAdReports(page = 1) {
   }
 }
 
-function exportCSV(tab) {
-  const data = tab === 'leads' ? _leadsCache : _adsCache
-  if (!data?.length) { alert('没有数据可导出，请先搜索'); return }
-  const keys = Object.keys(data[0])
-  const csv = [keys.join(','), ...data.map(r => keys.map(k => {
-    const v = r[k] ?? ''
-    return String(v).includes(',') ? `"${String(v).replace(/"/g,'""')}"` : String(v)
-  }).join(','))].join('\n')
-  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `${tab}_${new Date().toISOString().slice(0,10)}.csv`
-  a.click()
+async function exportCSV(tab) {
+  const btnSel = tab === 'leads' ? '#dt-leads .data-search-btn:last-of-type' : '#dt-adreports .data-search-btn:last-of-type'
+  const btn = document.querySelector(btnSel)
+  const origText = btn ? btn.textContent : ''
+  if (btn) { btn.textContent = '导出中…'; btn.disabled = true }
+  try {
+    let data
+    if (tab === 'leads') {
+      const search = document.getElementById('dLeadsSearch')?.value.trim()
+      const from   = document.getElementById('dLeadsFrom')?.value
+      const to     = document.getElementById('dLeadsTo')?.value
+      const label  = document.getElementById('dLeadsLabel')?.value.trim()
+      let q = db.from('leads').select('*').order('date', { ascending: false })
+      if (search) q = q.or(`name.ilike.%${search}%,phone.ilike.%${search}%`)
+      if (from)   q = q.gte('date', from)
+      if (to)     q = q.lte('date', to)
+      if (label)  q = q.ilike('labels', `%${label}%`)
+      const { data: d } = await q
+      data = d
+    } else {
+      const search = document.getElementById('dAdsSearch')?.value.trim()
+      const from   = document.getElementById('dAdsFrom')?.value
+      const to     = document.getElementById('dAdsTo')?.value
+      let q = db.from('ad_reports').select('campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts').order('amount_spent_myr', { ascending: false })
+      if (search) q = q.ilike('campaign_name', `%${search}%`)
+      if (from)   q = q.gte('day', from)
+      if (to)     q = q.lte('day', to)
+      const { data: d } = await q
+      data = d
+    }
+    if (!data?.length) { alert('没有数据可导出'); return }
+    const keys = Object.keys(data[0])
+    const csv = [keys.join(','), ...data.map(r => keys.map(k => {
+      const v = r[k] ?? ''
+      return String(v).includes(',') ? `"${String(v).replace(/"/g,'""')}"` : String(v)
+    }).join(','))].join('\n')
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${tab}_${new Date().toISOString().slice(0,10)}.csv`
+    a.click()
+  } finally {
+    if (btn) { btn.textContent = origText; btn.disabled = false }
+  }
 }
 
-function openLogModal(title, content) {
+function openLogModal(el) {
+  const title = el.dataset.title || ''
+  const content = decodeURIComponent(el.dataset.content || '')
   document.getElementById('logModalTitle').textContent = title
   document.getElementById('logModalBody').textContent = content
   document.getElementById('logModal').classList.add('open')
@@ -1149,7 +1318,7 @@ async function loadLogs() {
   const body = document.getElementById('logsBody')
   body.innerHTML = '<div class="log-empty">加载中…</div>'
   try {
-    let q = db.from('conversations').select('*').order('created_at', {ascending:false}).limit(200)
+    let q = db.from('conversations').select('*', { count: 'exact' }).order('created_at', {ascending:false}).limit(200)
     const af = document.getElementById('logsAgentFilter')?.value
     const rf = document.getElementById('logsRoleFilter')?.value
     const ff = document.getElementById('logsFeedbackFilter')?.value
@@ -1158,10 +1327,10 @@ async function loadLogs() {
     if (ff === 'good') q = q.eq('feedback', 'good')
     else if (ff === 'bad') q = q.eq('feedback', 'bad')
     else if (ff === 'none') q = q.is('feedback', null)
-    const {data, error} = await q
+    const {data, error, count} = await q
     if (error) throw error
     if (!data?.length) { body.innerHTML = '<div class="log-empty">暂无记录</div>'; return }
-    document.getElementById('logsCount').textContent = data.length + ' 条'
+    document.getElementById('logsCount').textContent = data.length + ' / ' + count + ' 条'
     body.innerHTML = data.map(r => {
       const fbBtns = r.role === 'assistant' ? `
         <div class="fb-btns">
@@ -1172,7 +1341,7 @@ async function loadLogs() {
       <div class="log-row">
         <span class="log-role ${r.role}">${r.role==='user'?'User':'AI'}</span>
         <span class="log-agent">${esc(r.agent||'—')}</span>
-        <span class="log-content" style="cursor:pointer" title="点击查看全文" onclick='openLogModal(${JSON.stringify((r.role==="user"?"👤 ":"🤖 ")+(r.agent||"")+" · "+new Date(r.created_at).toLocaleString())}, ${JSON.stringify(r.content||"")})'>${esc(r.content)}</span>
+        <span class="log-content" style="cursor:pointer" title="点击查看全文" data-title="${encodeURIComponent((r.role==="user"?"👤 ":"🤖 ")+(r.agent||"")+" · "+new Date(r.created_at).toLocaleString())}" data-content="${encodeURIComponent(r.content||"")}" onclick="openLogModal(this)">${esc(r.content)}</span>
         <span class="log-time">${fmtTime(r.created_at)}</span>
         ${fbBtns}
       </div>`
@@ -1181,10 +1350,10 @@ async function loadLogs() {
     body.innerHTML = `<div class="log-empty" style="color:#ef4444">加载失败：${esc(e.message)}</div>`
   }
 }
-function reloadLogs() { pageLoaded['logs'] = false; _logsAgentFilterInited = false; initLogsAgentFilter(); loadLogs() }
+async function reloadLogs() { _logsAgentFilterInited = false; await initLogsAgentFilter(); loadLogs() }
 
 async function submitFeedback(id, val, btn) {
-  const row = btn.closest('.fb-btns')
+  const row = btn.closest('.fb-btns, .chat-fb')
   const current = btn.classList.contains('active') ? null : val
   await db.from('conversations').update({feedback: current}).eq('id', id)
   row.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'))
@@ -1210,7 +1379,11 @@ async function loadLLM() {
     if (pref?.value) document.getElementById('defaultSel').value = pref.value
     ;(providers||[]).forEach(r => {
       const p = r.provider
-      if (r.api_key) document.getElementById('key-'+p).value = r.api_key
+      const keyEl = document.getElementById('key-'+p)
+      if (keyEl) {
+        keyEl.value = r.api_key ? '••••••••' + r.api_key.slice(-4) : ''
+        keyEl.dataset.masked = r.api_key ? 'true' : 'false'
+      }
       if (r.model)   document.getElementById('model-'+p).value = r.model
       const cb = document.getElementById('active-'+p)
       if (cb) cb.checked = !!r.active
@@ -1247,22 +1420,29 @@ function toggleShow(p) {
 }
 
 async function fetchModels(p) {
-  const key = document.getElementById('key-'+p).value.trim()
+  const keyEl = document.getElementById('key-'+p)
+  if (keyEl.dataset.masked === 'true') {
+    const listEl = document.getElementById('models-'+p)
+    if (listEl) listEl.innerHTML = '<option value="" disabled selected>请先输入真实 API Key</option>'
+    return
+  }
+  const key = keyEl.value.trim()
   const listEl = document.getElementById('models-'+p)
-  if (!key) { listEl.innerHTML = '<span style="font-size:12px;color:#ef4444">请先填写 API Key</span>'; return }
-  listEl.innerHTML = '<span style="font-size:12px;color:#555">获取中…</span>'
+  if (!key) { listEl.innerHTML = '<option value="" disabled selected>请先填写 API Key</option>'; listEl.style.display = 'block'; return }
+  listEl.innerHTML = '<option value="" disabled selected>获取中…</option>'
+  listEl.style.display = 'block'
   try {
     const res  = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'list_models', provider:p, api_key:key})})
     const data = await res.json()
-    if (data.error) { listEl.innerHTML = `<span style="font-size:12px;color:#ef4444">${esc(data.error)}</span>`; return }
+    if (data.error) { listEl.innerHTML = `<option value="" disabled selected>加载失败</option>`; return }
     const current = document.getElementById('model-'+p).value.trim()
     const models = data.models || []
     listEl.innerHTML = `<option value="">— 选择模型 —</option>` +
       models.map(m => `<option value="${esc(m)}"${m===current?' selected':''}>${esc(m)}</option>`).join('')
     listEl.style.display = 'block'
   } catch(e) {
-    listEl.style.display = 'none'
-    alert('获取模型失败：' + e.message)
+    listEl.innerHTML = '<option value="" disabled selected>加载失败</option>'
+    listEl.style.display = 'block'
   }
 }
 
@@ -1275,17 +1455,19 @@ async function toggleActive(p, active) {
   loadSidebarDots()
 }
 async function saveProvider(p) {
-  const key   = document.getElementById('key-'+p).value.trim()
+  const keyEl = document.getElementById('key-'+p)
+  const key   = keyEl.dataset.masked === 'true' ? null : keyEl.value.trim()
   const model = document.getElementById('model-'+p).value.trim()
+  const active = document.getElementById('active-'+p)?.checked ?? true
   const msgEl = document.getElementById('msg-'+p)
-  if (!key) { msgEl.className='status-txt err'; msgEl.textContent='请输入 API Key'; return }
+  if (key === '') { msgEl.className='status-txt err'; msgEl.textContent='请输入 API Key'; return }
   msgEl.className='status-txt'; msgEl.textContent='保存中…'
-  const {error} = await db.from('provider_config').update({api_key:key,model,active:true}).eq('provider',p)
+  const updateData = { model, active }
+  if (key) updateData.api_key = key
+  const {error} = await db.from('provider_config').update(updateData).eq('provider',p)
   msgEl.className = 'status-txt '+(error?'err':'ok')
-  msgEl.textContent = error ? error.message : '✓ 已保存，已启用'
+  msgEl.textContent = error ? error.message : '✓ 已保存'
   if (!error) {
-    const cb = document.getElementById('active-'+p)
-    if (cb) cb.checked = true
     loadSidebarDots()
   }
 }
@@ -1308,20 +1490,27 @@ async function saveDefault() {
 // ── API Integrations ──────────────────────────────────────────────────
 const INT_LABELS = {whatsapp:'WhatsApp', email_smtp:'Email SMTP', sendgrid:'SendGrid', telegram:'Telegram'}
 
-function copyWAUrl() {
+function copyWAUrl(btn) {
   const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook'
-  navigator.clipboard.writeText(url).then(() => {
-    const btn = event.target
-    const orig = btn.textContent
-    btn.textContent = '已复制 ✓'
-    setTimeout(() => btn.textContent = orig, 2000)
-  })
+  navigator.clipboard.writeText(url)
+    .then(() => {
+      const orig = btn.textContent
+      btn.textContent = '已复制 ✓'
+      setTimeout(() => btn.textContent = orig, 2000)
+    })
+    .catch(() => {
+      prompt('请手动复制 Webhook URL：', url)
+    })
 }
 async function loadIntegrations() {
   try {
     const {data} = await db.from('api_integrations').select('*')
     // Status strip
     const strip = document.getElementById('intStatusStrip')
+    if (!data?.length) {
+      strip.innerHTML = '<span style="color:#444;font-size:12px">暂无集成配置</span>'
+      return
+    }
     strip.innerHTML = (data||[]).map(r =>
       `<span class="int-chip${r.active?' on':''}"><span class="dot${r.active?' on':''}"></span>${INT_LABELS[r.service]||r.service}</span>`
     ).join('')
@@ -1341,15 +1530,21 @@ async function toggleIntegration(service, active) {
   const dot = document.getElementById('idot-'+service)
   if (dot) dot.className = 'dot'+(active?' on':'')
   await db.from('api_integrations').update({active}).eq('service',service)
-  loadIntegrations()
+  await loadIntegrations()
 }
 async function saveIntegration(service, keys) {
   const credentials = {}
-  keys.forEach(k => { const el=document.getElementById(`int-${service}-${k}`); if(el?.value.trim()) credentials[k]=el.value.trim() })
+  keys.forEach(k => {
+    const el = document.getElementById(`int-${service}-${k}`)
+    credentials[k] = el?.value.trim() || null
+  })
   const active = document.getElementById('iactive-'+service)?.checked
   const msg = document.getElementById('imsg-'+service)
   msg.className='status-txt'; msg.textContent='保存中…'
-  const {error} = await db.from('api_integrations').update({credentials,active,updated_at:new Date().toISOString()}).eq('service',service)
+  const {error} = await db.from('api_integrations').upsert(
+    { service, credentials, active, updated_at: new Date().toISOString() },
+    { onConflict: 'service' }
+  )
   msg.className='status-txt '+(error?'err':'ok')
   msg.textContent = error ? error.message : '✓ 已保存'
   if (!error) loadIntegrations()
