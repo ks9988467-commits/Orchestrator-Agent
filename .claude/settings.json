@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,subprocess; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); 'soul.md' in f and subprocess.run(['python','C:/Ai test/AI PROJECT/orchestrator/soul_guard.py'])\"",
+            "statusMessage": "Checking soul.md size..."
+          }
+        ]
+      }
+    ]
+  }
+}

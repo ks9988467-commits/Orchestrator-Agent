@@ -527,13 +527,14 @@ async function classifyIntent(message: string, agents: AgentRow[], providers: Pr
 }
 
 // ── Keyword pre-routing (fast path, skips LLM classification) ────────
+// NOTE: Chinese chars have no \b word boundary in JS — never wrap Chinese with \b
 const KEYWORD_ROUTES: { pattern: RegExp; agent: string }[] = [
-  { pattern: /\bcpl\b|cost.?per.?lead|每个客户成本/i,                          agent: 'cpl'       },
-  { pattern: /\bcpr\b|cost.?per.?result|每个结果成本/i,                         agent: 'cpl'       },
-  { pattern: /\bfrequency\b|频率|广告疲劳|重复|ad.?fatigue/i,                   agent: 'frequency' },
-  { pattern: /\b(code|bug|error|debug|script|function|api)\b|代码|编程|脚本|报错/i, agent: 'code'  },
-  { pattern: /\b(lead|leads|contact|客户|潜在客户|联系人|crm)\b/i,              agent: 'crm'       },
-  { pattern: /\b(spend|campaign|广告|投放|营销|marketing|ad report)\b/i,        agent: 'account'   },
+  { pattern: /\bcpl\b|cost.?per.?lead|每个客户成本|每条线索成本/i,                              agent: 'cpl'       },
+  { pattern: /\bcpr\b|cost.?per.?result|每个结果成本/i,                                        agent: 'cpl'       },
+  { pattern: /\bfrequency\b|频率|广告疲劳|广告频次|重复曝光|ad.?fatigue/i,                      agent: 'frequency' },
+  { pattern: /\b(code|bug|error|debug|script|function|api)\b|代码|编程|脚本|报错|函数|调试|程序/i, agent: 'code'   },
+  { pattern: /客户|潜在客户|联系人|线索|\b(lead|leads|contact|crm)\b/i,                         agent: 'crm'       },
+  { pattern: /\b(spend|campaign|ad\s?report|marketing)\b|广告|投放|营销|花费/i,                 agent: 'account'   },
 ]
 function keywordRoute(message: string, agents: AgentRow[]): AgentRow | null {
   const active = agents.filter(a => a.active)
