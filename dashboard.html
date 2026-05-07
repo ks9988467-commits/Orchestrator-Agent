@@ -274,9 +274,28 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     <div class="lock-logo">🧠</div>
     <div class="lock-title">Orchestrator Agent</div>
     <div class="lock-sub">请输入访问密码</div>
-    <input id="lockInput" type="password" class="lock-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')checkLock()">
-    <button class="lock-btn" onclick="checkLock()">进入</button>
-    <div class="lock-err" id="lockErr"></div>
+    <!-- 密码界面 -->
+    <div id="lockPwdView">
+      <input id="lockInput" type="password" class="lock-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')checkLock()">
+      <button class="lock-btn" onclick="checkLock()">进入</button>
+      <div class="lock-err" id="lockErr"></div>
+      <div style="margin-top:14px"><button onclick="showOtpView()" style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;text-decoration:underline">忘记密码？</button></div>
+    </div>
+    <!-- OTP 界面 -->
+    <div id="lockOtpView" style="display:none">
+      <div id="lockOtpStep1">
+        <input id="lockEmailInput" type="email" class="lock-input" placeholder="输入邮箱" style="letter-spacing:0">
+        <button class="lock-btn" onclick="sendOtp()">发送验证码</button>
+        <div class="lock-err" id="lockOtpErr"></div>
+        <div style="margin-top:14px"><button onclick="showPwdView()" style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;text-decoration:underline">← 返回</button></div>
+      </div>
+      <div id="lockOtpStep2" style="display:none">
+        <div style="font-size:12px;color:#555;margin-bottom:16px">验证码已发送，10分钟内有效</div>
+        <input id="lockCodeInput" type="text" class="lock-input" placeholder="6位验证码" maxlength="6" onkeydown="if(event.key==='Enter')verifyOtp()">
+        <button class="lock-btn" onclick="verifyOtp()">验证进入</button>
+        <div class="lock-err" id="lockCodeErr"></div>
+      </div>
+    </div>
   </div>
 </div>
 <div id="app">
@@ -637,6 +656,43 @@ function checkLock() {
     document.getElementById('lockInput').value = ''
     document.getElementById('lockInput').focus()
   }
+}
+function showOtpView() {
+  document.getElementById('lockPwdView').style.display = 'none'
+  document.getElementById('lockOtpView').style.display = 'block'
+}
+function showPwdView() {
+  document.getElementById('lockOtpView').style.display = 'none'
+  document.getElementById('lockPwdView').style.display = 'block'
+}
+async function sendOtp() {
+  const email = document.getElementById('lockEmailInput').value.trim()
+  const errEl = document.getElementById('lockOtpErr')
+  if (!email) { errEl.textContent = '请输入邮箱'; return }
+  errEl.textContent = '发送中…'
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'send_otp', email }) })
+    const d = await r.json()
+    if (d.ok) {
+      document.getElementById('lockOtpStep1').style.display = 'none'
+      document.getElementById('lockOtpStep2').style.display = 'block'
+    } else { errEl.textContent = d.error || '发送失败' }
+  } catch(e) { errEl.textContent = '网络错误，请重试' }
+}
+async function verifyOtp() {
+  const email = document.getElementById('lockEmailInput').value.trim()
+  const code  = document.getElementById('lockCodeInput').value.trim()
+  const errEl = document.getElementById('lockCodeErr')
+  if (!code) { errEl.textContent = '请输入验证码'; return }
+  errEl.textContent = '验证中…'
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'verify_otp', email, code }) })
+    const d = await r.json()
+    if (d.ok) {
+      localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
+      document.getElementById('lockScreen').classList.add('hidden')
+    } else { errEl.textContent = d.error || '验证码错误' }
+  } catch(e) { errEl.textContent = '网络错误，请重试' }
 }
 // ─────────────────────────────────────────────────────────────────────
 

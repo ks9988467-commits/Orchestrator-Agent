@@ -587,6 +587,52 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // ── OTP: send ──────────────────────────────────────────────────
+    if (body.action === 'send_otp') {
+      const { email } = body
+      if (!email) return new Response(JSON.stringify({ error: 'email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const code = String(Math.floor(100000 + Math.random() * 900000))
+      // Store OTP (service key bypasses RLS)
+      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests`, {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ email, code })
+      })
+      // Send email via Gmail SMTP using fetch to SMTP2Go-like approach — use denomailer
+      try {
+        const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+        const client = new SmtpClient()
+        await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
+        await client.send({
+          from: 'Orchestrator Agent <ks9988467@gmail.com>',
+          to: email,
+          subject: `验证码：${code}`,
+          content: `您的 Orchestrator Agent 验证码是：\n\n${code}\n\n10 分钟内有效，请勿分享给他人。`,
+        })
+        await client.close()
+      } catch(e) {
+        return new Response(JSON.stringify({ error: `发送失败：${(e as Error).message}` }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── OTP: verify ────────────────────────────────────────────────
+    if (body.action === 'verify_otp') {
+      const { email, code } = body
+      if (!email || !code) return new Response(JSON.stringify({ error: 'email and code required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const rows = await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?email=eq.${encodeURIComponent(email)}&code=eq.${encodeURIComponent(code)}&used=eq.false&expires_at=gte.${new Date().toISOString()}&order=id.desc&limit=1`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+      }).then(r => r.json())
+      if (!rows?.length) return new Response(JSON.stringify({ ok: false, error: '验证码无效或已过期' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Mark used
+      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?id=eq.${rows[0].id}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ used: true })
+      })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // ── Learn from feedback action ──────────────────────────────────
     if (body.action === 'learn') {
       const { conversation_id, feedback } = body
