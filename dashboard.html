@@ -266,9 +266,42 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .fin-form select{cursor:pointer}
 .fin-form .fin-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .fin-actions{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
+
+/* ── Mobile responsive ── */
+.menu-toggle{display:none;position:fixed;top:12px;left:12px;z-index:300;background:#1d4ed8;border:none;border-radius:8px;color:#fff;width:38px;height:38px;font-size:18px;cursor:pointer;align-items:center;justify-content:center}
+@media(max-width:768px){
+  .menu-toggle{display:flex}
+  #sidebar{position:fixed;left:-240px;top:0;height:100%;z-index:200;transition:left .25s;width:240px}
+  #sidebar.open{left:0;box-shadow:4px 0 20px #000a}
+  .sidebar-overlay{display:none;position:fixed;inset:0;background:#00000055;z-index:199}
+  .sidebar-overlay.show{display:block}
+  #main{width:100%}
+  .page-header{padding:14px 16px 12px;padding-top:56px}
+  .messages{padding:16px}
+  .input-bar{padding:10px 12px}
+  .input-bar textarea{font-size:16px}
+  .logs-toolbar{flex-wrap:wrap;padding:10px 12px;gap:6px}
+  .log-row{grid-template-columns:60px 70px 1fr 80px;padding:8px 12px}
+  .log-row-hd{grid-template-columns:60px 70px 1fr 80px;padding:6px 12px}
+  .log-row .fb-btns{display:none}
+  .log-row-hd span:last-child{display:none}
+  .data-toolbar{padding:10px 12px;gap:6px}
+  .data-toolbar input{width:130px}
+  .data-table-wrap{padding:0 8px}
+  .scroll-page{padding:14px 16px;padding-top:56px}
+  .card-row{grid-template-columns:1fr}
+  .agents-split{flex-direction:column}
+  .agent-list{width:100%;border-right:none;border-bottom:1px solid #1a1a1a;max-height:160px}
+  .ae-row{grid-template-columns:1fr}
+  .fin-form .fin-row{grid-template-columns:1fr}
+  .log-modal{width:96vw;max-width:96vw}
+  .chat-session-bar{padding:6px 12px;padding-top:50px}
+}
 </style>
 </head>
 <body>
+<button class="menu-toggle" onclick="toggleSidebar()" id="menuToggle">☰</button>
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
 <div id="app">
 
 <!-- Sidebar -->
@@ -672,6 +705,18 @@ function newSession() {
     <div class="msg ai"><div class="msg-meta">orchestrator</div>新对话已开始。</div>`
 }
 
+// ── Mobile sidebar ───────────────────────────────────────────────────
+function toggleSidebar() {
+  const s = document.getElementById('sidebar')
+  const o = document.getElementById('sidebarOverlay')
+  s.classList.toggle('open')
+  o.classList.toggle('show')
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open')
+  document.getElementById('sidebarOverlay').classList.remove('show')
+}
+
 // ── Page nav ──────────────────────────────────────────────────────────
 const pageLoaded = {}
 function showPage(id, btn) {
@@ -680,6 +725,7 @@ function showPage(id, btn) {
   document.getElementById(id+'Page').classList.add('active')
   btn.classList.add('active')
   if (!pageLoaded[id]) { pageLoaded[id] = true; loadPage(id) }
+  closeSidebar()
 }
 function loadPage(id) {
   if (id === 'agents')  loadAgents()

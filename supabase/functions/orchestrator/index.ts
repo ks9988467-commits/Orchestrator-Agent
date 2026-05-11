@@ -124,6 +124,45 @@ const TOOL_DEFS = [
       required: [],
     },
   },
+  {
+    name: 'get_roas_report',
+    description: 'Calculate ROAS (Return on Ad Spend) and CTR by campaign. ROAS = revenue / ad spend. CTR = clicks / impressions.',
+    parameters: {
+      type: 'object',
+      properties: {
+        date_from: { type: 'string', description: 'Start date YYYY-MM-DD' },
+        date_to:   { type: 'string', description: 'End date YYYY-MM-DD' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_spend_summary',
+    description: 'Get total ad spend summary by period (weekly/monthly) for Account Agent financial reporting.',
+    parameters: {
+      type: 'object',
+      properties: {
+        date_from:  { type: 'string', description: 'Start date YYYY-MM-DD' },
+        date_to:    { type: 'string', description: 'End date YYYY-MM-DD' },
+        group_by:   { type: 'string', description: 'Group by: "campaign" or "day" (default: campaign)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'query_invoices',
+    description: 'Query invoices and payment receipts for Account Agent financial management.',
+    parameters: {
+      type: 'object',
+      properties: {
+        status:    { type: 'string', description: 'Filter by status: pending, paid, overdue, cancelled' },
+        date_from: { type: 'string', description: 'Invoice date from YYYY-MM-DD' },
+        date_to:   { type: 'string', description: 'Invoice date to YYYY-MM-DD' },
+        limit:     { type: 'number', description: 'Max records (default 20)' },
+      },
+      required: [],
+    },
+  },
 ]
 
 // ── Tool executor ────────────────────────────────────────────────────
@@ -142,8 +181,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     if (name === 'query_ad_reports') {
       const filters: Record<string,string> = {}
       if (args.campaign_name) filters['campaign_name'] = `ilike.*${args.campaign_name}*`
-      if (args.date_from)     filters['starts']        = `gte.${args.date_from}`
-      if (args.date_to)       filters['ends']          = `lte.${args.date_to}`
+      if (args.date_from)     filters['day']           = `gte.${args.date_from}`
+      if (args.date_to)       filters['day']           = `lte.${args.date_to}`
       const limit = Math.min(Number(args.limit) || 50, 200)
       const rows = await dbGet('ad_reports',
         'campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,cpc_link,new_messaging_contacts',
@@ -153,34 +192,138 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
 
     if (name === 'calculate_cpl') {
       const filters: Record<string,string> = {}
-      if (args.date_from) filters['starts'] = `gte.${args.date_from}`
-      if (args.date_to)   filters['ends']   = `lte.${args.date_to}`
-      const rows = await dbGet('ad_reports', 'campaign_name,amount_spent_myr,results,new_messaging_contacts', filters, undefined, 500)
-      const bycamp: Record<string, { spend: number; results: number; contacts: number }> = {}
+      if (args.date_from) filters['day'] = `gte.${args.date_from}`
+      if (args.date_to)   filters['day'] = `lte.${args.date_to}`
+      const rows = await dbGet('ad_reports', 'campaign_name,amount_spent_myr,results,new_messaging_contacts,link_clicks,ctr_all', filters, undefined, 500)
+      const bycamp: Record<string, { spend: number; results: number; contacts: number; clicks: number }> = {}
       for (const r of rows as Record<string,number|string>[]) {
         const c = String(r.campaign_name || 'Unknown')
-        if (!bycamp[c]) bycamp[c] = { spend: 0, results: 0, contacts: 0 }
-        bycamp[c].spend    += Number(r.amount_spent_myr)    || 0
-        bycamp[c].results  += Number(r.results)             || 0
+        if (!bycamp[c]) bycamp[c] = { spend: 0, results: 0, contacts: 0, clicks: 0 }
+        bycamp[c].spend    += Number(r.amount_spent_myr)       || 0
+        bycamp[c].results  += Number(r.results)                || 0
         bycamp[c].contacts += Number(r.new_messaging_contacts) || 0
+        bycamp[c].clicks   += Number(r.link_clicks)            || 0
       }
       const report = Object.entries(bycamp).map(([campaign, d]) => ({
         campaign,
-        total_spend_myr: +d.spend.toFixed(2),
-        total_results:   +d.results.toFixed(0),
-        cpr_cost_per_result: d.results > 0 ? +(d.spend / d.results).toFixed(2) : null,
-        total_leads:     d.contacts,
-        cpl_cost_per_lead: d.contacts > 0 ? +(d.spend / d.contacts).toFixed(2) : null,
+        total_spend_myr:     +d.spend.toFixed(2),
+        total_results:       d.results,
+        cpr_cost_per_result: d.results   > 0 ? +(d.spend / d.results).toFixed(2)   : null,
+        total_leads:         d.contacts,
+        cpl_cost_per_lead:   d.contacts  > 0 ? +(d.spend / d.contacts).toFixed(2)  : null,
+        total_clicks:        d.clicks,
+        cpc_cost_per_click:  d.clicks    > 0 ? +(d.spend / d.clicks).toFixed(2)    : null,
       })).sort((a, b) => (a.cpl_cost_per_lead ?? 9999) - (b.cpl_cost_per_lead ?? 9999))
       return JSON.stringify({ campaigns: report })
     }
 
     if (name === 'get_frequency_report') {
       const filters: Record<string,string> = {}
-      if (args.date_from) filters['starts'] = `gte.${args.date_from}`
-      if (args.date_to)   filters['ends']   = `lte.${args.date_to}`
-      const rows = await dbGet('ad_reports', 'campaign_name,frequency,impressions,reach,ctr_all,amount_spent_myr', filters, 'frequency.desc', 100)
-      return JSON.stringify({ count: rows.length, data: rows })
+      if (args.date_from) filters['day'] = `gte.${args.date_from}`
+      if (args.date_to)   filters['day'] = `lte.${args.date_to}`
+      const rows = await dbGet('ad_reports', 'campaign_name,frequency,impressions,reach,ctr_all,amount_spent_myr,results', filters, 'frequency.desc', 100)
+      const bycamp: Record<string, { freq: number[]; spend: number; impressions: number; reach: number }> = {}
+      for (const r of rows as Record<string,number|string>[]) {
+        const c = String(r.campaign_name || 'Unknown')
+        if (!bycamp[c]) bycamp[c] = { freq: [], spend: 0, impressions: 0, reach: 0 }
+        if (r.frequency) bycamp[c].freq.push(Number(r.frequency))
+        bycamp[c].spend       += Number(r.amount_spent_myr) || 0
+        bycamp[c].impressions += Number(r.impressions)      || 0
+        bycamp[c].reach       += Number(r.reach)            || 0
+      }
+      const report = Object.entries(bycamp).map(([campaign, d]) => {
+        const avgFreq = d.freq.length ? d.freq.reduce((a,b)=>a+b,0)/d.freq.length : 0
+        return {
+          campaign,
+          avg_frequency:    +avgFreq.toFixed(2),
+          fatigue_risk:     avgFreq > 3 ? '高' : avgFreq > 2 ? '中' : '低',
+          total_spend_myr:  +d.spend.toFixed(2),
+          total_impressions: d.impressions,
+          total_reach:      d.reach,
+        }
+      }).sort((a,b) => b.avg_frequency - a.avg_frequency)
+      return JSON.stringify({ campaigns: report })
+    }
+
+    if (name === 'get_roas_report') {
+      const filters: Record<string,string> = {}
+      if (args.date_from) filters['day'] = `gte.${args.date_from}`
+      if (args.date_to)   filters['day'] = `lte.${args.date_to}`
+      const rows = await dbGet('ad_reports', 'campaign_name,amount_spent_myr,results,link_clicks,impressions,ctr_all,cpm', filters, undefined, 500)
+      const bycamp: Record<string, { spend: number; clicks: number; impressions: number; results: number }> = {}
+      for (const r of rows as Record<string,number|string>[]) {
+        const c = String(r.campaign_name || 'Unknown')
+        if (!bycamp[c]) bycamp[c] = { spend: 0, clicks: 0, impressions: 0, results: 0 }
+        bycamp[c].spend       += Number(r.amount_spent_myr) || 0
+        bycamp[c].clicks      += Number(r.link_clicks)      || 0
+        bycamp[c].impressions += Number(r.impressions)      || 0
+        bycamp[c].results     += Number(r.results)          || 0
+      }
+      const report = Object.entries(bycamp).map(([campaign, d]) => {
+        const ctr = d.impressions > 0 ? +((d.clicks / d.impressions) * 100).toFixed(2) : null
+        return {
+          campaign,
+          total_spend_myr:  +d.spend.toFixed(2),
+          total_clicks:     d.clicks,
+          ctr_pct:          ctr,
+          ctr_rating:       ctr === null ? '—' : ctr >= 2 ? '优秀' : ctr >= 1 ? '正常' : '偏低',
+          total_results:    d.results,
+          cpr:              d.results > 0 ? +(d.spend / d.results).toFixed(2) : null,
+        }
+      }).sort((a,b) => (b.ctr_pct ?? 0) - (a.ctr_pct ?? 0))
+      return JSON.stringify({ campaigns: report })
+    }
+
+    if (name === 'get_spend_summary') {
+      const filters: Record<string,string> = {}
+      if (args.date_from) filters['day'] = `gte.${args.date_from}`
+      if (args.date_to)   filters['day'] = `lte.${args.date_to}`
+      const groupBy = String(args.group_by || 'campaign')
+      const rows = await dbGet('ad_reports', 'campaign_name,day,amount_spent_myr,results,link_clicks', filters, 'day.desc', 500)
+      if (groupBy === 'day') {
+        const byDay: Record<string, { spend: number; results: number }> = {}
+        for (const r of rows as Record<string,number|string>[]) {
+          const d = String(r.day || '')
+          if (!byDay[d]) byDay[d] = { spend: 0, results: 0 }
+          byDay[d].spend   += Number(r.amount_spent_myr) || 0
+          byDay[d].results += Number(r.results)          || 0
+        }
+        const summary = Object.entries(byDay).map(([day, d]) => ({ day, spend_myr: +d.spend.toFixed(2), results: d.results }))
+          .sort((a,b) => a.day.localeCompare(b.day))
+        const total = summary.reduce((s,r) => s + r.spend_myr, 0)
+        return JSON.stringify({ period_total_myr: +total.toFixed(2), by_day: summary })
+      } else {
+        const bycamp: Record<string, { spend: number; results: number }> = {}
+        for (const r of rows as Record<string,number|string>[]) {
+          const c = String(r.campaign_name || 'Unknown')
+          if (!bycamp[c]) bycamp[c] = { spend: 0, results: 0 }
+          bycamp[c].spend   += Number(r.amount_spent_myr) || 0
+          bycamp[c].results += Number(r.results)          || 0
+        }
+        const summary = Object.entries(bycamp).map(([campaign, d]) => ({ campaign, spend_myr: +d.spend.toFixed(2), results: d.results }))
+          .sort((a,b) => b.spend_myr - a.spend_myr)
+        const total = summary.reduce((s,r) => s + r.spend_myr, 0)
+        return JSON.stringify({ period_total_myr: +total.toFixed(2), by_campaign: summary })
+      }
+    }
+
+    if (name === 'query_invoices') {
+      const filters: Record<string,string> = {}
+      if (args.status)    filters['status']       = `eq.${args.status}`
+      if (args.date_from) filters['invoice_date'] = `gte.${args.date_from}`
+      if (args.date_to)   filters['invoice_date'] = `lte.${args.date_to}`
+      const limit = Math.min(Number(args.limit) || 20, 100)
+      const rows = await dbGet('invoices', 'invoice_no,vendor,amount,currency,invoice_date,due_date,status,category,notes', filters, 'invoice_date.desc', limit)
+      const total = (rows as Record<string,number|string>[]).reduce((s,r) => s + (Number(r.amount)||0), 0)
+      const pending = (rows as Record<string,string>[]).filter(r => r.status === 'pending')
+      const overdue = (rows as Record<string,string>[]).filter(r => r.status === 'overdue')
+      return JSON.stringify({
+        count: rows.length,
+        total_myr: +total.toFixed(2),
+        pending_count: pending.length,
+        overdue_count: overdue.length,
+        invoices: rows,
+      })
     }
 
     return JSON.stringify({ error: `Unknown tool: ${name}` })
