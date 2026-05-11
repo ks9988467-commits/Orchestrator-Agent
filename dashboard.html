@@ -267,6 +267,28 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .fin-form .fin-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .fin-actions{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
 
+/* ── Overview comparison ── */
+.ov-wrap{padding:20px 24px;max-width:900px}
+.ov-period-bar{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+.ov-period-bar label{font-size:11px;color:#555;margin-right:2px}
+.ov-period-bar input[type=date]{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:5px 10px;color:#aaa;font-size:12px;font-family:inherit;outline:none}
+.ov-period-bar button{padding:5px 14px;border-radius:6px;border:1px solid #1e1e1e;background:#111;color:#aaa;font-size:12px;cursor:pointer}
+.ov-period-bar button.active{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.ov-kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+.ov-card{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px 16px}
+.ov-card .ov-title{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.ov-card .ov-now{font-size:22px;font-weight:700;color:#fff;font-family:monospace;line-height:1}
+.ov-card .ov-prev{font-size:11px;color:#444;margin-top:5px}
+.ov-card .ov-delta{font-size:11px;font-weight:600;margin-top:3px}
+.ov-delta.up{color:#34d399}.ov-delta.down{color:#f87171}.ov-delta.flat{color:#555}
+.ov-card.cost .ov-delta.up{color:#f87171}.ov-card.cost .ov-delta.down{color:#34d399}
+.ov-section-title{font-size:11px;color:#444;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.ov-camp-table{width:100%;border-collapse:collapse;font-size:12px}
+.ov-camp-table th{color:#444;font-weight:500;text-align:right;padding:6px 10px;border-bottom:1px solid #1a1a1a}
+.ov-camp-table th:first-child{text-align:left}
+.ov-camp-table td{color:#aaa;text-align:right;padding:7px 10px;border-bottom:1px solid #111}
+.ov-camp-table td:first-child{text-align:left;color:#ddd;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ov-camp-table tr:hover td{background:#0d0d0d}
 /* ── Mobile responsive ── */
 .menu-toggle{display:none;position:fixed;top:12px;left:12px;z-index:300;background:#1d4ed8;border:none;border-radius:8px;color:#fff;width:38px;height:38px;font-size:18px;cursor:pointer;align-items:center;justify-content:center}
 @media(max-width:768px){
@@ -327,6 +349,9 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </button>
     <button class="nav-item" onclick="showPage('data',this)">
       <span class="icon">🗄️</span> 数据
+    </button>
+    <button class="nav-item" onclick="showPage('overview',this)">
+      <span class="icon">📈</span> 概览
     </button>
     <button class="nav-item" onclick="showPage('finance',this)">
       <span class="icon">💰</span> 财务
@@ -628,6 +653,30 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     </div>
   </div>
 
+  <!-- Overview -->
+  <div class="page" id="overviewPage">
+    <div class="ov-wrap">
+      <div class="ov-period-bar">
+        <button class="active" id="ovPreset-month" onclick="ovSetPreset('month')">本月 vs 上月</button>
+        <button id="ovPreset-quarter" onclick="ovSetPreset('quarter')">本季 vs 上季</button>
+        <button id="ovPreset-custom" onclick="ovSetPreset('custom')">自定义</button>
+        <span id="ovCustomRange" style="display:none;align-items:center;gap:6px">
+          <label>当前</label>
+          <input type="date" id="ovCurFrom"> — <input type="date" id="ovCurTo">
+          <label>对比</label>
+          <input type="date" id="ovPrevFrom"> — <input type="date" id="ovPrevTo">
+          <button onclick="loadOverview()">对比</button>
+        </span>
+        <span id="ovPeriodLabel" style="font-size:11px;color:#555;margin-left:4px"></span>
+      </div>
+      <div class="ov-kpi-grid" id="ovKpiGrid">
+        <div style="color:#333;font-size:12px;padding:40px 0">加载中…</div>
+      </div>
+      <div class="ov-section-title">本期活动排名 (按花费)</div>
+      <div id="ovCampTable"></div>
+    </div>
+  </div>
+
   <!-- Finance -->
   <div class="page" id="financePage">
     <div class="data-page">
@@ -741,12 +790,13 @@ function showPage(id, btn) {
   closeSidebar()
 }
 function loadPage(id) {
-  if (id === 'agents')  loadAgents()
-  if (id === 'llm')     loadLLM()
-  if (id === 'api')     loadIntegrations()
-  if (id === 'logs')    { initLogsAgentFilter(); loadLogs() }
-  if (id === 'data')    initDataPage()
-  if (id === 'finance') initFinancePage()
+  if (id === 'agents')   loadAgents()
+  if (id === 'llm')      loadLLM()
+  if (id === 'api')      loadIntegrations()
+  if (id === 'logs')     { initLogsAgentFilter(); loadLogs() }
+  if (id === 'data')     initDataPage()
+  if (id === 'finance')  initFinancePage()
+  if (id === 'overview') initOverviewPage()
 }
 
 // ── Sidebar dots ──────────────────────────────────────────────────────
@@ -1481,6 +1531,160 @@ async function saveIntegration(service, keys) {
 }
 
 // ── Finance Page ──────────────────────────────────────────────────────
+// ── Overview ──────────────────────────────────────────────────────────
+let _ovPreset = 'month'
+
+function ovDateRanges() {
+  const now = new Date()
+  const y = now.getFullYear(), m = now.getMonth()
+  if (_ovPreset === 'month') {
+    const curFrom  = new Date(y, m, 1)
+    const curTo    = now
+    const prevFrom = new Date(y, m-1, 1)
+    const prevTo   = new Date(y, m, 0)
+    return { curFrom, curTo, prevFrom, prevTo }
+  }
+  if (_ovPreset === 'quarter') {
+    const q = Math.floor(m / 3)
+    const curFrom  = new Date(y, q*3, 1)
+    const curTo    = now
+    const prevFrom = new Date(y, (q-1)*3, 1)
+    const prevTo   = new Date(y, q*3, 0)
+    return { curFrom, curTo, prevFrom, prevTo }
+  }
+  // custom
+  const f = v => v ? new Date(v) : now
+  return {
+    curFrom:  f(document.getElementById('ovCurFrom')?.value),
+    curTo:    f(document.getElementById('ovCurTo')?.value),
+    prevFrom: f(document.getElementById('ovPrevFrom')?.value),
+    prevTo:   f(document.getElementById('ovPrevTo')?.value),
+  }
+}
+
+function fmt(d) { return d.toISOString().slice(0,10) }
+
+function ovSetPreset(p) {
+  _ovPreset = p
+  document.querySelectorAll('.ov-period-bar button[id^=ovPreset]').forEach(b => b.classList.remove('active'))
+  document.getElementById('ovPreset-'+p)?.classList.add('active')
+  document.getElementById('ovCustomRange').style.display = p === 'custom' ? 'flex' : 'none'
+  if (p !== 'custom') loadOverview()
+}
+
+function initOverviewPage() { loadOverview() }
+
+async function loadOverview() {
+  const grid = document.getElementById('ovKpiGrid')
+  const campEl = document.getElementById('ovCampTable')
+  grid.innerHTML = '<div style="color:#333;font-size:12px;padding:20px 0">加载中…</div>'
+  campEl.innerHTML = ''
+
+  const { curFrom, curTo, prevFrom, prevTo } = ovDateRanges()
+  const label = document.getElementById('ovPeriodLabel')
+  label.textContent = `${fmt(curFrom)} ~ ${fmt(curTo)}  对比  ${fmt(prevFrom)} ~ ${fmt(prevTo)}`
+
+  try {
+    const [curRes, prevRes] = await Promise.all([
+      db.from('ad_reports')
+        .select('campaign_name,amount_spent_myr,results,link_clicks,impressions,new_messaging_contacts,frequency')
+        .gte('day', fmt(curFrom)).lte('day', fmt(curTo)),
+      db.from('ad_reports')
+        .select('amount_spent_myr,results,link_clicks,impressions,new_messaging_contacts')
+        .gte('day', fmt(prevFrom)).lte('day', fmt(prevTo)),
+    ])
+    const cur  = curRes.data  || []
+    const prev = prevRes.data || []
+
+    function agg(rows) {
+      let spend=0, results=0, clicks=0, impr=0, contacts=0, freq=0, freqN=0
+      for (const r of rows) {
+        spend    += Number(r.amount_spent_myr)||0
+        results  += Number(r.results)||0
+        clicks   += Number(r.link_clicks)||0
+        impr     += Number(r.impressions)||0
+        contacts += Number(r.new_messaging_contacts)||0
+        if (r.frequency) { freq += Number(r.frequency); freqN++ }
+      }
+      return { spend, results, clicks, impr, contacts,
+        cpr: results  > 0 ? spend/results  : null,
+        cpl: contacts > 0 ? spend/contacts : null,
+        ctr: impr     > 0 ? clicks/impr*100 : null,
+        avgFreq: freqN > 0 ? freq/freqN : null,
+      }
+    }
+
+    const c = agg(cur), p = agg(prev)
+
+    function delta(now, before, isLower = false) {
+      if (before == null || before === 0 || now == null) return ''
+      const pct = ((now - before) / before * 100)
+      const sign = pct >= 0 ? '+' : ''
+      const cls = pct === 0 ? 'flat' : (isLower ? (pct < 0 ? 'down' : 'up') : (pct > 0 ? 'up' : 'down'))
+      return `<div class="ov-delta ${cls}">${sign}${pct.toFixed(1)}% vs 上期</div>`
+    }
+
+    function card(title, nowVal, prevVal, fmt2, isLower=false, extraCls='') {
+      const nowStr  = nowVal  != null ? fmt2(nowVal)  : '—'
+      const prevStr = prevVal != null ? fmt2(prevVal) : '—'
+      return `<div class="ov-card ${extraCls}">
+        <div class="ov-title">${title}</div>
+        <div class="ov-now">${nowStr}</div>
+        <div class="ov-prev">上期 ${prevStr}</div>
+        ${delta(nowVal, prevVal, isLower)}
+      </div>`
+    }
+
+    const myr = v => 'MYR ' + v.toFixed(2)
+    const num  = v => v.toLocaleString()
+    const pct2 = v => v.toFixed(2) + '%'
+    const dec2 = v => v.toFixed(2)
+
+    grid.innerHTML = [
+      card('总广告花费',   c.spend,   p.spend,   myr,  true,  'cost'),
+      card('总结果',       c.results, p.results, num,  false),
+      card('每结果成本 CPR', c.cpr,   p.cpr,     myr,  true,  'cost'),
+      card('新客户联系',   c.contacts,p.contacts,num,  false),
+      card('每客户成本 CPL', c.cpl,   p.cpl,     myr,  true,  'cost'),
+      card('总点击',       c.clicks,  p.clicks,  num,  false),
+      card('CTR',          c.ctr,     p.ctr,     pct2, false),
+      card('平均频率',     c.avgFreq, p.avgFreq, dec2, true),
+    ].join('')
+
+    // Campaign table (current period)
+    const bycamp = {}
+    for (const r of cur) {
+      const k = r.campaign_name || 'Unknown'
+      if (!bycamp[k]) bycamp[k] = { spend:0, results:0, clicks:0, contacts:0 }
+      bycamp[k].spend    += Number(r.amount_spent_myr)||0
+      bycamp[k].results  += Number(r.results)||0
+      bycamp[k].clicks   += Number(r.link_clicks)||0
+      bycamp[k].contacts += Number(r.new_messaging_contacts)||0
+    }
+    const camps = Object.entries(bycamp).sort((a,b)=>b[1].spend-a[1].spend).slice(0,10)
+    if (camps.length) {
+      campEl.innerHTML = `<table class="ov-camp-table">
+        <thead><tr>
+          <th>活动</th><th>花费 MYR</th><th>结果</th><th>CPR</th><th>新联系</th><th>CPL</th><th>点击</th>
+        </tr></thead>
+        <tbody>${camps.map(([name,d])=>`<tr>
+          <td title="${esc(name)}">${esc(name)}</td>
+          <td>${d.spend.toFixed(2)}</td>
+          <td>${d.results||'—'}</td>
+          <td>${d.results>0?(d.spend/d.results).toFixed(2):'—'}</td>
+          <td>${d.contacts||'—'}</td>
+          <td>${d.contacts>0?(d.spend/d.contacts).toFixed(2):'—'}</td>
+          <td>${d.clicks||'—'}</td>
+        </tr>`).join('')}</tbody>
+      </table>`
+    } else {
+      campEl.innerHTML = '<div style="color:#333;font-size:12px;padding:20px 0">本期无数据</div>'
+    }
+  } catch(e) {
+    grid.innerHTML = `<div style="color:#f87171;font-size:12px">${e.message}</div>`
+  }
+}
+
 let finTab = 'invoices'
 const FIN_PAGE_SIZE = 20
 let finInvPage = 1, finRecPage = 1
