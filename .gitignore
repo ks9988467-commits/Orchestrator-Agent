@@ -18,3 +18,4 @@ Thumbs.db
 !.dev.vars.example
 !.env.example
 finance.patch
+.claude-flow/
