@@ -272,11 +272,10 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 @media(max-width:768px){
   .menu-toggle{display:none}
   .sidebar-close{display:none}
-  #sidebar.open .sidebar-close{display:flex;position:absolute;top:10px;right:10px;background:none;border:1px solid #333;border-radius:6px;color:#aaa;width:28px;height:28px;align-items:center;justify-content:center;cursor:pointer;font-size:13px;z-index:10}
-  #sidebar{position:fixed;left:-222px;top:0;height:100%;z-index:200;transition:left .25s;width:240px;cursor:pointer}
-  #sidebar.open{left:0;box-shadow:4px 0 20px #000a;cursor:default}
-  #sidebar::after{content:'›';position:absolute;right:0;top:50%;transform:translateY(-50%);width:18px;height:44px;background:#1d4ed8;border-radius:0 6px 6px 0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px;line-height:44px;text-align:center;transition:opacity .2s}
-  #sidebar.open::after{opacity:0;pointer-events:none}
+  #sidebar{position:fixed;left:-222px;top:0;height:100%;z-index:200;transition:left .25s;width:240px}
+  #sidebar.open{left:0;box-shadow:4px 0 20px #000a}
+  #sidebar::after{content:'›';position:absolute;right:-28px;top:50%;transform:translateY(-50%);width:28px;height:52px;background:#1d4ed8;border-radius:0 8px 8px 0;color:#fff;font-size:18px;line-height:52px;text-align:center;cursor:pointer;z-index:201}
+  #sidebar.open::after{content:'‹'}
   .sidebar-overlay{display:none;position:fixed;inset:0;background:#00000055;z-index:199}
   .sidebar-overlay.show{display:block}
   #main{width:100%;padding-left:0}
@@ -721,11 +720,13 @@ function closeSidebar() {
   document.getElementById('sidebar').classList.remove('open')
   document.getElementById('sidebarOverlay').classList.remove('show')
 }
-// Tap the sidebar strip (closed state) to open
+// Tap the arrow tab to toggle sidebar
 document.addEventListener('DOMContentLoaded', () => {
   const s = document.getElementById('sidebar')
   if (s) s.addEventListener('click', (e) => {
-    if (!s.classList.contains('open')) { toggleSidebar(); e.stopPropagation() }
+    const rect = s.getBoundingClientRect()
+    // click hit the ::after tab (right of sidebar)
+    if (e.clientX > rect.right - 4) { toggleSidebar(); e.stopPropagation() }
   })
 })
 
