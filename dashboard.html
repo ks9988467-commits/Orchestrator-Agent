@@ -6,243 +6,364 @@
 <title>Orchestrator Agent</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0a;color:#d4d4d4;height:100vh;display:flex;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1f2e;color:#c8d3e8;height:100vh;display:flex;overflow:hidden}
 #app{display:flex;flex:1;overflow:hidden}
 
 /* ── Sidebar ── */
-#sidebar{width:220px;flex-shrink:0;background:#111;border-right:1px solid #1e1e1e;display:flex;flex-direction:column}
-.sidebar-brand{padding:20px 18px 16px;border-bottom:1px solid #1e1e1e}
+#sidebar{width:220px;flex-shrink:0;background:#141928;border-right:1px solid #252d40;display:flex;flex-direction:column}
+.sidebar-brand{padding:20px 18px 16px;border-bottom:1px solid #252d40}
 .sidebar-brand .logo{font-size:20px;margin-bottom:4px}
 .sidebar-brand h1{font-size:13px;font-weight:700;color:#fff;line-height:1.3}
-.sidebar-brand p{font-size:11px;color:#555;margin-top:2px}
-nav{padding:12px 8px;flex:1;display:flex;flex-direction:column;gap:2px}
-.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:7px;cursor:pointer;border:none;background:none;color:#666;font-size:13px;text-align:left;width:100%;transition:background .15s,color .15s;-webkit-appearance:none;appearance:none}
-.nav-item:hover{background:#1a1a1a;color:#ccc}
-.nav-item.active{background:#1d4ed820;color:#60a5fa}
+.sidebar-brand p{font-size:11px;color:#4e6285;margin-top:2px}
+nav{padding:12px 8px;flex:1;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:7px;cursor:pointer;border:none;background:none;color:#5a7090;font-size:13px;text-align:left;width:100%;transition:background .15s,color .15s;-webkit-appearance:none;appearance:none}
+.nav-item:hover{background:#222d42;color:#ccc}
+.nav-item.active{background:#1d4ed8;color:#60a5fa}
 .nav-item .icon{font-size:15px;width:18px;text-align:center;flex-shrink:0}
-.nav-divider{height:1px;background:#1a1a1a;margin:8px 2px}
-.sidebar-footer{padding:12px 10px;border-top:1px solid #1e1e1e}
+.nav-divider{height:1px;background:#222d42;margin:8px 2px}
+.nav-group-label{font-size:10px;color:#344d6e;text-transform:uppercase;letter-spacing:.08em;padding:6px 10px 2px;font-weight:600}
+
+/* ── Home Overview ── */
+.home-content{flex:1;overflow-y:auto;padding:24px 28px;display:flex;flex-direction:column;gap:20px}
+.home-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}
+.metric-card{background:#1e2436;border:1px solid #2a3452;border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:5px;transition:border-color .15s;cursor:default}
+.metric-card:hover{border-color:#344d6e}
+.metric-card .mc-icon{font-size:18px;margin-bottom:2px}
+.metric-card .mc-label{font-size:10px;color:#4e6285;text-transform:uppercase;letter-spacing:.06em}
+.metric-card .mc-value{font-size:26px;font-weight:700;color:#fff;line-height:1.1}
+.metric-card .mc-sub{font-size:11px;color:#344d6e}
+.metric-card.warn-card{border-color:#f59e0b}
+.metric-card.good-card{border-color:#22c55e}
+.home-section-title{font-size:10px;color:#4e6285;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;font-weight:600}
+.home-row{display:flex;gap:14px}
+.home-panel{flex:1;background:#1e2436;border:1px solid #2a3452;border-radius:12px;padding:16px 18px;min-width:0}
+.share-btn{display:flex;align-items:center;justify-content:center;gap:7px;padding:7px 10px;background:none;border:1px solid #2a3452;border-radius:7px;color:#4e6285;font-size:11px;cursor:pointer;width:100%;margin-top:8px;transition:all .15s}
+.share-btn:hover{border-color:#344d6e;color:#9bacc6}
+.sidebar-footer{padding:12px 10px;border-top:1px solid #2a3452}
 .provider-badge{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;margin-bottom:2px}
-.provider-badge .label{font-size:11px;color:#555;flex:1}
-.provider-badge .pvd-model{font-size:10px;color:#333;font-family:monospace;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dot{width:7px;height:7px;border-radius:50%;background:#2a2a2a;flex-shrink:0}
-.dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e88}
-.dot.warn{background:#f59e0b;box-shadow:0 0 5px #f59e0b88}
+.provider-badge .label{font-size:11px;color:#4e6285;flex:1}
+.provider-badge .pvd-model{font-size:10px;color:#344d6e;font-family:monospace;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:#2d3a55;flex-shrink:0}
+.dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e}
+.dot.warn{background:#f59e0b;box-shadow:0 0 5px #f59e0b}
 
 /* ── Main ── */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .page{display:none;flex:1;flex-direction:column;overflow:hidden}
 .page.active{display:flex}
-.page-header{padding:20px 28px 16px;flex-shrink:0;border-bottom:1px solid #141414}
+.page-header{padding:20px 28px 16px;flex-shrink:0;border-bottom:1px solid #1e2639}
 .page-header h2{font-size:17px;font-weight:700;color:#fff}
-.page-header p{font-size:12px;color:#444;margin-top:3px}
+.page-header p{font-size:12px;color:#3d5272;margin-top:3px}
 
 /* ── Chat ── */
 #chatPage{padding:0}
 .messages{flex:1;overflow-y:auto;padding:24px 28px;display:flex;flex-direction:column;gap:14px}
 .msg{max-width:72%;padding:12px 16px;border-radius:14px;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
 .msg.user{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
-.msg.ai{align-self:flex-start;background:#171717;color:#d4d4d4;border-bottom-left-radius:4px;border:1px solid #1e1e1e}
+.msg.ai{align-self:flex-start;background:#1e2436;color:#c8d3e8;border-bottom-left-radius:4px;border:1px solid #2a3452}
 .msg-meta{font-size:10px;opacity:.45;margin-bottom:5px;text-transform:uppercase;letter-spacing:.06em;display:flex;gap:8px;align-items:center}
-.msg-meta .pvd{background:#ffffff0f;border-radius:3px;padding:1px 5px}
-.typing-indicator{align-self:flex-start;color:#444;font-size:13px;padding:4px 0}
+.msg-meta .pvd{background:#ffffff;border-radius:3px;padding:1px 5px}
+.typing-indicator{align-self:flex-start;color:#3d5272;font-size:13px;padding:4px 0}
 .stream-cursor{display:inline-block;color:#60a5fa;animation:blink 1s step-end infinite;font-size:13px;margin-left:1px;vertical-align:baseline}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-.msg.ai .chat-fb{display:flex;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid #1a1a1a}
-.input-bar{padding:16px 28px;border-top:1px solid #1a1a1a;display:flex;gap:10px;flex-shrink:0;background:#0a0a0a}
-.input-bar textarea{flex:1;background:#111;border:1px solid #222;border-radius:10px;padding:11px 14px;color:#d4d4d4;font-size:14px;resize:none;outline:none;line-height:1.5;font-family:inherit;transition:border-color .15s}
-.input-bar textarea:focus{border-color:#333}
+.msg.ai .chat-fb{display:flex;gap:4px;margin-top:8px;padding-top:8px;border-top:1px solid #25304a}
+.input-bar{padding:16px 28px;border-top:1px solid #25304a;display:flex;gap:10px;flex-shrink:0;background:#1a1f2e}
+.input-bar textarea{flex:1;background:#1e2436;border:1px solid #2a3452;border-radius:10px;padding:11px 14px;color:#c8d3e8;font-size:14px;resize:none;outline:none;line-height:1.5;font-family:inherit;transition:border-color .15s}
+.input-bar textarea:focus{border-color:#344d6e}
 .send-btn{background:#1d4ed8;border:none;border-radius:10px;color:#fff;padding:0 22px;font-size:14px;cursor:pointer;font-weight:500;transition:background .15s}
 .send-btn:hover{background:#2563eb}
-.send-btn:disabled{background:#1a1a1a;color:#444;cursor:not-allowed}
-.chat-session-bar{padding:8px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:8px;flex-shrink:0}
-.session-info{font-size:11px;color:#333;flex:1}
-.new-session-btn{font-size:11px;color:#444;background:none;border:1px solid #1e1e1e;border-radius:5px;padding:3px 10px;cursor:pointer;transition:all .15s}
-.new-session-btn:hover{color:#aaa;border-color:#333}
+.send-btn:disabled{background:#222d42;color:#3d5272;cursor:not-allowed}
+.chat-session-bar{padding:8px 28px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.session-info{font-size:11px;color:#344d6e;flex:1}
+.new-session-btn{font-size:11px;color:#3d5272;background:none;border:1px solid #2a3452;border-radius:5px;padding:3px 10px;cursor:pointer;transition:all .15s}
+.new-session-btn:hover{color:#9bacc6;border-color:#344d6e}
 
 /* ── Agents split layout ── */
 .agents-split{display:flex;flex:1;overflow:hidden}
-.agent-list{width:210px;flex-shrink:0;border-right:1px solid #1a1a1a;overflow-y:auto;padding:8px}
+.agent-list{width:210px;flex-shrink:0;border-right:1px solid #25304a;overflow-y:auto;padding:8px}
 .agent-list-item{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:8px;cursor:pointer;border:1px solid transparent;transition:background .15s}
-.agent-list-item:hover{background:#161616}
-.agent-list-item.active{background:#1d4ed812;border-color:#1d4ed830}
-.ali-dot{width:7px;height:7px;border-radius:50%;background:#2a2a2a;flex-shrink:0}
-.ali-dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e88}
-.ali-name{flex:1;font-size:13px;color:#aaa;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-list-item:hover{background:#1c2335}
+.agent-list-item.active{background:#1d4ed8;border-color:#1d4ed8}
+.ali-dot{width:7px;height:7px;border-radius:50%;background:#2d3a55;flex-shrink:0}
+.ali-dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e}
+.ali-name{flex:1;font-size:13px;color:#9bacc6;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .agent-list-item.active .ali-name{color:#93c5fd}
-.ali-pvd{font-size:10px;color:#333;background:#161616;border-radius:3px;padding:1px 5px;white-space:nowrap}
+.ali-pvd{font-size:10px;color:#344d6e;background:#1c2335;border-radius:3px;padding:1px 5px;white-space:nowrap}
 .agent-editor{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-width:0}
-.ae-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2a2a2a;font-size:13px}
-.ae-top{padding:18px 24px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:12px;flex-shrink:0}
-.ae-icon{width:36px;height:36px;border-radius:9px;background:#1a1a1a;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.ae-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2d3a55;font-size:13px}
+.ae-top{padding:18px 24px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.ae-icon{width:36px;height:36px;border-radius:9px;background:#222d42;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
 .ae-top h3{flex:1;font-size:15px;font-weight:700;color:#fff}
 .ae-toggle{display:flex;align-items:center;gap:7px}
-.ae-toggle span{font-size:11px;color:#555}
+.ae-toggle span{font-size:11px;color:#4e6285}
 .ts-wrap{position:relative;display:inline-block;width:36px;height:20px}
 .ts-wrap input{opacity:0;width:0;height:0;position:absolute}
-.ts-slider{position:absolute;inset:0;background:#222;border-radius:20px;cursor:pointer;transition:background .2s}
-.ts-slider:before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#444;border-radius:50%;transition:transform .2s}
+.ts-slider{position:absolute;inset:0;background:#222d42;border-radius:20px;cursor:pointer;transition:background .2s}
+.ts-slider:before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#3d5272;border-radius:50%;transition:transform .2s}
 .ts-wrap input:checked+.ts-slider{background:#22c55e}
 .ts-wrap input:checked+.ts-slider:before{transform:translateX(16px);background:#fff}
 .ae-body{padding:20px 24px;display:flex;flex-direction:column;gap:14px}
 .ae-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.ae-field label{display:block;font-size:11px;color:#555;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
-.ae-field input,.ae-field select{width:100%;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:8px 11px;color:#d4d4d4;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
-.ae-field input:focus,.ae-field select:focus{border-color:#333}
-.ae-field select option{background:#111}
+.ae-field label{display:block;font-size:11px;color:#4e6285;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+.ae-field input,.ae-field select{width:100%;background:#171e2f;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.ae-field input:focus,.ae-field select:focus{border-color:#344d6e}
+.ae-field select option{background:#1e2436}
 .ae-prompt-label{display:flex;align-items:center;gap:8px;margin-bottom:5px}
-.ae-prompt-label span:first-child{font-size:11px;color:#555;text-transform:uppercase;letter-spacing:.05em;flex:1}
-.ae-char{font-size:10px;color:#333}
-.ae-prompt-wrap textarea{width:100%;min-height:160px;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;color:#d4d4d4;font-size:13px;font-family:inherit;padding:11px 13px;resize:vertical;line-height:1.65;outline:none;transition:border-color .15s}
-.ae-prompt-wrap textarea:focus{border-color:#333}
-.ae-test-section{border-top:1px solid #141414;padding:16px 24px;flex-shrink:0}
-.ae-test-hd{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+.ae-prompt-label span:first-child{font-size:11px;color:#4e6285;text-transform:uppercase;letter-spacing:.05em;flex:1}
+.ae-char{font-size:10px;color:#344d6e}
+.ae-prompt-wrap textarea{width:100%;min-height:160px;background:#171e2f;border:1px solid #2a3452;border-radius:8px;color:#c8d3e8;font-size:13px;font-family:inherit;padding:11px 13px;resize:vertical;line-height:1.65;outline:none;transition:border-color .15s}
+.ae-prompt-wrap textarea:focus{border-color:#344d6e}
+.ae-test-section{border-top:1px solid #1e2639;padding:16px 24px;flex-shrink:0}
+.ae-test-hd{font-size:10px;color:#344d6e;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
 .ae-test-msgs{min-height:60px;max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .ae-tmsg{padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;max-width:85%}
 .ae-tmsg.user{align-self:flex-end;background:#1d4ed8;color:#fff}
-.ae-tmsg.ai{align-self:flex-start;background:#171717;color:#d4d4d4;border:1px solid #1e1e1e}
+.ae-tmsg.ai{align-self:flex-start;background:#1e2436;color:#c8d3e8;border:1px solid #2a3452}
 .ae-test-bar{display:flex;gap:8px}
-.ae-test-bar input{flex:1;background:#111;border:1px solid #1e1e1e;border-radius:7px;color:#d4d4d4;padding:8px 12px;font-size:13px;outline:none;transition:border-color .15s}
-.ae-test-bar input:focus{border-color:#333}
-.ae-footer{padding:14px 24px;border-top:1px solid #141414;display:flex;gap:8px;justify-content:space-between;flex-shrink:0}
-.ae-save-msg{font-size:12px;color:#555;align-self:center}
-.btn-danger{padding:8px 16px;background:none;border:1px solid #ef444430;border-radius:7px;color:#ef4444;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
-.btn-danger:hover{background:#ef444412;border-color:#ef4444}
+.ae-test-bar input{flex:1;background:#1e2436;border:1px solid #2a3452;border-radius:7px;color:#c8d3e8;padding:8px 12px;font-size:13px;outline:none;transition:border-color .15s}
+.ae-test-bar input:focus{border-color:#344d6e}
+.ae-footer{padding:14px 24px;border-top:1px solid #1e2639;display:flex;gap:8px;justify-content:space-between;flex-shrink:0}
+.ae-save-msg{font-size:12px;color:#4e6285;align-self:center}
+.btn-danger{padding:8px 16px;background:none;border:1px solid #ef4444;border-radius:7px;color:#ef4444;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.btn-danger:hover{background:#ef4444;border-color:#ef4444}
 .agent-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
-.agent-icon.chat{background:#1d4ed815}
-.agent-icon.crm{background:#7c3aed15}
-.agent-icon.account{background:#05966915}
-.agent-icon.code{background:#d9770615}
+.agent-icon.chat{background:#1d4ed8}
+.agent-icon.crm{background:#7c3aed}
+.agent-icon.account{background:#059669}
+.agent-icon.code{background:#d97706}
+.agent-icon.report{background:#f59e0b}
+
+/* ── Analytics charts ── */
+.an-charts-wrap{display:none;padding:12px 20px 0;gap:12px;flex-shrink:0}
+.an-charts-wrap.open{display:flex}
+.an-chart-box{flex:1;background:#1e2436;border:1px solid #2a3452;border-radius:10px;padding:12px;height:200px;min-width:0}
+
+/* ── Alerts page ── */
+.alerts-layout{display:flex;flex:1;overflow:hidden}
+.alerts-rules{width:300px;flex-shrink:0;border-right:1px solid #25304a;display:flex;flex-direction:column;overflow:hidden}
+.alerts-history{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.alr-toolbar{padding:14px 20px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.alr-toolbar h4{flex:1;font-size:13px;font-weight:600;color:#fff}
+.alr-body{flex:1;overflow-y:auto;padding:12px}
+.alr-card{background:#1e2436;border:1px solid #2a3452;border-radius:9px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+.alr-card-info{flex:1;min-width:0}
+.alr-name{font-size:13px;color:#c8d3e8;margin-bottom:3px}
+.alr-meta{font-size:11px;color:#3d5272;font-family:monospace}
+.alr-del{background:none;border:1px solid #2a3452;border-radius:5px;color:#3d5272;padding:3px 8px;font-size:12px;cursor:pointer;transition:all .15s;flex-shrink:0;-webkit-appearance:none}
+.alr-del:hover{border-color:#ef4444;color:#ef4444;background:#ef4444}
+.alert-row{padding:10px 20px;border-bottom:1px solid #161e2f;display:grid;grid-template-columns:100px 1fr 80px 80px 90px;gap:10px;font-size:12px;align-items:center}
+.alert-row-hd{padding:8px 20px;border-bottom:1px solid #2a3452;display:grid;grid-template-columns:100px 1fr 80px 80px 90px;gap:10px}
+.alert-row-hd span{font-size:10px;color:#344d6e;text-transform:uppercase;letter-spacing:.07em}
+.alr-rule-form{padding:14px;background:#171e2f;border-top:1px solid #1e2639;flex-shrink:0}
+.alr-rule-form label{display:block;font-size:10px;color:#3d5272;margin-bottom:4px;margin-top:10px;text-transform:uppercase;letter-spacing:.05em}
+.alr-rule-form label:first-child{margin-top:0}
+.alr-rule-form input,.alr-rule-form select{width:100%;background:#1e2436;border:1px solid #2a3452;border-radius:6px;color:#c8d3e8;padding:7px 10px;font-size:12px;outline:none;font-family:inherit}
+.alert-badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:500}
+.alert-badge.high{background:#ef4444;color:#ef4444}
+.alert-badge.med{background:#f59e0b;color:#f59e0b}
+.alert-badge.low{background:#22c55e;color:#22c55e}
 
 /* ── Config & API ── */
 .scroll-page{overflow-y:auto;padding:20px 28px;flex:1;display:flex;flex-direction:column;gap:0}
-.section-label{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;margin-top:24px}
+.section-label{font-size:10px;color:#3d5272;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;margin-top:24px}
 .section-label:first-child{margin-top:0}
 .card-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:4px}
-.card{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:18px 20px}
+.card{background:#1e2436;border:1px solid #2a3452;border-radius:10px;padding:18px 20px}
 .card-hd{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .card-hd h4{font-size:14px;font-weight:600;color:#fff;flex:1}
-label.lbl{display:block;font-size:11px;color:#555;margin-bottom:5px;margin-top:14px}
+label.lbl{display:block;font-size:11px;color:#4e6285;margin-bottom:5px;margin-top:14px}
 label.lbl:first-child{margin-top:0}
 .irow{display:flex;gap:6px}
-input[type=text],input[type=password],input[type=number],textarea.field{width:100%;flex:1;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:9px 12px;color:#d4d4d4;font-size:13px;font-family:monospace;outline:none;transition:border-color .15s}
-input:focus,textarea.field:focus{border-color:#333}
+input[type=text],input[type=password],input[type=number],textarea.field{width:100%;flex:1;background:#171e2f;border:1px solid #2a3452;border-radius:7px;padding:9px 12px;color:#c8d3e8;font-size:13px;font-family:monospace;outline:none;transition:border-color .15s}
+input:focus,textarea.field:focus{border-color:#344d6e}
 textarea.field{resize:vertical;line-height:1.5;font-family:inherit;font-size:13px;min-height:90px}
-select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7px;padding:9px 12px;font-size:13px;cursor:pointer;outline:none;width:100%}
+select{background:#171e2f;border:1px solid #2a3452;color:#c8d3e8;border-radius:7px;padding:9px 12px;font-size:13px;cursor:pointer;outline:none;width:100%}
 .chk-row{display:flex;align-items:center;gap:8px;margin:12px 0}
 .chk-row input[type=checkbox]{accent-color:#22c55e;cursor:pointer;width:15px;height:15px;flex-shrink:0}
-.chk-row span{font-size:13px;color:#888}
+.chk-row span{font-size:13px;color:#7a8daa}
 .btn-primary{padding:9px 20px;background:#1d4ed8;border:none;border-radius:7px;color:#fff;font-size:13px;cursor:pointer;font-weight:500;transition:background .15s;-webkit-appearance:none;appearance:none}
 .btn-primary:hover{background:#2563eb}
-.btn-secondary{padding:9px 20px;background:#1a1a1a;border:1px solid #222;border-radius:7px;color:#888;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
-.btn-secondary:hover{background:#222;color:#ccc}
+.btn-sm{padding:6px 14px;font-size:12px;border-radius:6px}
+.btn-secondary{padding:9px 20px;background:#222d42;border:1px solid #2a3452;border-radius:7px;color:#7a8daa;font-size:13px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.btn-secondary:hover{background:#222d42;color:#ccc}
 .btn-full{width:100%;padding:10px;border-radius:7px;font-size:13px;cursor:pointer;border:none;margin-top:10px;-webkit-appearance:none;appearance:none}
-.status-txt{font-size:12px;color:#555;min-height:16px;margin-top:8px}
+.status-txt{font-size:12px;color:#4e6285;min-height:16px;margin-top:8px}
 .ok{color:#22c55e}
 .err{color:#ef4444}
-.show-btn{background:#1a1a1a;border:1px solid #1e1e1e;color:#666;border-radius:7px;padding:0 12px;cursor:pointer;font-size:12px;white-space:nowrap;transition:all .15s;-webkit-appearance:none;appearance:none}
-.show-btn:hover{color:#aaa;border-color:#333}
-.default-bar{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
-.default-bar label{font-size:13px;color:#888}
+.show-btn{background:#222d42;border:1px solid #2a3452;color:#5a7090;border-radius:7px;padding:0 12px;cursor:pointer;font-size:12px;white-space:nowrap;transition:all .15s;-webkit-appearance:none;appearance:none}
+.show-btn:hover{color:#9bacc6;border-color:#344d6e}
+.default-bar{background:#1e2436;border:1px solid #2a3452;border-radius:10px;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.default-bar label{font-size:13px;color:#7a8daa}
 .default-bar select{width:auto}
 .agent-llm-table{width:100%;border-collapse:collapse}
-.agent-llm-table th{font-size:10px;color:#444;text-align:left;padding:0 10px 10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}
-.agent-llm-table td{padding:8px 10px;vertical-align:middle;border-top:1px solid #1a1a1a}
+.agent-llm-table th{font-size:10px;color:#3d5272;text-align:left;padding:0 10px 10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em}
+.agent-llm-table td{padding:8px 10px;vertical-align:middle;border-top:1px solid #25304a}
 .agent-llm-table td select,.agent-llm-table td input{padding:7px 10px}
 .sm-btn{padding:7px 14px;background:#1d4ed8;border:none;border-radius:6px;color:#fff;font-size:12px;cursor:pointer;-webkit-appearance:none;appearance:none}
 .sm-btn:hover{background:#2563eb}
 
 /* ── Model picker ── */
-.model-select{display:none;width:100%;margin-top:6px;padding:7px 10px;background:#161616;border:1px solid #333;border-radius:6px;color:#ccc;font-size:12px;font-family:monospace;cursor:pointer;outline:none}
-.model-select option{background:#1a1a1a;color:#ccc}
+.model-select{display:none;width:100%;margin-top:6px;padding:7px 10px;background:#1c2335;border:1px solid #3d5272;border-radius:6px;color:#ccc;font-size:12px;font-family:monospace;cursor:pointer;outline:none}
+.model-select option{background:#222d42;color:#ccc}
 
 /* ── Skills page ── */
 .skills-layout{display:flex;flex:1;overflow:hidden}
-.skills-agents{width:200px;flex-shrink:0;border-right:1px solid #1a1a1a;overflow-y:auto;padding:8px}
+.skills-agents{width:200px;flex-shrink:0;border-right:1px solid #25304a;overflow-y:auto;padding:8px}
 .skills-agent-btn{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:none;width:100%;text-align:left;transition:background .15s;-webkit-appearance:none}
-.skills-agent-btn:hover{background:#161616}
-.skills-agent-btn.active{background:#1d4ed812;border-color:#1d4ed830}
+.skills-agent-btn:hover{background:#1c2335}
+.skills-agent-btn.active{background:#1d4ed8;border-color:#1d4ed8}
 .skills-agent-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0}
-.skills-agent-name{flex:1;font-size:13px;color:#aaa;font-weight:500}
+.skills-agent-name{flex:1;font-size:13px;color:#9bacc6;font-weight:500}
 .skills-agent-btn.active .skills-agent-name{color:#93c5fd}
-.skills-badge{font-size:10px;background:#1e1e1e;color:#444;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
-.skills-badge.has{background:#22c55e18;color:#22c55e}
+.skills-badge{font-size:10px;background:#222d42;color:#3d5272;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
+.skills-badge.has{background:#22c55e;color:#22c55e}
 .skills-panel{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.skills-toolbar{padding:14px 20px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.skills-toolbar{padding:14px 20px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .skills-toolbar h3{font-size:14px;font-weight:600;color:#fff;flex:1}
 .skills-body{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:8px}
-.skill-card{background:#111;border:1px solid #1e1e1e;border-radius:9px;padding:13px 16px;display:flex;align-items:flex-start;gap:12px;transition:border-color .15s}
-.skill-card:hover{border-color:#2a2a2a}
+.skill-card{background:#1e2436;border:1px solid #2a3452;border-radius:9px;padding:13px 16px;display:flex;align-items:flex-start;gap:12px;transition:border-color .15s}
+.skill-card:hover{border-color:#2d3a55}
 .skill-type{font-size:14px;flex-shrink:0;margin-top:1px}
 .skill-content{flex:1;min-width:0}
 .skill-text{font-size:13px;color:#ccc;line-height:1.6;word-break:break-word}
-.skill-meta{font-size:11px;color:#333;margin-top:5px;font-family:monospace}
-.skill-del{background:none;border:1px solid #1e1e1e;border-radius:6px;color:#444;padding:4px 9px;font-size:12px;cursor:pointer;flex-shrink:0;transition:all .15s;-webkit-appearance:none}
-.skill-del:hover{border-color:#ef444460;color:#ef4444;background:#ef444410}
-.skills-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#2a2a2a;gap:8px}
+.skill-meta{font-size:11px;color:#344d6e;margin-top:5px;font-family:monospace}
+.skill-del{background:none;border:1px solid #2a3452;border-radius:6px;color:#3d5272;padding:4px 9px;font-size:12px;cursor:pointer;flex-shrink:0;transition:all .15s;-webkit-appearance:none}
+.skill-del:hover{border-color:#ef4444;color:#ef4444;background:#ef4444}
+.skills-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#2d3a55;gap:8px}
 .skills-empty p{font-size:13px}
 .skills-empty span{font-size:32px}
-.skills-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2a2a2a;font-size:13px}
+.skills-placeholder{flex:1;display:flex;align-items:center;justify-content:center;color:#2d3a55;font-size:13px}
+
+/* ── Workflows page ── */
+.wf-toolbar{padding:14px 28px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.wf-toolbar h3{font-size:14px;font-weight:600;color:#fff;flex:1}
+.wf-body{flex:1;overflow-y:auto;padding:20px 28px;display:flex;flex-direction:column;gap:10px}
+.wf-card{background:#1e2436;border:1px solid #2a3452;border-radius:10px;padding:16px 18px;display:flex;align-items:center;gap:14px;transition:border-color .15s}
+.wf-card:hover{border-color:#2d3a55}
+.wf-card-icon{font-size:22px;flex-shrink:0}
+.wf-card-info{flex:1;min-width:0}
+.wf-card-name{font-size:14px;font-weight:600;color:#fff;margin-bottom:3px}
+.wf-card-desc{font-size:12px;color:#3d5272;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wf-card-meta{display:flex;align-items:center;gap:10px;margin-top:6px}
+.wf-sched{font-size:11px;color:#4e6285;background:#1c2335;border-radius:4px;padding:2px 8px;font-family:monospace}
+.wf-next{font-size:11px;color:#344d6e;font-family:monospace}
+.wf-status{display:flex;align-items:center;gap:5px;font-size:11px}
+.wf-dot{width:6px;height:6px;border-radius:50%;background:#3d5272;flex-shrink:0}
+.wf-dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e}
+.wf-dot.off{background:#555}
+.wf-status-txt{color:#3d5272}
+.wf-actions{display:flex;gap:6px;flex-shrink:0}
+.wf-btn{background:none;border:1px solid #2a3452;border-radius:6px;color:#4e6285;padding:5px 10px;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none}
+.wf-btn:hover{border-color:#344d6e;color:#9bacc6}
+.wf-btn.run{border-color:#1d4ed8;color:#60a5fa}
+.wf-btn.run:hover{background:#1d4ed8;border-color:#60a5fa}
+.wf-btn.del:hover{border-color:#ef4444;color:#ef4444;background:#ef4444}
+.wf-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#4e6285;gap:10px}
+.wf-empty span{font-size:36px}
+.wf-empty p{font-size:13px;color:#4e6285}
+.wf-hist-section{background:#1e2436;border:1px solid #2a3452;border-radius:10px;overflow:hidden}
+.wf-hist-title{padding:10px 14px;border-bottom:1px solid #25304a;font-size:12px;font-weight:600;color:#5a7090;display:flex;align-items:center;gap:8px}
+.wf-hist-row{display:grid;grid-template-columns:80px 1fr 80px 80px;gap:10px;padding:9px 14px;border-bottom:1px solid #161e2f;align-items:center;font-size:12px}
+.wf-hist-row:last-child{border-bottom:none}
+.wf-run-ok{color:#22c55e}
+.wf-run-fail{color:#ef4444}
+.wf-run-running{color:#f59e0b}
+/* ── Workflow modal ── */
+.wf-modal-bg{position:fixed;inset:0;background:#000000;display:none;align-items:center;justify-content:center;z-index:1000}
+.wf-modal-bg.open{display:flex}
+.wf-modal{background:#1e2436;border:1px solid #2a3452;border-radius:12px;width:460px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;overflow:hidden}
+.wf-modal-hd{padding:16px 20px;border-bottom:1px solid #25304a;display:flex;align-items:center}
+.wf-modal-hd h4{flex:1;font-size:15px;font-weight:700;color:#fff}
+.wf-modal-close{background:none;border:none;color:#4e6285;font-size:18px;cursor:pointer;padding:2px 6px;-webkit-appearance:none}
+.wf-modal-body{flex:1;overflow-y:auto;padding:20px}
+.wf-form-field{margin-bottom:14px}
+.wf-form-field label{display:block;font-size:11px;color:#4e6285;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+.wf-form-field input,.wf-form-field select,.wf-form-field textarea{width:100%;background:#171e2f;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.wf-form-field input:focus,.wf-form-field select:focus,.wf-form-field textarea:focus{border-color:#344d6e}
+.wf-form-field select option{background:#1e2436}
+.wf-form-field textarea{min-height:80px;resize:vertical;line-height:1.5}
+.wf-sched-hint{font-size:11px;color:#344d6e;margin-top:4px;font-family:monospace}
+.wf-modal-ft{padding:14px 20px;border-top:1px solid #25304a;display:flex;gap:8px;justify-content:flex-end}
+
+/* ── Session history panel ── */
+.session-history-panel{position:absolute;top:88px;right:28px;width:320px;max-height:340px;overflow-y:auto;background:#1c2335;border:1px solid #2d3a55;border-radius:10px;box-shadow:0 8px 24px #000000;z-index:50;display:none}
+.session-history-panel.open{display:block}
+.sh-item{padding:10px 14px;border-bottom:1px solid #25304a;cursor:pointer;transition:background .1s}
+.sh-item:hover{background:#222d42}
+.sh-item:last-child{border-bottom:none}
+.sh-item.sh-active{background:#1d4ed8;border-left:2px solid #1d4ed8}
+.sh-time{font-size:10px;color:#3d5272;margin-bottom:3px}
+.sh-preview{font-size:12px;color:#7a8daa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── CSV import modal ── */
+.import-modal-bg{position:fixed;inset:0;background:#000000;display:flex;align-items:center;justify-content:center;z-index:100;display:none}
+.import-modal-bg.open{display:flex}
+.import-modal{background:#1c2335;border:1px solid #2d3a55;border-radius:12px;width:480px;max-width:96vw;padding:24px}
+.import-modal h3{font-size:15px;font-weight:700;color:#fff;margin-bottom:8px}
+.import-modal p{font-size:12px;color:#4e6285;margin-bottom:16px}
+.import-preview{background:#1e2436;border:1px solid #2a3452;border-radius:8px;padding:12px;font-size:12px;color:#7a8daa;font-family:monospace;margin-bottom:16px;max-height:120px;overflow-y:auto}
+.import-ft{display:flex;gap:8px;justify-content:flex-end}
 
 /* ── Logs page (Dify-inspired) ── */
-.logs-toolbar{padding:14px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:10px;flex-shrink:0}
-.logs-filter{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:6px 12px;color:#888;font-size:12px;cursor:pointer;outline:none}
-.logs-refresh{background:none;border:1px solid #1e1e1e;border-radius:7px;padding:6px 12px;color:#555;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
-.logs-refresh:hover{color:#aaa;border-color:#333}
-.logs-count{font-size:12px;color:#333;margin-left:auto}
+.logs-toolbar{padding:14px 28px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.logs-filter{background:#1e2436;border:1px solid #2a3452;border-radius:7px;padding:6px 12px;color:#7a8daa;font-size:12px;cursor:pointer;outline:none}
+.logs-refresh{background:none;border:1px solid #2a3452;border-radius:7px;padding:6px 12px;color:#4e6285;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.logs-refresh:hover{color:#9bacc6;border-color:#344d6e}
+.logs-count{font-size:12px;color:#344d6e;margin-left:auto}
 .logs-body{flex:1;overflow-y:auto;padding:0}
-.log-row{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;align-items:center;padding:10px 28px;border-bottom:1px solid #0f0f0f;gap:12px;transition:background .12s}
-.log-row:hover{background:#0d0d0d}
-.log-row-hd{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;padding:8px 28px;border-bottom:1px solid #1e1e1e;gap:12px}
-.log-row-hd span{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:.07em}
+.log-row{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;align-items:center;padding:10px 28px;border-bottom:1px solid #161e2f;gap:12px;transition:background .12s}
+.log-row:hover{background:#171e2f}
+.log-row-hd{display:grid;grid-template-columns:100px 80px 1fr 110px 70px;padding:8px 28px;border-bottom:1px solid #2a3452;gap:12px}
+.log-row-hd span{font-size:10px;color:#344d6e;text-transform:uppercase;letter-spacing:.07em}
 .fb-btns{display:flex;gap:4px}
-.fb-btn{background:none;border:1px solid #1e1e1e;border-radius:5px;padding:2px 7px;font-size:13px;cursor:pointer;color:#444;transition:all .15s;-webkit-appearance:none;appearance:none}
-.fb-btn:hover{border-color:#444;color:#ccc}
-.fb-btn.good.active{border-color:#22c55e;background:#22c55e18;color:#22c55e}
-.fb-btn.bad.active{border-color:#ef4444;background:#ef444418;color:#ef4444}
+.fb-btn{background:none;border:1px solid #2a3452;border-radius:5px;padding:2px 7px;font-size:13px;cursor:pointer;color:#3d5272;transition:all .15s;-webkit-appearance:none;appearance:none}
+.fb-btn:hover{border-color:#3d5272;color:#ccc}
+.fb-btn.good.active{border-color:#22c55e;background:#22c55e;color:#22c55e}
+.fb-btn.bad.active{border-color:#ef4444;background:#ef4444;color:#ef4444}
 .log-role{font-size:11px;padding:2px 8px;border-radius:4px;text-align:center;font-weight:500}
-.log-role.user{background:#1d4ed815;color:#60a5fa}
-.log-role.assistant{background:#05966915;color:#34d399}
-.log-agent{font-size:11px;color:#555;font-family:monospace}
-.log-content{font-size:13px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.log-time{font-size:11px;color:#333;text-align:right;font-family:monospace}
-.log-empty{padding:60px;text-align:center;color:#333;font-size:14px}
+.log-role.user{background:#1d4ed8;color:#60a5fa}
+.log-role.assistant{background:#059669;color:#34d399}
+.log-agent{font-size:11px;color:#4e6285;font-family:monospace}
+.log-content{font-size:13px;color:#7a8daa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-time{font-size:11px;color:#344d6e;text-align:right;font-family:monospace}
+.log-empty{padding:60px;text-align:center;color:#344d6e;font-size:14px}
 
 /* ── Data page ── */
 .data-page{display:flex;flex-direction:column;flex:1;overflow:hidden}
-.data-tabs{display:flex;gap:4px;padding:16px 28px 0;border-bottom:1px solid #141414;flex-shrink:0}
-.data-tab{padding:8px 18px;border-radius:7px 7px 0 0;font-size:13px;cursor:pointer;border:none;background:none;color:#555;border-bottom:2px solid transparent;transition:all .15s;-webkit-appearance:none;appearance:none;margin-bottom:-1px}
-.data-tab:hover{color:#aaa}
-.data-tab.active{color:#60a5fa;border-bottom-color:#60a5fa;background:#1d4ed808}
-.data-toolbar{padding:14px 28px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap}
-.data-toolbar input,.data-toolbar select{background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:6px 11px;color:#aaa;font-size:12px;outline:none;transition:border-color .15s}
+.data-tabs{display:flex;gap:4px;padding:16px 28px 0;border-bottom:1px solid #1e2639;flex-shrink:0}
+.data-tab{padding:8px 18px;border-radius:7px 7px 0 0;font-size:13px;cursor:pointer;border:none;background:none;color:#4e6285;border-bottom:2px solid transparent;transition:all .15s;-webkit-appearance:none;appearance:none;margin-bottom:-1px}
+.data-tab:hover{color:#9bacc6}
+.data-tab.active{color:#60a5fa;border-bottom-color:#60a5fa;background:#1d4ed8}
+.data-toolbar{padding:14px 28px;border-bottom:1px solid #1e2639;display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap}
+.data-toolbar input,.data-toolbar select{background:#1e2436;border:1px solid #2a3452;border-radius:7px;padding:6px 11px;color:#9bacc6;font-size:12px;outline:none;transition:border-color .15s}
 .data-toolbar input{width:160px}
-.data-toolbar input:focus,.data-toolbar select:focus{border-color:#333}
-.data-toolbar input::placeholder{color:#333}
+.data-toolbar input:focus,.data-toolbar select:focus{border-color:#344d6e}
+.data-toolbar input::placeholder{color:#344d6e}
 .data-search-btn{padding:6px 14px;background:#1d4ed8;border:none;border-radius:7px;color:#fff;font-size:12px;cursor:pointer;-webkit-appearance:none;appearance:none}
 .data-search-btn:hover{background:#2563eb}
-.data-count{font-size:12px;color:#333;margin-left:auto}
+.data-count{font-size:12px;color:#344d6e;margin-left:auto}
 .data-table-wrap{flex:1;overflow:auto;padding:0 28px}
 .data-table{width:100%;border-collapse:collapse;font-size:12px}
-.data-table th{font-size:10px;color:#444;text-align:left;padding:10px 10px 8px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #1a1a1a;position:sticky;top:0;background:#0a0a0a;white-space:nowrap}
-.data-table td{padding:9px 10px;border-bottom:1px solid #0d0d0d;color:#888;vertical-align:top;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.data-table tr:hover td{background:#0d0d0d;color:#aaa}
+.data-table th{font-size:10px;color:#3d5272;text-align:left;padding:10px 10px 8px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #25304a;position:sticky;top:0;background:#1a1f2e;white-space:nowrap}
+.data-table td{padding:9px 10px;border-bottom:1px solid #171e2f;color:#7a8daa;vertical-align:top;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.data-table tr:hover td{background:#171e2f;color:#9bacc6}
 .data-table td.name{color:#ccc;font-weight:500}
-.data-table td.num{font-family:monospace;color:#666}
+.data-table td.num{font-family:monospace;color:#5a7090}
 .data-table td.spend{color:#34d399}
 .data-tags{display:flex;flex-wrap:wrap;gap:3px;max-width:300px}
-.dtag{font-size:10px;padding:1px 6px;border-radius:3px;background:#1a1a1a;color:#555;border:1px solid #222;white-space:nowrap}
-.dtag.google{background:#1d4ed812;color:#60a5fa;border-color:#1d4ed830}
-.dtag.potential{background:#05966912;color:#34d399;border-color:#05966930}
-.dtag.meta{background:#7c3aed12;color:#a78bfa;border-color:#7c3aed30}
-.data-pagination{padding:12px 28px;border-top:1px solid #141414;display:flex;align-items:center;gap:6px;flex-shrink:0}
-.pg-btn{padding:5px 11px;background:#111;border:1px solid #1e1e1e;border-radius:6px;color:#666;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
-.pg-btn:hover{border-color:#333;color:#aaa}
-.pg-btn.active{background:#1d4ed820;border-color:#1d4ed840;color:#60a5fa}
+.dtag{font-size:10px;padding:1px 6px;border-radius:3px;background:#222d42;color:#4e6285;border:1px solid #2a3452;white-space:nowrap}
+.dtag.google{background:#1d4ed8;color:#60a5fa;border-color:#1d4ed8}
+.dtag.potential{background:#059669;color:#34d399;border-color:#059669}
+.dtag.meta{background:#7c3aed;color:#a78bfa;border-color:#7c3aed}
+.data-pagination{padding:12px 28px;border-top:1px solid #1e2639;display:flex;align-items:center;gap:6px;flex-shrink:0}
+.pg-btn{padding:5px 11px;background:#1e2436;border:1px solid #2a3452;border-radius:6px;color:#5a7090;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.pg-btn:hover{border-color:#344d6e;color:#9bacc6}
+.pg-btn.active{background:#1d4ed8;border-color:#1d4ed8;color:#60a5fa}
 .pg-btn:disabled{opacity:.3;cursor:default}
-.pg-info{font-size:12px;color:#333;margin:0 6px}
+.pg-info{font-size:12px;color:#344d6e;margin:0 6px}
 
 /* ── Markdown in chat ── */
 .msg.ai .md h1,.msg.ai .md h2,.msg.ai .md h3{color:#fff;font-weight:600;margin:12px 0 6px;line-height:1.3}
@@ -250,46 +371,46 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 .msg.ai .md p{margin:6px 0;line-height:1.65}
 .msg.ai .md ul,.msg.ai .md ol{padding-left:18px;margin:6px 0}
 .msg.ai .md li{margin:3px 0;line-height:1.55}
-.msg.ai .md code{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;padding:1px 5px;font-family:monospace;font-size:12px;color:#86efac}
-.msg.ai .md pre{background:#111;border:1px solid #222;border-radius:8px;padding:12px 14px;overflow-x:auto;margin:8px 0}
-.msg.ai .md pre code{background:none;border:none;padding:0;font-size:12px;color:#d4d4d4}
+.msg.ai .md code{background:#222d42;border:1px solid #2d3a55;border-radius:4px;padding:1px 5px;font-family:monospace;font-size:12px;color:#86efac}
+.msg.ai .md pre{background:#1e2436;border:1px solid #2a3452;border-radius:8px;padding:12px 14px;overflow-x:auto;margin:8px 0}
+.msg.ai .md pre code{background:none;border:none;padding:0;font-size:12px;color:#c8d3e8}
 .msg.ai .md strong{color:#e5e7eb;font-weight:600}
 .msg.ai .md em{color:#9ca3af;font-style:italic}
-.msg.ai .md blockquote{border-left:3px solid #333;padding-left:10px;color:#666;margin:6px 0}
+.msg.ai .md blockquote{border-left:3px solid #3d5272;padding-left:10px;color:#5a7090;margin:6px 0}
 .msg.ai .md table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px}
-.msg.ai .md th{background:#1a1a1a;color:#aaa;padding:6px 10px;border:1px solid #222;text-align:left}
-.msg.ai .md td{padding:5px 10px;border:1px solid #1a1a1a;color:#888}
-.msg.ai .md hr{border:none;border-top:1px solid #1e1e1e;margin:10px 0}
+.msg.ai .md th{background:#222d42;color:#9bacc6;padding:6px 10px;border:1px solid #2a3452;text-align:left}
+.msg.ai .md td{padding:5px 10px;border:1px solid #25304a;color:#7a8daa}
+.msg.ai .md hr{border:none;border-top:1px solid #2a3452;margin:10px 0}
 .msg.ai .md a{color:#60a5fa;text-decoration:none}
 /* ── Log expand modal ── */
-.log-modal-bg{display:none;position:fixed;inset:0;background:#00000088;z-index:200;align-items:center;justify-content:center}
+.log-modal-bg{display:none;position:fixed;inset:0;background:#000000;z-index:200;align-items:center;justify-content:center}
 .log-modal-bg.open{display:flex}
-.log-modal{background:#111;border:1px solid #1e1e1e;border-radius:12px;width:680px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 60px #000a}
-.log-modal-hd{padding:18px 22px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.log-modal{background:#1e2436;border:1px solid #2a3452;border-radius:12px;width:680px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 60px #000a}
+.log-modal-hd{padding:18px 22px;border-bottom:1px solid #2a3452;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .log-modal-hd h4{flex:1;font-size:14px;font-weight:600;color:#fff}
-.log-modal-body{flex:1;overflow-y:auto;padding:18px 22px;font-size:13px;color:#aaa;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.log-modal-body{flex:1;overflow-y:auto;padding:18px 22px;font-size:13px;color:#9bacc6;line-height:1.7;white-space:pre-wrap;word-break:break-word}
 /* ── Stats bar ── */
-.data-stats{display:flex;gap:12px;padding:12px 28px;border-bottom:1px solid #141414;flex-shrink:0;flex-wrap:wrap}
-.dstat{background:#111;border:1px solid #1a1a1a;border-radius:8px;padding:10px 16px;min-width:110px}
+.data-stats{display:flex;gap:12px;padding:12px 28px;border-bottom:1px solid #1e2639;flex-shrink:0;flex-wrap:wrap}
+.dstat{background:#1e2436;border:1px solid #25304a;border-radius:8px;padding:10px 16px;min-width:110px}
 .dstat .dstat-val{font-size:18px;font-weight:700;color:#fff;font-family:monospace}
-.dstat .dstat-lbl{font-size:10px;color:#444;margin-top:3px;text-transform:uppercase;letter-spacing:.05em}
+.dstat .dstat-lbl{font-size:10px;color:#3d5272;margin-top:3px;text-transform:uppercase;letter-spacing:.05em}
 .dstat.green .dstat-val{color:#34d399}
 .dstat.blue .dstat-val{color:#60a5fa}
 .dstat.amber .dstat-val{color:#f59e0b}
 /* ── API integration status strip ── */
 .int-status-strip{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
-.int-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;border:1px solid #1e1e1e;background:#111;color:#555}
-.int-chip.on{border-color:#05966940;color:#34d399;background:#05966910}
+.int-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;border:1px solid #2a3452;background:#1e2436;color:#4e6285}
+.int-chip.on{border-color:#059669;color:#34d399;background:#059669}
 .int-chip .dot{width:5px;height:5px}
 
 /* ── Lock Screen ── */
-#lockScreen{position:fixed;inset:0;z-index:9999;background:#0a0a0a;display:flex;align-items:center;justify-content:center}
+#lockScreen{position:fixed;inset:0;z-index:9999;background:#1a1f2e;display:flex;align-items:center;justify-content:center}
 #lockScreen.hidden{display:none}
-.lock-card{background:#111;border:1px solid #1e1e1e;border-radius:16px;padding:40px 36px;width:340px;text-align:center}
+.lock-card{background:#1e2436;border:1px solid #2a3452;border-radius:16px;padding:40px 36px;width:340px;text-align:center}
 .lock-logo{font-size:36px;margin-bottom:12px}
 .lock-title{font-size:18px;font-weight:700;color:#fff;margin-bottom:4px}
-.lock-sub{font-size:12px;color:#555;margin-bottom:28px}
-.lock-input{width:100%;background:#0a0a0a;border:1px solid #222;border-radius:8px;padding:11px 14px;color:#d4d4d4;font-size:14px;outline:none;text-align:center;letter-spacing:2px;font-family:inherit;transition:border-color .15s}
+.lock-sub{font-size:12px;color:#4e6285;margin-bottom:28px}
+.lock-input{width:100%;background:#171e2f;border:1px solid #2a3452;border-radius:8px;padding:11px 14px;color:#c8d3e8;font-size:14px;outline:none;text-align:center;letter-spacing:2px;font-family:inherit;transition:border-color .15s}
 .lock-input:focus{border-color:#1d4ed8}
 .lock-btn{width:100%;margin-top:14px;background:#1d4ed8;border:none;border-radius:8px;color:#fff;padding:11px;font-size:14px;cursor:pointer;font-weight:600;transition:background .15s}
 .lock-btn:hover{background:#2563eb}
@@ -336,30 +457,45 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
     <p>Multi-Agent Brain</p>
   </div>
   <nav>
-    <button class="nav-item active" onclick="showPage('chat',this)">
+    <div class="nav-group-label">核心</div>
+    <button class="nav-item active" onclick="showPage('home',this)">
+      <span class="icon">🏠</span> 首页
+    </button>
+    <button class="nav-item" onclick="showPage('chat',this)">
       <span class="icon">💬</span> 对话
-    </button>
-    <button class="nav-item" onclick="showPage('agents',this)">
-      <span class="icon">🤖</span> Agents
-    </button>
-    <button class="nav-item" onclick="showPage('logs',this)">
-      <span class="icon">📋</span> 日志
     </button>
     <button class="nav-item" onclick="showPage('data',this)">
       <span class="icon">🗄️</span> 数据
     </button>
-    <button class="nav-item" onclick="showPage('skills',this)">
-      <span class="icon">🧠</span> 技能库
+    <div class="nav-divider"></div>
+    <div class="nav-group-label">自动化</div>
+    <button class="nav-item" onclick="showPage('workflows',this)">
+      <span class="icon">⏰</span> 调度
     </button>
     <div class="nav-divider"></div>
+    <div class="nav-group-label master-only" style="display:none">管理</div>
+    <button class="nav-item master-only" style="display:none" onclick="showPage('tenants',this)">
+      <span class="icon">🏢</span> 客户管理
+    </button>
+    <div class="nav-group-label">配置</div>
+    <button class="nav-item" onclick="showPage('agents',this)">
+      <span class="icon">🤖</span> Agents
+    </button>
     <button class="nav-item" onclick="showPage('llm',this)">
       <span class="icon">⚙️</span> LLM 配置
     </button>
     <button class="nav-item" onclick="showPage('api',this)">
       <span class="icon">🔌</span> API 对接
     </button>
+    <div class="nav-divider"></div>
+    <div class="nav-group-label">记录</div>
+    <button class="nav-item" onclick="showPage('logs',this)">
+      <span class="icon">📋</span> 记录
+    </button>
   </nav>
   <div class="sidebar-footer">
+    <div id="tenantNameBadge" style="font-size:10px;color:#344d6e;padding:0 2px 6px;text-align:center;font-weight:600;letter-spacing:.05em"></div>
+    <button class="share-btn" onclick="shareLink()">🔗 复制分享链接</button>
     <div class="provider-badge">
       <div class="dot" id="dot-anthropic"></div>
       <span class="label">Anthropic</span>
@@ -381,11 +517,33 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 <!-- Main -->
 <div id="main">
 
+  <!-- Home -->
+  <div class="page active" id="homePage">
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div><h2>🏠 概览</h2><p>关键指标汇总 · 实时数据</p></div>
+      <button class="btn-primary" style="font-size:12px;padding:6px 16px" onclick="renderHome()">↻ 刷新</button>
+    </div>
+    <div class="home-content" id="homeContent"><div style="color:#344d6e;font-size:13px;padding:20px">加载中…</div></div>
+  </div>
+
+  <!-- Tenants (master only) -->
+  <div class="page" id="tenantsPage">
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div><h2>🏢 客户管理</h2><p>所有租户 · 数据隔离</p></div>
+      <button class="btn-primary" style="font-size:12px;padding:6px 16px" onclick="loadTenantsPage()">↻ 刷新</button>
+    </div>
+    <div class="home-content" id="tenantsContent">
+      <div style="color:#4e6285;font-size:13px;padding:20px 0">加载中…</div>
+    </div>
+  </div>
+
   <!-- Chat -->
-  <div class="page active" id="chatPage">
-    <div class="chat-session-bar">
+  <div class="page" id="chatPage">
+    <div class="chat-session-bar" style="position:relative">
       <span class="session-info" id="sessionInfo">Session: —</span>
+      <button class="new-session-btn" onclick="toggleSessionHistory(event)">📋 历史</button>
       <button class="new-session-btn" onclick="newSession()">+ 新对话</button>
+      <div class="session-history-panel" id="sessionHistoryPanel"></div>
     </div>
     <div class="messages" id="messages">
       <div class="msg ai">
@@ -401,56 +559,99 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
 
   <!-- Agents -->
   <div class="page" id="agentsPage">
-    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-      <div><h2>Agents</h2><p>管理各 Agent 的定义、LLM 分配与启用状态</p></div>
-      <button class="btn-primary" style="font-size:12px;padding:7px 16px" onclick="newAgent()">+ 新建</button>
+    <!-- Tab bar - same style as data page -->
+    <div class="data-tabs" style="padding:16px 28px 0;border-bottom:1px solid #1e2639;flex-shrink:0;display:flex;gap:4px">
+      <button class="data-tab active" id="atab-config" onclick="switchAgentTab('config',this)">⚙️ 配置</button>
+      <button class="data-tab" id="atab-skills" onclick="switchAgentTab('skills',this)">🧠 技能</button>
     </div>
-    <div class="agents-split">
-      <div class="agent-list" id="agentList"><p style="color:#333;font-size:12px;padding:8px">加载中…</p></div>
-      <div class="agent-editor" id="agentEditor">
-        <div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>
+    <!-- Config panel (existing agents-split content) -->
+    <div id="agentConfigPanel" style="display:flex;flex:1;overflow:hidden;flex-direction:column">
+      <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <div><h2>Agents</h2><p>管理各 Agent 的定义、LLM 分配与启用状态</p></div>
+        <button class="btn-primary" style="font-size:12px;padding:7px 16px" onclick="newAgent()">+ 新建</button>
+      </div>
+      <div class="agents-split">
+        <div class="agent-list" id="agentList"><p style="color:#333;font-size:12px;padding:8px">加载中…</p></div>
+        <div class="agent-editor" id="agentEditor">
+          <div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>
+        </div>
+      </div>
+    </div>
+    <!-- Skills panel (skills content moved here) -->
+    <div id="agentSkillsPanel" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+      <div class="skills-layout">
+        <!-- Agent list -->
+        <div class="skills-agents" id="skillsAgentList"></div>
+        <!-- Skills panel -->
+        <div class="skills-panel" id="skillsPanel">
+          <div class="skills-placeholder">← 选择一个 Agent 查看技能</div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Logs (Dify-inspired) -->
+  <!-- Logs + Prefs (tabbed) -->
   <div class="page" id="logsPage">
-    <div class="page-header">
-      <h2>对话日志</h2>
-      <p>所有对话记录，显示路由 Agent 与 Provider</p>
+    <div class="data-tabs" style="padding:16px 28px 0;border-bottom:1px solid #1e2639;flex-shrink:0;display:flex;gap:4px">
+      <button class="data-tab active" id="ltab-logs" onclick="switchLogsTab('logs',this)">💬 对话日志</button>
+      <button class="data-tab" id="ltab-prefs" onclick="switchLogsTab('prefs',this)">🧩 用户偏好</button>
     </div>
-    <div class="logs-toolbar">
-      <select class="logs-filter" id="logsAgentFilter" onchange="loadLogs()">
-        <option value="">全部 Agent</option>
-      </select>
-      <select class="logs-filter" id="logsRoleFilter" onchange="loadLogs()">
-        <option value="">全部角色</option>
-        <option value="user">User</option>
-        <option value="assistant">Assistant</option>
-      </select>
-      <select class="logs-filter" id="logsFeedbackFilter" onchange="loadLogs()">
-        <option value="">全部评价</option>
-        <option value="bad">👎 差评</option>
-        <option value="good">👍 好评</option>
-        <option value="none">未评价</option>
-      </select>
-      <button class="logs-refresh" onclick="reloadLogs()">↻ 刷新</button>
-      <span class="logs-count" id="logsCount"></span>
+    <!-- Logs panel -->
+    <div id="logsMainPanel" style="display:flex;flex:1;flex-direction:column;overflow:hidden">
+      <div class="logs-toolbar">
+        <select class="logs-filter" id="logsAgentFilter" onchange="loadLogs()">
+          <option value="">全部 Agent</option>
+        </select>
+        <select class="logs-filter" id="logsRoleFilter" onchange="loadLogs()">
+          <option value="">全部角色</option>
+          <option value="user">User</option>
+          <option value="assistant">Assistant</option>
+        </select>
+        <select class="logs-filter" id="logsFeedbackFilter" onchange="loadLogs()">
+          <option value="">全部评价</option>
+          <option value="bad">👎 差评</option>
+          <option value="good">👍 好评</option>
+          <option value="none">未评价</option>
+        </select>
+        <button class="logs-refresh" onclick="reloadLogs()">↻ 刷新</button>
+        <button class="logs-refresh" style="color:#ef4444;border-color:#ef444430" onclick="clearAllLogs()">🗑 清空全部</button>
+        <span class="logs-count" id="logsCount"></span>
+      </div>
+      <div class="log-row-hd">
+        <span>角色</span><span>Agent</span><span>内容</span><span>时间</span><span>评价</span>
+      </div>
+      <div class="logs-body" id="logsBody">
+        <div class="log-empty">加载中…</div>
+      </div>
     </div>
-    <div class="log-row-hd">
-      <span>角色</span><span>Agent</span><span>内容</span><span>时间</span><span>评价</span>
-    </div>
-    <div class="logs-body" id="logsBody">
-      <div class="log-empty">加载中…</div>
+    <!-- Prefs panel -->
+    <div id="logsPrefsPanel" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div class="page-header" style="flex-shrink:0;padding:20px 28px 16px">
+        <h2>🧩 用户偏好</h2>
+        <p>系统从对话中自动学习并记录的偏好，可手动编辑或删除</p>
+      </div>
+      <div class="scroll-page" style="padding-top:8px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <button class="btn-primary" onclick="loadPrefs(true)" style="padding:7px 16px;font-size:12px">↺ 刷新</button>
+          <span id="prefsStat" style="font-size:12px;color:#555"></span>
+        </div>
+        <div id="prefsTable"></div>
+      </div>
     </div>
   </div>
 
   <!-- Data -->
   <div class="page" id="dataPage">
     <div class="data-page">
-      <div class="data-tabs">
+      <div class="data-tabs" style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">
         <button class="data-tab active" id="dtab-leads" onclick="switchDataTab('leads')">📋 Leads</button>
         <button class="data-tab" id="dtab-adreports" onclick="switchDataTab('adreports')">📊 广告报告</button>
+        <button class="data-tab" id="dtab-analytics" onclick="switchDataTab('analytics')">📈 分析</button>
+        <button class="data-tab" id="dtab-alerts" onclick="switchDataTab('alerts')">🔔 预警</button>
+        <div style="flex:1"></div>
+        <select id="accountSelector" class="logs-filter" style="font-size:11px;padding:4px 10px" onchange="onAccountChange()">
+          <option value="">所有账户</option>
+        </select>
       </div>
 
       <!-- Leads toolbar -->
@@ -462,6 +663,7 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <input type="text" id="dLeadsLabel" placeholder="标签筛选 e.g. Google" onkeydown="if(event.key==='Enter')loadLeads(1)">
         <button class="data-search-btn" onclick="loadLeads(1)">搜索</button>
         <button class="data-search-btn" style="background:#059669" onclick="exportCSV('leads')">↓ 导出</button>
+        <button class="data-search-btn" style="background:#7c3aed" onclick="triggerImport('leads')">↑ 导入</button>
         <span class="data-count" id="dLeadsCount"></span>
       </div>
 
@@ -473,6 +675,9 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <input type="date" id="dAdsTo" onchange="loadAdReports(1)">
         <button class="data-search-btn" onclick="loadAdReports(1)">搜索</button>
         <button class="data-search-btn" style="background:#059669" onclick="exportCSV('adreports')">↓ 导出</button>
+        <button class="data-search-btn" style="background:#7c3aed" onclick="triggerImport('adreports')">↑ 导入</button>
+        <button class="data-search-btn" onclick="syncFacebookAds()" id="fbSyncBtn" style="background:#1877f2">🔄 同步广告数据</button>
+        <span id="fbSyncStatus" style="font-size:11px;color:#4e6285"></span>
         <span class="data-count" id="dAdsCount"></span>
       </div>
 
@@ -483,6 +688,88 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
         <p style="color:#333;font-size:13px;padding:40px 0;text-align:center">加载中…</p>
       </div>
       <div class="data-pagination" id="dataPagination"></div>
+
+      <!-- Analytics tab -->
+      <div id="dt-analytics" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+        <div class="data-toolbar">
+          <input type="date" id="dAnFrom" onchange="loadAnalytics()">
+          <span style="color:#333;font-size:12px">—</span>
+          <input type="date" id="dAnTo" onchange="loadAnalytics()">
+          <select class="logs-filter" id="dAnGroup" onchange="loadAnalytics()">
+            <option value="campaign">按 Campaign 汇总</option>
+            <option value="day">按日期汇总</option>
+          </select>
+          <button class="data-search-btn" onclick="loadAnalytics()">刷新</button>
+          <button id="dAnChartBtn" class="data-search-btn" onclick="toggleAnalyticsChart()" style="background:#1a1a1a;border:1px solid #333;color:#888">📊 图表</button>
+          <span class="data-count" id="dAnCount"></span>
+        </div>
+        <div class="an-charts-wrap" id="anChartsWrap">
+          <div class="an-chart-box"><canvas id="chartSpend"></canvas></div>
+          <div class="an-chart-box"><canvas id="chartCPL"></canvas></div>
+        </div>
+        <div class="data-table-wrap">
+          <table class="data-table" id="analyticsTable">
+            <thead id="analyticsHead"></thead>
+            <tbody id="analyticsBody">
+              <tr><td colspan="9" style="text-align:center;color:#333;padding:40px">选择日期范围后加载</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Alerts tab -->
+      <div class="data-tab-panel" id="dataAlertsPanel" style="display:none;flex:1;overflow:hidden">
+        <div class="alerts-layout">
+          <!-- Rules panel -->
+          <div class="alerts-rules">
+            <div class="alr-toolbar">
+              <h4>预警规则</h4>
+            </div>
+            <div class="alr-body" id="alertRulesBody">
+              <div style="color:#333;font-size:12px;padding:8px">加载中…</div>
+            </div>
+            <!-- Add rule form -->
+            <div class="alr-rule-form">
+              <label>规则名称</label>
+              <input type="text" id="alrName" placeholder="例：频率超过 3">
+              <label>指标</label>
+              <select id="alrMetric">
+                <option value="frequency">频率 (Frequency)</option>
+                <option value="cpl">CPL (每条线索成本)</option>
+                <option value="cpr">CPR (每结果成本)</option>
+                <option value="spend">花费 (MYR)</option>
+              </select>
+              <label>条件</label>
+              <div style="display:flex;gap:6px">
+                <select id="alrOp" style="width:auto;flex-shrink:0">
+                  <option value="gt">大于 &gt;</option>
+                  <option value="lt">小于 &lt;</option>
+                </select>
+                <input type="number" id="alrThreshold" placeholder="值" style="flex:1">
+              </div>
+              <label>Campaign 过滤（留空=全部）</label>
+              <input type="text" id="alrCampaign" placeholder="campaign 名称关键词">
+              <button class="btn-full btn-primary" style="margin-top:10px;font-size:12px" onclick="saveAlertRule()">+ 添加规则</button>
+              <div id="alrSaveMsg" class="status-txt"></div>
+            </div>
+          </div>
+          <!-- History panel -->
+          <div class="alerts-history">
+            <div class="alr-toolbar">
+              <h4>触发记录</h4>
+              <span id="alertHistCount" style="font-size:11px;color:#444"></span>
+              <button class="wf-btn" onclick="loadAlertHistory()">刷新</button>
+              <button class="btn-primary" style="font-size:12px;padding:7px 16px;margin-left:auto" onclick="checkAlertsNow()">立即检测</button>
+            </div>
+            <div class="alert-row-hd">
+              <span>时间</span><span>Campaign</span><span>指标</span><span>数值</span><span>阈值</span>
+            </div>
+            <div style="flex:1;overflow-y:auto" id="alertHistoryBody">
+              <div style="color:#333;font-size:12px;padding:20px;text-align:center">加载中…</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -602,7 +889,9 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
           <input type="password" id="int-whatsapp-access_token" placeholder="EAAx…">
           <label class="lbl">Webhook Verify Token（自定义，填入 Meta 后台）</label>
           <input type="text" id="int-whatsapp-webhook_verify_token" placeholder="例：my_secret_token_2024">
-          <button class="btn-full btn-primary" onclick="saveIntegration('whatsapp',['phone_number_id','access_token','webhook_verify_token'])">保存</button>
+          <label class="lbl">默认接收号码（接收 AI 通知）</label>
+          <input type="text" id="int-whatsapp-default_recipient" placeholder="+60123456789（含国码）">
+          <button class="btn-full btn-primary" onclick="saveIntegration('whatsapp',['phone_number_id','access_token','webhook_verify_token','default_recipient'])">保存</button>
           <div id="imsg-whatsapp" class="status-txt"></div>
         </div>
         <!-- Email SMTP -->
@@ -644,28 +933,126 @@ select{background:#0d0d0d;border:1px solid #1e1e1e;color:#d4d4d4;border-radius:7
           <button class="btn-full btn-primary" onclick="saveIntegration('telegram',['bot_token','chat_id'])">保存</button>
           <div id="imsg-telegram" class="status-txt"></div>
         </div>
+        <!-- Facebook Ads -->
+        <div class="card">
+          <div class="card-hd"><div class="dot" id="idot-facebook_ads"></div><h4>Facebook Ads</h4></div>
+          <div class="chk-row"><input type="checkbox" id="iactive-facebook_ads" onchange="toggleIntegration('facebook_ads',this.checked)"><span>启用</span></div>
+          <label class="lbl">Ad Account ID</label>
+          <input type="text" id="int-facebook_ads-ad_account_id" placeholder="act_XXXXXXXXX">
+          <label class="lbl">Access Token</label>
+          <input type="password" id="int-facebook_ads-access_token" placeholder="EAAx…">
+          <button class="btn-full btn-primary" onclick="saveIntegration('facebook_ads',['ad_account_id','access_token'])">保存</button>
+          <div id="imsg-facebook_ads" class="status-txt"></div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- ── Skills Page ── -->
-  <div class="page" id="skillsPage">
+  <!-- ── Workflows Page ── -->
+  <div class="page" id="workflowsPage">
     <div class="page-header">
-      <h2>🧠 Agent 技能库</h2>
-      <p>Agents 从用户反馈中积累的技能和避坑规则</p>
+      <h2>⏰ 工作流调度</h2>
+      <p>自动定时任务 — 让 Agent 按计划自动执行</p>
     </div>
-    <div class="skills-layout">
-      <!-- Agent list -->
-      <div class="skills-agents" id="skillsAgentList"></div>
-      <!-- Skills panel -->
-      <div class="skills-panel" id="skillsPanel">
-        <div class="skills-placeholder">← 选择一个 Agent 查看技能</div>
-      </div>
+    <div class="wf-toolbar">
+      <h3 id="wfTitle">工作流</h3>
+      <button class="btn-sm btn-primary" onclick="showWorkflowModal()">+ 新建</button>
+      <button class="wf-btn" onclick="loadWorkflowsPage()" style="margin-left:4px">刷新</button>
+    </div>
+    <div class="wf-body" id="wfBody">
+      <div class="wf-empty"><span>⏳</span><p>加载中…</p></div>
     </div>
   </div>
+
 
 </div><!-- /main -->
 </div><!-- /app -->
+
+<!-- Workflow Modal -->
+<div class="wf-modal-bg" id="wfModal" onclick="if(event.target===this)closeWorkflowModal()">
+  <div class="wf-modal">
+    <div class="wf-modal-hd">
+      <h4 id="wfModalTitle">新建工作流</h4>
+      <button class="wf-modal-close" onclick="closeWorkflowModal()">✕</button>
+    </div>
+    <div class="wf-modal-body">
+      <input type="hidden" id="wfEditId">
+      <div class="wf-form-field">
+        <label>工作流名称</label>
+        <input type="text" id="wfName" placeholder="例：每日销售汇报">
+      </div>
+      <div class="wf-form-field">
+        <label>执行描述 / 任务指令</label>
+        <textarea id="wfPrompt" placeholder="例：生成今日销售数据汇总，并分析趋势"></textarea>
+      </div>
+      <div class="wf-form-field">
+        <label>指派 Agent</label>
+        <select id="wfAgent">
+          <option value="chat">💬 Chat Agent</option>
+          <option value="crm">👥 CRM Agent</option>
+          <option value="account">💰 Account Agent</option>
+          <option value="code">💻 Code Agent</option>
+          <option value="report">📋 报告 Agent</option>
+        </select>
+      </div>
+      <div class="wf-form-field">
+        <label>执行完成后通知（可选）</label>
+        <select id="wfNotifChannel">
+          <option value="">不通知</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="telegram">Telegram</option>
+          <option value="email_smtp">Email (SMTP)</option>
+        </select>
+      </div>
+      <div class="wf-form-field" id="wfNotifyToWrap" style="display:none">
+        <label>发送至（手机号 / Chat ID / 邮箱）</label>
+        <input type="text" id="wfNotifyTo" placeholder="例：+60123456789 或 邮箱地址">
+      </div>
+      <div class="wf-form-field">
+        <label>调度计划</label>
+        <select id="wfSchedulePreset" onchange="updateScheduleInput()">
+          <option value="daily:09:00">每天 09:00</option>
+          <option value="daily:08:00">每天 08:00</option>
+          <option value="daily:18:00">每天 18:00</option>
+          <option value="weekly:1:09:00">每周一 09:00</option>
+          <option value="weekly:5:18:00">每周五 18:00</option>
+          <option value="hourly">每小时</option>
+          <option value="interval:30">每 30 分钟</option>
+          <option value="interval:15">每 15 分钟</option>
+          <option value="monthly:09:00">每月 1 日 09:00</option>
+          <option value="custom">自定义…</option>
+        </select>
+        <input type="text" id="wfSchedule" placeholder="daily:09:00" style="margin-top:6px;display:none">
+        <div class="wf-sched-hint">格式：daily:HH:MM | weekly:D:HH:MM | hourly | interval:N | monthly:HH:MM</div>
+      </div>
+      <div class="wf-form-field">
+        <label>状态</label>
+        <select id="wfActive">
+          <option value="true">启用</option>
+          <option value="false">停用</option>
+        </select>
+      </div>
+    </div>
+    <div class="wf-modal-ft">
+      <button class="wf-btn" onclick="closeWorkflowModal()">取消</button>
+      <button class="btn-sm btn-primary" onclick="saveWorkflow()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- CSV Import Modal -->
+<div class="import-modal-bg" id="importModalBg" onclick="if(event.target===this)closeImportModal()">
+  <div class="import-modal">
+    <h3 id="importModalTitle">导入 CSV</h3>
+    <p id="importModalDesc">选择 CSV 文件导入数据。首行须为列名。</p>
+    <div class="import-preview" id="importPreview">请选择文件…</div>
+    <div class="import-ft">
+      <button class="new-session-btn" onclick="closeImportModal()">取消</button>
+      <button class="data-search-btn" style="background:#7c3aed" id="importConfirmBtn" disabled onclick="confirmImport()">确认导入</button>
+    </div>
+  </div>
+</div>
+<input type="file" id="csvFileInput" accept=".csv" style="display:none" onchange="onCSVFileSelected(event)">
 
 <!-- Log expand modal -->
 <div class="log-modal-bg" id="logModal" onclick="if(event.target===this)closeLogModal()">
@@ -743,7 +1130,10 @@ async function verifyOtp() {
     const d = await r.json()
     if (d.ok) {
       localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
+      _session = { tenant_id: d.tenant_id || null, role: d.role || 'member', tenant_name: d.tenant_name || '' }
+      localStorage.setItem('_orch_session', JSON.stringify(_session))
       document.getElementById('lockScreen').classList.add('hidden')
+      applySessionUI()
     } else { errEl.textContent = d.error || '验证码错误' }
   } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
 }
@@ -758,6 +1148,21 @@ const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT'
 
 let sessionId = crypto.randomUUID()
 
+// ── Tenant session (populated after OTP login) ─────────────────────
+let _session = { tenant_id: null, role: 'member', tenant_name: '' }
+;(function() {
+  try {
+    const s = localStorage.getItem('_orch_session')
+    if (s) _session = JSON.parse(s)
+  } catch {}
+})()
+function orchBody(extra) {
+  const base = {}
+  if (_session.tenant_id) base.tenant_id = _session.tenant_id
+  if (_session.role) base.role = _session.role
+  return Object.assign(base, extra)
+}
+
 function newSession() {
   sessionId = crypto.randomUUID()
   document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
@@ -767,20 +1172,258 @@ function newSession() {
 
 // ── Page nav ──────────────────────────────────────────────────────────
 const pageLoaded = {}
+let _logsRefreshTimer = null
 function showPage(id, btn) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
   document.getElementById(id+'Page').classList.add('active')
   btn.classList.add('active')
   if (!pageLoaded[id]) { pageLoaded[id] = true; loadPage(id) }
+  // Auto-refresh logs every 30s; stop when leaving
+  if (_logsRefreshTimer) { clearInterval(_logsRefreshTimer); _logsRefreshTimer = null }
+  if (id === 'logs') _logsRefreshTimer = setInterval(loadLogs, 30000)
 }
 function loadPage(id) {
-  if (id === 'agents') loadAgents()
-  if (id === 'llm')    loadLLM()
-  if (id === 'api')    loadIntegrations()
-  if (id === 'logs')   { initLogsAgentFilter(); loadLogs() }
-  if (id === 'data')   initDataPage()
-  if (id === 'skills') loadSkillsPage()
+  if (id === 'home')     renderHome()
+  if (id === 'tenants')  loadTenantsPage()
+  if (id === 'agents')   loadAgents()
+  if (id === 'llm')      loadLLM()
+  if (id === 'api')      loadIntegrations()
+  if (id === 'logs')     { initLogsAgentFilter(); loadLogs() }
+  if (id === 'data')     initDataPage()
+  if (id === 'workflows') loadWorkflowsPage()
+}
+
+// ── Home Overview ──────────────────────────────────────────────────────
+async function renderHome() {
+  const el = document.getElementById('homeContent')
+  if (!el) return
+
+  // Master view: per-tenant KPI cards
+  if (_session.role === 'master') {
+    el.innerHTML = '<div style="color:#4e6285;font-size:13px;padding:10px 0">加载客户汇总…</div>'
+    try {
+      const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(orchBody({ action: 'get_master_summary' })) })
+      const d = await r.json()
+      const summary = d.summary || []
+      el.innerHTML = `
+        <div><div class="home-section-title">本月各客户概览</div>
+        <div class="home-metrics">
+          ${summary.map(t => `
+            <div class="metric-card" style="min-width:200px">
+              <div class="mc-icon">🏢</div>
+              <div class="mc-label">${esc(t.name)}</div>
+              <div class="mc-value">RM ${(t.month_spend||0).toFixed(0)}</div>
+              <div style="display:flex;gap:12px;margin-top:6px">
+                <div><div class="mc-sub">线索</div><div style="font-size:13px;font-weight:600;color:#c8d3e8">${t.month_leads||0}</div></div>
+                <div><div class="mc-sub">CPL</div><div style="font-size:13px;font-weight:600;color:${t.cpl&&t.cpl>80?'#f59e0b':'#c8d3e8'}">${t.cpl?'RM '+t.cpl:'—'}</div></div>
+                <div><div class="mc-sub">预警</div><div style="font-size:13px;font-weight:600;color:${t.alerts>0?'#f59e0b':'#4e6285'}">${t.alerts}</div></div>
+              </div>
+            </div>`).join('')}
+        </div></div>`
+    } catch(e) {
+      el.innerHTML = `<div style="color:#ef4444;font-size:13px">加载失败：${esc(e.message)}</div>`
+    }
+    return
+  }
+
+  const now = new Date()
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10)
+  try {
+    const [analRes, leadRes, alertRes, convRes] = await Promise.all([
+      db.from('analytics_daily').select('spend_myr,results,new_contacts,campaign_name').gte('date', monthStart),
+      db.from('leads').select('id,name,date,labels').gte('date', monthStart).order('date', {ascending:false}).limit(100),
+      db.from('alerts').select('id,rule_name,campaign_name,metric,value,triggered_at').order('triggered_at', {ascending:false}).limit(10),
+      db.from('conversations').select('id,role,content,agent,created_at').eq('role','user').order('created_at', {ascending:false}).limit(6),
+    ])
+    const anal = analRes.data || []
+    const leads = leadRes.data || []
+    const alerts = alertRes.data || []
+    const convs = convRes.data || []
+    let totalSpend = 0, totalContacts = 0, totalResults = 0
+    const campaigns = new Set()
+    for (const r of anal) {
+      totalSpend += Number(r.spend_myr) || 0
+      totalContacts += Number(r.new_contacts) || 0
+      totalResults += Number(r.results) || 0
+      if (r.campaign_name) campaigns.add(r.campaign_name)
+    }
+    const avgCPL = totalContacts > 0 ? (totalSpend / totalContacts) : null
+    const monthLabel = now.toLocaleDateString('zh',{month:'long'})
+    el.innerHTML = `
+      <div>
+        <div class="home-section-title">${monthLabel}指标（${monthStart.slice(5)} 至今）</div>
+        <div class="home-metrics">
+          <div class="metric-card">
+            <div class="mc-icon">💰</div>
+            <div class="mc-label">本月花费</div>
+            <div class="mc-value">RM ${totalSpend.toFixed(0)}</div>
+            <div class="mc-sub">广告总投放</div>
+          </div>
+          <div class="metric-card">
+            <div class="mc-icon">👥</div>
+            <div class="mc-label">本月线索</div>
+            <div class="mc-value">${leads.length}</div>
+            <div class="mc-sub">新增联系人</div>
+          </div>
+          <div class="metric-card ${avgCPL && avgCPL > 80 ? 'warn-card' : avgCPL && avgCPL < 40 ? 'good-card' : ''}">
+            <div class="mc-icon">📊</div>
+            <div class="mc-label">平均 CPL</div>
+            <div class="mc-value">${avgCPL ? 'RM ' + avgCPL.toFixed(1) : '—'}</div>
+            <div class="mc-sub">每条线索成本</div>
+          </div>
+          <div class="metric-card">
+            <div class="mc-icon">🎯</div>
+            <div class="mc-label">转化结果</div>
+            <div class="mc-value">${totalResults}</div>
+            <div class="mc-sub">本月总 Results</div>
+          </div>
+          <div class="metric-card">
+            <div class="mc-icon">📢</div>
+            <div class="mc-label">活跃系列</div>
+            <div class="mc-value">${campaigns.size}</div>
+            <div class="mc-sub">广告系列数</div>
+          </div>
+          <div class="metric-card ${alerts.length > 0 ? 'warn-card' : ''}">
+            <div class="mc-icon">🔔</div>
+            <div class="mc-label">预警记录</div>
+            <div class="mc-value">${alerts.length}</div>
+            <div class="mc-sub">近期触发</div>
+          </div>
+        </div>
+      </div>
+      <div class="home-row">
+        <div class="home-panel" style="flex:1.3">
+          <div class="home-section-title">最近对话</div>
+          ${convs.length ? convs.map(c => `
+            <div style="padding:8px 0;border-bottom:1px solid #1a2030;display:flex;gap:10px;align-items:center">
+              <span style="font-size:10px;background:#222d42;border-radius:4px;padding:2px 6px;color:#4e6285;white-space:nowrap;flex-shrink:0">${esc(c.agent||'?')}</span>
+              <span style="font-size:12px;color:#8a9fc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc((c.content||'').slice(0,55))}</span>
+              <span style="font-size:10px;color:#2d3a55;white-space:nowrap;flex-shrink:0">${fmtTime(c.created_at).split(' ')[1]||''}</span>
+            </div>`).join('') : '<div style="color:#2d3a55;font-size:12px;padding:8px 0">暂无对话记录</div>'}
+        </div>
+        <div class="home-panel" style="flex:1">
+          <div class="home-section-title">近期预警</div>
+          ${alerts.length ? alerts.slice(0,6).map(a => `
+            <div style="padding:7px 0;border-bottom:1px solid #1a2030">
+              <div style="font-size:12px;color:#f59e0b;font-weight:600">${esc(a.rule_name||'')}</div>
+              <div style="font-size:11px;color:#4e6285;margin-top:2px">${esc(a.campaign_name||'')} · ${esc(a.metric||'')} = ${Number(a.value).toFixed(2)}</div>
+            </div>`).join('') : '<div style="color:#2d3a55;font-size:12px;padding:8px 0">✓ 暂无预警</div>'}
+        </div>
+      </div>`
+  } catch(e) {
+    el.innerHTML = `<div style="color:#ef4444;font-size:13px">加载失败：${esc(e.message)}</div>`
+  }
+}
+
+function shareLink() {
+  const url = window.location.href
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(() => toast('🔗 链接已复制，可直接发给团队成员', 'success'))
+  } else {
+    prompt('复制此链接分享给团队成员：', url)
+  }
+}
+
+// ── Apply session UI after login ──────────────────────────────────────
+function applySessionUI() {
+  // Show/hide master-only nav items
+  document.querySelectorAll('.master-only').forEach(el => {
+    el.style.display = _session.role === 'master' ? '' : 'none'
+  })
+  // Show tenant name in sidebar footer
+  const tnEl = document.getElementById('tenantNameBadge')
+  if (tnEl) tnEl.textContent = _session.tenant_name || (_session.role === 'master' ? '✦ Master' : '')
+}
+
+// ── 客户管理 (master only) ─────────────────────────────────────────────
+async function loadTenantsPage() {
+  const el = document.getElementById('tenantsContent')
+  if (!el) return
+  el.innerHTML = '<div style="color:#4e6285;font-size:13px;padding:20px 0">加载中…</div>'
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(orchBody({ action: 'list_tenants' })) })
+    const d = await r.json()
+    if (!d.ok) throw new Error(d.error || 'failed')
+    const tenants = d.tenants || []
+    el.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+        ${tenants.map(t => `
+          <div style="background:#1e2436;border:1px solid #2a3452;border-radius:12px;padding:16px 18px;min-width:200px;flex:1;max-width:280px">
+            <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px">${esc(t.name)}</div>
+            <div style="font-size:11px;color:#4e6285;margin-bottom:10px">@${esc(t.slug)} · ${t.active ? '✅ 活跃' : '⏸ 停用'}</div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <div><div style="font-size:10px;color:#344d6e">本月花费</div><div style="font-size:16px;font-weight:700;color:#fff">RM ${(t.total_spend||0).toFixed(0)}</div></div>
+              <div><div style="font-size:10px;color:#344d6e">线索数</div><div style="font-size:16px;font-weight:700;color:#fff">${t.lead_count||0}</div></div>
+            </div>
+            ${t.contact_email ? `<div style="font-size:11px;color:#344d6e;margin-top:8px">${esc(t.contact_name||'')} · ${esc(t.contact_email)}</div>` : ''}
+            <div style="margin-top:10px;display:flex;gap:6px">
+              <button onclick="toggleTenant('${esc(t.id)}',${!t.active})" style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid #2a3452;background:none;color:#5a7090;cursor:pointer">${t.active ? '停用' : '启用'}</button>
+            </div>
+          </div>`).join('')}
+      </div>
+      <div style="background:#1e2436;border:1px solid #2a3452;border-radius:12px;padding:18px">
+        <div style="font-size:12px;font-weight:600;color:#8a9fc0;margin-bottom:14px">➕ 新建客户</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <input id="tn-name" placeholder="客户名称 *" style="background:#141928;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;outline:none">
+          <input id="tn-slug" placeholder="Slug（英文小写）*" style="background:#141928;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;outline:none">
+          <input id="tn-cname" placeholder="联系人姓名" style="background:#141928;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;outline:none">
+          <input id="tn-cemail" placeholder="联系人 Email" style="background:#141928;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;outline:none">
+          <input id="tn-uemail" placeholder="登录 Email（管理员）*" style="background:#141928;border:1px solid #2a3452;border-radius:7px;padding:8px 11px;color:#c8d3e8;font-size:13px;outline:none;grid-column:span 2">
+        </div>
+        <button onclick="createTenant()" style="background:#1d4ed8;border:none;border-radius:7px;color:#fff;padding:8px 20px;font-size:13px;cursor:pointer;font-weight:500">创建客户</button>
+        <span id="tn-msg" style="font-size:12px;margin-left:10px;color:#4e6285"></span>
+      </div>`
+  } catch(e) {
+    el.innerHTML = `<div style="color:#ef4444;font-size:13px">加载失败：${esc(e.message)}</div>`
+  }
+}
+
+async function createTenant() {
+  const name = document.getElementById('tn-name').value.trim()
+  const slug = document.getElementById('tn-slug').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,'')
+  const contact_name = document.getElementById('tn-cname').value.trim()
+  const contact_email = document.getElementById('tn-cemail').value.trim()
+  const user_email = document.getElementById('tn-uemail').value.trim()
+  const msg = document.getElementById('tn-msg')
+  if (!name || !slug || !user_email) { msg.textContent = '请填写必填字段'; msg.style.color='#ef4444'; return }
+  msg.textContent = '创建中…'; msg.style.color='#4e6285'
+  try {
+    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(orchBody({ action:'create_tenant', name, slug, contact_name, contact_email, user_email })) })
+    const d = await r.json()
+    if (d.ok) { msg.textContent = '✓ 创建成功'; msg.style.color='#22c55e'; pageLoaded['tenants']=false; loadTenantsPage() }
+    else { msg.textContent = d.error || '失败'; msg.style.color='#ef4444' }
+  } catch(e) { msg.textContent = e.message; msg.style.color='#ef4444' }
+}
+
+async function toggleTenant(id, active) {
+  await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(orchBody({ action:'update_tenant', id, active })) })
+  loadTenantsPage()
+}
+
+function switchAgentTab(tab, btn) {
+  document.querySelectorAll('#atab-config,#atab-skills').forEach(b => b.classList.remove('active'))
+  if (btn) btn.classList.add('active')
+  else document.getElementById('atab-' + tab).classList.add('active')
+  document.getElementById('agentConfigPanel').style.display = tab === 'config' ? 'flex' : 'none'
+  document.getElementById('agentSkillsPanel').style.display = tab === 'skills' ? 'flex' : 'none'
+  if (tab === 'skills') {
+    if (!pageLoaded['skills']) { pageLoaded['skills'] = true; loadSkillsPage() }
+    else if (window._selectedSkillAgent) loadSkills(window._selectedSkillAgent)
+  }
+}
+
+function switchLogsTab(tab, btn) {
+  document.querySelectorAll('#ltab-logs,#ltab-prefs').forEach(b => b.classList.remove('active'))
+  if (btn) btn.classList.add('active')
+  else document.getElementById('ltab-' + tab).classList.add('active')
+  document.getElementById('logsMainPanel').style.display = tab === 'logs' ? 'flex' : 'none'
+  document.getElementById('logsPrefsPanel').style.display = tab === 'prefs' ? 'flex' : 'none'
+  if (tab === 'prefs' && typeof loadPrefs === 'function') loadPrefs()
 }
 
 // ── Sidebar dots ──────────────────────────────────────────────────────
@@ -807,6 +1450,9 @@ function fmtTime(ts) {
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
   loadSidebarDots()
+  applySessionUI()
+  pageLoaded['home'] = true
+  renderHome()
   document.getElementById('inputBox').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg() }
   })
@@ -882,7 +1528,7 @@ async function sendMsg() {
     const res = await fetch(EDGE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, session_id: sessionId, stream: true })
+      body: JSON.stringify(orchBody({ message: msg, session_id: sessionId, stream: true }))
     })
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
     const reader  = res.body.getReader()
@@ -1094,7 +1740,7 @@ async function aeTestSend() {
   msgs.scrollTop = msgs.scrollHeight
   try {
     const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ message: msg, session_id: _aeTestConvId, target_agent: agentId, stream: true }) })
+      body: JSON.stringify(orchBody({ message: msg, session_id: _aeTestConvId, target_agent: agentId, stream: true })) })
     if (!r.ok || !r.body) {
       const data = await r.json().catch(() => ({}))
       _aeTestConvId = data.session_id || _aeTestConvId
@@ -1201,8 +1847,26 @@ async function newAgent() {
 let _dataTab = 'leads'
 const DATA_PAGE_SIZE = 50
 
-function initDataPage() {
+async function initDataPage() {
+  // Load account list
+  const sel = document.getElementById('accountSelector')
+  try {
+    const { data } = await db.from('accounts').select('id,name').eq('active', true).order('name')
+    if (data && data.length > 1) {
+      sel.innerHTML = '<option value="">所有账户</option>' +
+        data.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')
+      sel.style.display = ''
+    } else {
+      sel.style.display = 'none'
+    }
+  } catch { sel.style.display = 'none' }
   switchDataTab(_dataTab, true)
+}
+
+function onAccountChange() {
+  if (_dataTab === 'leads')     loadLeads(1)
+  if (_dataTab === 'adreports') loadAdReports(1)
+  if (_dataTab === 'analytics') loadAnalytics()
 }
 
 function switchDataTab(tab, force = false) {
@@ -1211,10 +1875,19 @@ function switchDataTab(tab, force = false) {
   document.querySelectorAll('.data-tab').forEach(el => el.classList.remove('active'))
   const tabEl = document.getElementById('dtab-' + tab)
   if (tabEl) tabEl.classList.add('active')
-  document.getElementById('dt-leads').style.display      = tab === 'leads'     ? 'flex' : 'none'
-  document.getElementById('dt-adreports').style.display  = tab === 'adreports' ? 'flex' : 'none'
+  // show/hide toolbars & panels
+  const isAlerts = tab === 'alerts'
+  document.getElementById('dt-leads').style.display       = tab === 'leads'     ? 'flex' : 'none'
+  document.getElementById('dt-adreports').style.display   = tab === 'adreports' ? 'flex' : 'none'
+  document.getElementById('dt-analytics').style.display   = tab === 'analytics' ? 'flex' : 'none'
+  document.getElementById('dataAlertsPanel').style.display = isAlerts ? 'flex' : 'none'
+  document.getElementById('dataTableWrap').style.display  = (!isAlerts && tab !== 'analytics') ? '' : 'none'
+  document.getElementById('dataPagination').style.display = (!isAlerts && tab !== 'analytics') ? '' : 'none'
+  document.getElementById('dataStats').style.display      = (!isAlerts && tab !== 'analytics') ? '' : 'none'
   if (tab === 'leads')     loadLeads(1)
   if (tab === 'adreports') loadAdReports(1)
+  if (tab === 'analytics') loadAnalytics()
+  if (tab === 'alerts')    { loadAlertRules(); loadAlertHistory() }
 }
 
 function dataTagHtml(labels) {
@@ -1270,6 +1943,7 @@ async function loadLeads(page = 1) {
   const to     = document.getElementById('dLeadsTo')?.value
   const label  = document.getElementById('dLeadsLabel')?.value.trim()
   try {
+    const acct = document.getElementById('accountSelector')?.value
     let q = db.from('leads').select('*', { count: 'exact' })
       .order('date', { ascending: false })
       .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
@@ -1277,6 +1951,7 @@ async function loadLeads(page = 1) {
     if (from)   q = q.gte('date', from)
     if (to)     q = q.lte('date', to)
     if (label)  q = q.ilike('labels', `%${label}%`)
+    if (acct)   q = q.eq('account_id', acct)
     const { data, count, error } = await q
     if (error) throw error
     _leadsCache = data || []
@@ -1312,12 +1987,14 @@ async function loadAdReports(page = 1) {
   const from   = document.getElementById('dAdsFrom')?.value
   const to     = document.getElementById('dAdsTo')?.value
   try {
+    const acctAds = document.getElementById('accountSelector')?.value
     let q = db.from('ad_reports').select('campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts', { count: 'exact' })
       .order('amount_spent_myr', { ascending: false })
       .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
-    if (search) q = q.ilike('campaign_name', `%${search}%`)
-    if (from)   q = q.gte('day', from)
-    if (to)     q = q.lte('day', to)
+    if (search)   q = q.ilike('campaign_name', `%${search}%`)
+    if (from)     q = q.gte('day', from)
+    if (to)       q = q.lte('day', to)
+    if (acctAds)  q = q.eq('account_id', acctAds)
     const { data, count, error } = await q
     if (error) throw error
     _adsCache = data || []
@@ -1462,6 +2139,20 @@ async function loadLogs() {
 }
 async function reloadLogs() { _logsAgentFilterInited = false; await initLogsAgentFilter(); loadLogs() }
 
+async function clearAllLogs() {
+  const agent = document.getElementById('logsAgentFilter')?.value
+  const label = agent ? `Agent「${agent}」的` : '全部'
+  if (!confirm(`确认删除${label}对话记录？此操作不可撤销。`)) return
+  const body = document.getElementById('logsBody')
+  body.innerHTML = '<div class="log-empty">删除中…</div>'
+  let q = db.from('conversations').delete().neq('id', 0)
+  if (agent) q = q.eq('agent', agent)
+  const { error } = await q
+  if (error) { body.innerHTML = `<div class="log-empty" style="color:#ef4444">删除失败：${esc(error.message)}</div>`; return }
+  document.getElementById('logsCount').textContent = '已清空'
+  reloadLogs()
+}
+
 async function submitFeedback(id, val, btn) {
   const row = btn.closest('.fb-btns, .chat-fb')
   const current = btn.classList.contains('active') ? null : val
@@ -1474,7 +2165,7 @@ async function submitFeedback(id, val, btn) {
     fetch(EDGE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'learn', conversation_id: id, feedback: current })
+      body: JSON.stringify(orchBody({ action: 'learn', conversation_id: id, feedback: current }))
     }).catch(() => {})
   }
 }
@@ -1604,7 +2295,7 @@ async function saveDefault() {
 }
 
 // ── API Integrations ──────────────────────────────────────────────────
-const INT_LABELS = {whatsapp:'WhatsApp', email_smtp:'Email SMTP', sendgrid:'SendGrid', telegram:'Telegram'}
+const INT_LABELS = {whatsapp:'WhatsApp', email_smtp:'Email SMTP', sendgrid:'SendGrid', telegram:'Telegram', facebook_ads:'Facebook Ads'}
 
 function copyWAUrl(btn) {
   const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook'
@@ -1664,6 +2355,32 @@ async function saveIntegration(service, keys) {
   msg.className='status-txt '+(error?'err':'ok')
   msg.textContent = error ? error.message : '✓ 已保存'
   if (!error) loadIntegrations()
+}
+
+async function syncFacebookAds() {
+  const btn = document.getElementById('fbSyncBtn')
+  const status = document.getElementById('fbSyncStatus')
+  btn.disabled = true
+  btn.textContent = '⏳ 同步中...'
+  status.textContent = ''
+  try {
+    const res = await fetch(EDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(orchBody({ action: 'sync_facebook_ads' }))
+    })
+    const r = await res.json()
+    if (r.error) throw new Error(r.error)
+    status.textContent = `✓ 已同步 ${r.synced} 条 (${r.period})`
+    status.style.color = '#22c55e'
+    loadAdReports()
+  } catch(e) {
+    status.textContent = '✗ ' + e.message
+    status.style.color = '#ef4444'
+  } finally {
+    btn.disabled = false
+    btn.textContent = '🔄 同步广告数据'
+  }
 }
 
 // ── Toast notifications ──────────────────────────────────────────────
@@ -1821,6 +2538,748 @@ function updateSkillsBadge(agentId) {
   const cnt = (skillsData[agentId] || []).length
   btn.textContent = cnt
   btn.className = 'skills-badge' + (cnt > 0 ? ' has' : '')
+}
+
+// ══════════════════════════════════════════════
+// ── Workflows Page ────────────────────────────
+// ══════════════════════════════════════════════
+const WF_SCHEDULE_LABELS = {
+  hourly: '每小时',
+  'interval:30': '每 30 分钟',
+  'interval:15': '每 15 分钟',
+  'monthly:09:00': '每月 1 日 09:00',
+}
+function wfSchedLabel(s) {
+  if (!s) return s
+  if (WF_SCHEDULE_LABELS[s]) return WF_SCHEDULE_LABELS[s]
+  if (s.startsWith('daily:')) {
+    const p = s.split(':'); return '每天 ' + (p[1]||'?') + ':' + (p[2]||'00')
+  }
+  if (s.startsWith('weekly:')) {
+    const p = s.split(':')
+    const days = ['日','一','二','三','四','五','六']
+    return '每周' + (days[parseInt(p[1])||1]) + ' ' + (p[2]||'?') + ':' + (p[3]||'00')
+  }
+  if (s.startsWith('interval:')) return '每 ' + s.split(':')[1] + ' 分钟'
+  return s
+}
+function wfNextLabel(ts) {
+  if (!ts) return ''
+  const d = new Date(ts), now = new Date()
+  const diff = d - now
+  if (diff < 0) return '待触发'
+  if (diff < 60000) return Math.round(diff/1000) + 's 后'
+  if (diff < 3600000) return Math.round(diff/60000) + 'min 后'
+  if (diff < 86400000) return Math.round(diff/3600000) + 'h 后'
+  return d.toLocaleDateString('zh') + ' ' + d.toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})
+}
+
+async function loadWorkflowsPage() {
+  const body = document.getElementById('wfBody')
+  body.innerHTML = '<div class="wf-empty"><span>⏳</span><p>加载中…</p></div>'
+  try {
+    const { data, error } = await db
+      .from('workflows')
+      .select('*')
+      .order('created_at', { ascending: false })
+    if (error) throw error
+    const wfs = data || []
+    document.getElementById('wfTitle').textContent = '工作流 (' + wfs.length + ')'
+    if (!wfs.length) {
+      body.innerHTML = '<div class="wf-empty"><span>⏰</span><p>还没有工作流</p><p style="font-size:11px;color:#444">点击上方「+ 新建」创建第一个定时任务</p></div>'
+      return
+    }
+    body.innerHTML = wfs.map(wf => renderWorkflowCard(wf)).join('')
+  } catch (e) {
+    body.innerHTML = '<div class="wf-empty"><span>⚠️</span><p style="color:#ef4444">' + escHtml(e.message) + '</p></div>'
+  }
+}
+
+function renderWorkflowCard(wf) {
+  const agentMeta = AGENT_META[wf.agent_id] || { icon: '🤖', label: wf.agent_id }
+  const isOn = wf.active
+  return `<div class="wf-card" id="wfc-${wf.id}">
+    <div class="wf-card-icon">${agentMeta.icon}</div>
+    <div class="wf-card-info">
+      <div class="wf-card-name">${escHtml(wf.name)}</div>
+      <div class="wf-card-desc">${escHtml(wf.prompt || '')}</div>
+      <div class="wf-card-meta">
+        <span class="wf-sched">${escHtml(wfSchedLabel(wf.schedule))}</span>
+        ${wf.next_run ? '<span class="wf-next">下次：' + escHtml(wfNextLabel(wf.next_run)) + '</span>' : ''}
+        <div class="wf-status">
+          <div class="wf-dot ${isOn ? 'on' : 'off'}"></div>
+          <span class="wf-status-txt">${isOn ? '运行中' : '已停用'}</span>
+        </div>
+      </div>
+    </div>
+    <div class="wf-actions">
+      <button class="wf-btn run" onclick="runWorkflowNow('${wf.id}',this)">▶ 立即</button>
+      <button class="wf-btn" onclick="showWorkflowHistory('${wf.id}','${escHtml(wf.name)}')">历史</button>
+      <button class="wf-btn" onclick="editWorkflow(${JSON.stringify(wf).replace(/"/g,'&quot;')})">编辑</button>
+      <button class="wf-btn del" onclick="deleteWorkflow('${wf.id}',this)">删除</button>
+    </div>
+  </div>`
+}
+
+function showWorkflowModal(wf) {
+  document.getElementById('wfEditId').value = ''
+  document.getElementById('wfModalTitle').textContent = '新建工作流'
+  document.getElementById('wfName').value = ''
+  document.getElementById('wfPrompt').value = ''
+  document.getElementById('wfAgent').value = 'chat'
+  document.getElementById('wfSchedulePreset').value = 'daily:09:00'
+  document.getElementById('wfSchedule').value = ''
+  document.getElementById('wfSchedule').style.display = 'none'
+  document.getElementById('wfActive').value = 'true'
+  document.getElementById('wfNotifChannel').value = ''
+  document.getElementById('wfNotifyTo').value = ''
+  document.getElementById('wfNotifyToWrap').style.display = 'none'
+  document.getElementById('wfModal').classList.add('open')
+  document.getElementById('wfName').focus()
+}
+// Show/hide notify_to field based on channel selection
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('wfNotifChannel').addEventListener('change', function() {
+    document.getElementById('wfNotifyToWrap').style.display = this.value ? 'block' : 'none'
+  })
+})
+
+function editWorkflow(wf) {
+  document.getElementById('wfEditId').value = wf.id
+  document.getElementById('wfModalTitle').textContent = '编辑工作流'
+  document.getElementById('wfName').value = wf.name || ''
+  document.getElementById('wfPrompt').value = wf.prompt || ''
+  document.getElementById('wfAgent').value = wf.agent_id || 'chat'
+  document.getElementById('wfActive').value = String(wf.active !== false)
+  // Set schedule
+  const presetEl = document.getElementById('wfSchedulePreset')
+  const scheduleInput = document.getElementById('wfSchedule')
+  const knownPresets = Array.from(presetEl.options).map(o => o.value).filter(v => v !== 'custom')
+  if (knownPresets.includes(wf.schedule)) {
+    presetEl.value = wf.schedule
+    scheduleInput.style.display = 'none'
+  } else {
+    presetEl.value = 'custom'
+    scheduleInput.value = wf.schedule || ''
+    scheduleInput.style.display = 'block'
+  }
+  document.getElementById('wfModal').classList.add('open')
+}
+
+function closeWorkflowModal() {
+  document.getElementById('wfModal').classList.remove('open')
+}
+
+function updateScheduleInput() {
+  const v = document.getElementById('wfSchedulePreset').value
+  const inp = document.getElementById('wfSchedule')
+  if (v === 'custom') {
+    inp.style.display = 'block'
+    inp.focus()
+  } else {
+    inp.style.display = 'none'
+    inp.value = ''
+  }
+}
+
+async function saveWorkflow() {
+  const id = document.getElementById('wfEditId').value
+  const name = document.getElementById('wfName').value.trim()
+  const prompt = document.getElementById('wfPrompt').value.trim()
+  const agent_id = document.getElementById('wfAgent').value
+  const presetVal = document.getElementById('wfSchedulePreset').value
+  const schedule = presetVal === 'custom'
+    ? document.getElementById('wfSchedule').value.trim()
+    : presetVal
+  const active = document.getElementById('wfActive').value === 'true'
+  const notification_channel = document.getElementById('wfNotifChannel').value || null
+  const notify_to = document.getElementById('wfNotifyTo').value.trim() || null
+
+  if (!name) { toast('请输入工作流名称', 'error'); return }
+  if (!schedule) { toast('请选择或输入调度计划', 'error'); return }
+
+  try {
+    if (id) {
+      const res = await callOrchestrator({ action: 'update_workflow', id, name, prompt, agent_id, schedule, active, notification_channel, notify_to })
+      if (!res.ok) throw new Error(res.error || '更新失败')
+      toast('工作流已更新', 'success')
+    } else {
+      const res = await callOrchestrator({ action: 'create_workflow', name, prompt, agent_id, schedule, active, notification_channel, notify_to })
+      if (!res.ok) throw new Error(res.error || '创建失败')
+      toast('工作流已创建', 'success')
+    }
+    closeWorkflowModal()
+    loadWorkflowsPage()
+  } catch (e) {
+    toast(e.message, 'error')
+  }
+}
+
+async function deleteWorkflow(id, btn) {
+  if (!confirm('确认删除这个工作流？')) return
+  btn.disabled = true
+  btn.textContent = '…'
+  try {
+    const res = await callOrchestrator({ action: 'delete_workflow', id })
+    if (!res.ok) throw new Error(res.error || '删除失败')
+    toast('工作流已删除', 'success')
+    loadWorkflowsPage()
+  } catch (e) {
+    toast(e.message, 'error')
+    btn.disabled = false
+    btn.textContent = '删除'
+  }
+}
+
+async function runWorkflowNow(id, btn) {
+  btn.disabled = true
+  btn.textContent = '…'
+  try {
+    const res = await callOrchestrator({ action: 'run_workflow_now', id })
+    if (!res.ok) throw new Error(res.error || '触发失败')
+    toast('已触发执行', 'success')
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    btn.disabled = false
+    btn.textContent = '▶ 立即'
+  }
+}
+
+async function showWorkflowHistory(id, name) {
+  const body = document.getElementById('wfBody')
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <button class="wf-btn" onclick="loadWorkflowsPage()" style="font-size:12px">← 返回</button>
+      <span style="font-size:13px;color:#aaa;font-weight:600">${escHtml(name)} — 执行历史</span>
+    </div>
+    <div id="wfHistContent"><div class="wf-empty"><span>⏳</span><p>加载中…</p></div></div>`
+
+  try {
+    const { data, error } = await db
+      .from('workflow_runs')
+      .select('*')
+      .eq('workflow_id', id)
+      .order('ran_at', { ascending: false })
+      .limit(50)
+    if (error) throw error
+    const runs = data || []
+    const histEl = document.getElementById('wfHistContent')
+    if (!runs.length) {
+      histEl.innerHTML = '<div class="wf-empty"><span>📭</span><p>还没有执行记录</p></div>'
+      return
+    }
+    histEl.innerHTML = `<div class="wf-hist-section">
+      <div class="wf-hist-title">
+        <span>共 ${runs.length} 条记录</span>
+      </div>
+      <div class="wf-hist-row" style="border-bottom:1px solid #1a1a1a;color:#333;font-size:10px;text-transform:uppercase">
+        <span>状态</span><span>执行时间</span><span>回应预览</span>
+      </div>
+      ${runs.map(r => {
+        const hasErr = !!r.error
+        const statusCls = hasErr ? 'wf-run-fail' : 'wf-run-ok'
+        const statusLabel = hasErr ? '✗ 失败' : '✓ 成功'
+        const ranAt = r.ran_at ? new Date(r.ran_at).toLocaleString('zh') : '—'
+        const preview = hasErr
+          ? escHtml((r.error + '').substring(0, 80))
+          : r.response ? escHtml((r.response + '').substring(0, 80)) + ((r.response + '').length > 80 ? '…' : '') : '—'
+        return `<div class="wf-hist-row" style="grid-template-columns:70px 140px 1fr">
+          <span class="${statusCls}">${statusLabel}</span>
+          <span style="color:#555;font-family:monospace;font-size:11px">${ranAt}</span>
+          <span style="color:#555">${preview}</span>
+        </div>`
+      }).join('')}
+    </div>`
+  } catch (e) {
+    document.getElementById('wfHistContent').innerHTML = '<div class="wf-empty"><span>⚠️</span><p style="color:#ef4444">' + escHtml(e.message) + '</p></div>'
+  }
+}
+
+// Helper: call orchestrator Edge Function
+async function callOrchestrator(payload) {
+  const { data: cfg } = await db.from('provider_config').select('api_key').eq('provider','anthropic').eq('active',true).single()
+  const supaKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
+  const resp = await fetch('https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + supaKey },
+    body: JSON.stringify(payload)
+  })
+  return resp.json()
+}
+
+// ── User Prefs ────────────────────────────────────────────────────────
+// Keys managed by other pages — hide them here to avoid duplication
+const PREFS_SYSTEM_KEYS = new Set(['default_provider'])
+
+async function loadPrefs(force = false) {
+  if (force) pageLoaded['prefs'] = true
+  const el = document.getElementById('prefsTable')
+  const stat = document.getElementById('prefsStat')
+  if (!el) return
+  el.innerHTML = '<p style="color:#555;font-size:13px">加载中…</p>'
+  stat.textContent = ''
+  try {
+    const { data, error } = await db.from('user_prefs').select('*').order('updated_at', { ascending: false })
+    if (error) throw error
+    const rows = (data || []).filter(r => !PREFS_SYSTEM_KEYS.has(r.key))
+    stat.textContent = `共 ${rows.length} 条`
+    if (!rows.length) {
+      el.innerHTML = '<p style="color:#444;font-size:13px;padding:8px 0">暂无偏好记录。与 Agent 多聊几次后，系统会自动学习你的偏好。</p>'
+      return
+    }
+    el.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid #1e1e1e">
+            <th style="text-align:left;font-size:11px;color:#444;font-weight:500;padding:0 12px 10px 0;width:200px">KEY</th>
+            <th style="text-align:left;font-size:11px;color:#444;font-weight:500;padding:0 12px 10px 0">VALUE</th>
+            <th style="text-align:left;font-size:11px;color:#444;font-weight:500;padding:0 12px 10px 0;width:80px">置信度</th>
+            <th style="text-align:left;font-size:11px;color:#444;font-weight:500;padding:0 0 10px 0;width:160px">更新时间</th>
+            <th style="width:80px"></th>
+          </tr>
+        </thead>
+        <tbody id="prefsBody">
+          ${rows.map(r => prefRow(r)).join('')}
+        </tbody>
+      </table>`
+  } catch(e) {
+    el.innerHTML = `<p style="color:#ef4444;font-size:13px">加载失败：${esc(e.message)}</p>`
+  }
+}
+
+function prefRow(r) {
+  const conf = r.confidence != null ? Math.round(r.confidence * 100) + '%' : '—'
+  const confColor = r.confidence >= 0.8 ? '#34d399' : r.confidence >= 0.5 ? '#f59e0b' : '#888'
+  const ts = r.updated_at ? new Date(r.updated_at).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—'
+  const valShort = String(r.value || '').length > 120
+    ? esc(String(r.value).slice(0, 120)) + '<span style="color:#444">…</span>'
+    : esc(String(r.value || ''))
+  return `<tr id="prow-${esc(r.key)}" style="border-bottom:1px solid #141414">
+    <td style="padding:10px 12px 10px 0;vertical-align:top">
+      <code style="font-size:12px;color:#60a5fa;background:#1d4ed810;padding:2px 6px;border-radius:4px">${esc(r.key)}</code>
+    </td>
+    <td style="padding:10px 12px 10px 0;vertical-align:top" id="pval-${esc(r.key)}">
+      <span style="font-size:13px;color:#ccc;line-height:1.5">${valShort}</span>
+    </td>
+    <td style="padding:10px 12px 10px 0;vertical-align:top">
+      <span style="font-size:12px;color:${confColor}">${conf}</span>
+    </td>
+    <td style="padding:10px 0 10px 0;vertical-align:top">
+      <span style="font-size:11px;color:#444">${ts}</span>
+    </td>
+    <td style="padding:10px 0;vertical-align:top;text-align:right">
+      <button onclick="editPref(${JSON.stringify(r).replace(/"/g,'&quot;')})"
+        style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:4px;transition:color .15s"
+        onmouseover="this.style.color='#ccc'" onmouseout="this.style.color='#555'">编辑</button>
+      <button onclick="deletePref('${esc(r.key)}')"
+        style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:4px;transition:color .15s"
+        onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='#555'">删除</button>
+    </td>
+  </tr>`
+}
+
+function editPref(r) {
+  const cell = document.getElementById('pval-' + r.key)
+  if (!cell) return
+  const current = String(r.value || '')
+  cell.innerHTML = `
+    <div style="display:flex;gap:6px;align-items:flex-start">
+      <textarea style="flex:1;background:#0d0d0d;border:1px solid #333;border-radius:6px;padding:7px 10px;color:#d4d4d4;font-size:13px;font-family:inherit;resize:vertical;min-height:60px;outline:none" id="pedit-${esc(r.key)}">${esc(current)}</textarea>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <button onclick="savePref('${esc(r.key)}')"
+          style="background:#1d4ed8;border:none;border-radius:5px;color:#fff;font-size:12px;padding:5px 10px;cursor:pointer">保存</button>
+        <button onclick="loadPrefs(true)"
+          style="background:#1a1a1a;border:1px solid #222;border-radius:5px;color:#666;font-size:12px;padding:5px 10px;cursor:pointer">取消</button>
+      </div>
+    </div>
+    <div id="pmsg-${esc(r.key)}" style="font-size:11px;margin-top:4px;color:#555"></div>`
+  document.getElementById('pedit-' + r.key)?.focus()
+}
+
+async function savePref(key) {
+  const ta = document.getElementById('pedit-' + key)
+  const msg = document.getElementById('pmsg-' + key)
+  if (!ta) return
+  const value = ta.value
+  msg.textContent = '保存中…'; msg.style.color = '#555'
+  const { error } = await db.from('user_prefs').update({ value, updated_at: new Date().toISOString() }).eq('key', key)
+  if (error) { msg.textContent = '✗ ' + error.message; msg.style.color = '#ef4444'; return }
+  msg.textContent = '✓ 已保存'; msg.style.color = '#22c55e'
+  setTimeout(() => loadPrefs(true), 700)
+}
+
+async function deletePref(key) {
+  if (!confirm(`确认删除偏好 "${key}"？此操作不可撤销。`)) return
+  const row = document.getElementById('prow-' + key)
+  if (row) row.style.opacity = '0.4'
+  const { error } = await db.from('user_prefs').delete().eq('key', key)
+  if (error) { if (row) row.style.opacity = '1'; alert('删除失败：' + error.message); return }
+  loadPrefs(true)
+}
+
+// ── Analytics tab ─────────────────────────────────────────────────────
+let _analyticsData = []   // last rolled-up rows for chart rendering
+let _chartSpend = null, _chartCPL = null
+
+async function loadAnalytics() {
+  const fromVal = document.getElementById('dAnFrom')?.value
+  const toVal   = document.getElementById('dAnTo')?.value
+  const group   = document.getElementById('dAnGroup')?.value || 'campaign'
+  const head    = document.getElementById('analyticsHead')
+  const body    = document.getElementById('analyticsBody')
+  const count   = document.getElementById('dAnCount')
+  body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#444;padding:30px">加载中…</td></tr>'
+
+  try {
+    const acctAn = document.getElementById('accountSelector')?.value
+    let q = db.from('analytics_daily')
+      .select('date,campaign_name,spend_myr,results,cpr,new_contacts,cpl,frequency,lead_count')
+      .order('date', {ascending: false})
+      .limit(500)
+    if (fromVal) q = q.gte('date', fromVal)
+    if (toVal)   q = q.lte('date', toVal)
+    if (acctAn)  q = q.eq('account_id', acctAn)
+    const { data, error } = await q
+    if (error) throw error
+
+    if (group === 'day') {
+      const byDay = {}
+      for (const r of data || []) {
+        const d = r.date
+        if (!byDay[d]) byDay[d] = { date:d, spend:0, results:0, contacts:0, leads:0 }
+        byDay[d].spend    += Number(r.spend_myr)    || 0
+        byDay[d].results  += Number(r.results)      || 0
+        byDay[d].contacts += Number(r.new_contacts) || 0
+        byDay[d].leads    += Number(r.lead_count)   || 0
+      }
+      const rows = Object.values(byDay).sort((a,b) => a.date < b.date ? -1 : 1)
+      _analyticsData = rows
+      count.textContent = rows.length + ' 天'
+      head.innerHTML = '<tr>' + ['日期','花费(MYR)','结果数','CPR','新联系人','CPL','来源线索'].map(h=>`<th>${h}</th>`).join('') + '</tr>'
+      body.innerHTML = rows.map(r => `<tr>
+        <td>${r.date}</td>
+        <td style="color:#60a5fa">${r.spend.toFixed(2)}</td>
+        <td>${r.results}</td>
+        <td>${r.results>0?(r.spend/r.results).toFixed(2):'—'}</td>
+        <td>${r.contacts}</td>
+        <td style="color:${r.contacts>0?'#34d399':'#555'}">${r.contacts>0?(r.spend/r.contacts).toFixed(2):'—'}</td>
+        <td>${r.leads||0}</td>
+      </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:#333;padding:30px">无数据</td></tr>'
+    } else {
+      const byCamp = {}
+      for (const r of data || []) {
+        const c = r.campaign_name
+        if (!byCamp[c]) byCamp[c] = { campaign:c, spend:0, results:0, contacts:0, leads:0, freqSum:0, freqCnt:0 }
+        byCamp[c].spend    += Number(r.spend_myr)    || 0
+        byCamp[c].results  += Number(r.results)      || 0
+        byCamp[c].contacts += Number(r.new_contacts) || 0
+        byCamp[c].leads    += Number(r.lead_count)   || 0
+        if (r.frequency) { byCamp[c].freqSum += Number(r.frequency); byCamp[c].freqCnt++ }
+      }
+      const rows = Object.values(byCamp).sort((a,b) => b.spend - a.spend)
+      _analyticsData = rows
+      count.textContent = rows.length + ' 个 Campaign'
+      head.innerHTML = '<tr>' + ['Campaign','花费(MYR)','结果数','CPR','新联系人','CPL','平均频率','来源线索'].map(h=>`<th>${h}</th>`).join('') + '</tr>'
+      body.innerHTML = rows.map(r => {
+        const cpr = r.results>0?(r.spend/r.results).toFixed(2):'—'
+        const cpl = r.contacts>0?(r.spend/r.contacts).toFixed(2):'—'
+        const freq = r.freqCnt>0?(r.freqSum/r.freqCnt).toFixed(2):'—'
+        const freqWarn = r.freqCnt>0 && (r.freqSum/r.freqCnt)>3
+        return `<tr>
+          <td style="color:#d4d4d4;max-width:200px" title="${esc(r.campaign)}">${esc(r.campaign)}</td>
+          <td style="color:#60a5fa">${r.spend.toFixed(2)}</td>
+          <td>${r.results}</td>
+          <td>${cpr}</td>
+          <td>${r.contacts}</td>
+          <td style="color:${r.contacts>0?'#34d399':'#555'}">${cpl}</td>
+          <td style="color:${freqWarn?'#f59e0b':'#888'}">${freq}${freqWarn?' ⚠':''}</td>
+          <td>${r.leads||0}</td>
+        </tr>`
+      }).join('') || '<tr><td colspan="8" style="text-align:center;color:#333;padding:30px">无数据</td></tr>'
+    }
+    // Re-render charts if open
+    if (document.getElementById('anChartsWrap').classList.contains('open')) renderAnalyticsCharts()
+  } catch(e) {
+    body.innerHTML = `<tr><td colspan="9" style="color:#ef4444;text-align:center;padding:30px">${esc(e.message)}</td></tr>`
+  }
+}
+
+function toggleAnalyticsChart() {
+  const wrap = document.getElementById('anChartsWrap')
+  const btn  = document.getElementById('dAnChartBtn')
+  const open = wrap.classList.toggle('open')
+  btn.textContent = open ? '📊 关闭' : '📊 图表'
+  btn.style.background = open ? '#1d4ed820' : '#1a1a1a'
+  btn.style.color = open ? '#60a5fa' : '#888'
+  if (open) renderAnalyticsCharts()
+}
+
+function renderAnalyticsCharts() {
+  if (!_analyticsData.length) return
+  const group = document.getElementById('dAnGroup')?.value || 'campaign'
+  const isDay = group === 'day'
+
+  const labels   = _analyticsData.map(r => isDay ? r.date : (r.campaign||'').slice(0,18))
+  const spendArr = _analyticsData.map(r => +(r.spend||0).toFixed(2))
+  const cplArr   = _analyticsData.map(r => {
+    const contacts = r.contacts || 0
+    const spend    = r.spend    || 0
+    return contacts > 0 ? +(spend/contacts).toFixed(2) : 0
+  })
+
+  const chartDefaults = {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color:'#555', font:{size:9}, maxRotation:40 }, grid:{color:'#1a1a1a'} },
+      y: { ticks: { color:'#555', font:{size:10} }, grid:{color:'#1a1a1a'} }
+    }
+  }
+
+  if (_chartSpend) { _chartSpend.destroy(); _chartSpend = null }
+  if (_chartCPL)   { _chartCPL.destroy();   _chartCPL   = null }
+
+  _chartSpend = new Chart(document.getElementById('chartSpend'), {
+    type: isDay ? 'line' : 'bar',
+    data: { labels, datasets: [{ label:'花费 MYR', data:spendArr,
+      backgroundColor:'#1d4ed840', borderColor:'#60a5fa', borderWidth:2, fill:true, tension:0.3 }] },
+    options: { ...chartDefaults, plugins: { ...chartDefaults.plugins,
+      title: { display:true, text:'广告花费 (MYR)', color:'#888', font:{size:11} } } }
+  })
+
+  _chartCPL = new Chart(document.getElementById('chartCPL'), {
+    type: isDay ? 'line' : 'bar',
+    data: { labels, datasets: [{ label:'CPL', data:cplArr,
+      backgroundColor:'#05966940', borderColor:'#34d399', borderWidth:2, fill:true, tension:0.3 }] },
+    options: { ...chartDefaults, plugins: { ...chartDefaults.plugins,
+      title: { display:true, text:'CPL (成本/联系人)', color:'#888', font:{size:11} } } }
+  })
+}
+
+// ── Alerts page ────────────────────────────────────────────────────────
+async function loadAlertRules() {
+  const body = document.getElementById('alertRulesBody')
+  try {
+    const { data, error } = await db.from('alert_rules').select('*').order('created_at')
+    if (error) throw error
+    if (!data?.length) { body.innerHTML = '<div style="color:#333;font-size:12px;padding:8px">暂无规则</div>'; return }
+    body.innerHTML = data.map(r => {
+      const op = r.operator === 'gt' ? '>' : '<'
+      const metricLabel = {frequency:'频率',cpl:'CPL',cpr:'CPR',spend:'花费'}[r.metric] || r.metric
+      return `<div class="alr-card">
+        <div class="alr-card-info">
+          <div class="alr-name">${esc(r.name)}</div>
+          <div class="alr-meta">${metricLabel} ${op} ${r.threshold}${r.campaign_filter?' | '+esc(r.campaign_filter):''}</div>
+        </div>
+        <button class="alr-del" onclick="deleteAlertRule(${r.id},this)">删除</button>
+      </div>`
+    }).join('')
+  } catch(e) {
+    body.innerHTML = `<div style="color:#ef4444;font-size:12px;padding:8px">${esc(e.message)}</div>`
+  }
+}
+
+async function saveAlertRule() {
+  const name = document.getElementById('alrName').value.trim()
+  const metric = document.getElementById('alrMetric').value
+  const operator = document.getElementById('alrOp').value
+  const threshold = parseFloat(document.getElementById('alrThreshold').value)
+  const campaign_filter = document.getElementById('alrCampaign').value.trim() || null
+  const msg = document.getElementById('alrSaveMsg')
+  if (!name || isNaN(threshold)) { msg.textContent = '请填写名称和阈值'; msg.className='status-txt err'; return }
+  const { error } = await db.from('alert_rules').insert({ name, metric, operator, threshold, campaign_filter, active: true })
+  if (error) { msg.textContent = '✗ '+error.message; msg.className='status-txt err'; return }
+  msg.textContent = '✓ 规则已添加'; msg.className='status-txt ok'
+  document.getElementById('alrName').value = ''
+  document.getElementById('alrThreshold').value = ''
+  document.getElementById('alrCampaign').value = ''
+  setTimeout(() => { msg.textContent = '' }, 2000)
+  loadAlertRules()
+}
+
+async function deleteAlertRule(id, btn) {
+  btn.disabled = true
+  const { error } = await db.from('alert_rules').delete().eq('id', id)
+  if (error) { toast(error.message,'error'); btn.disabled = false; return }
+  loadAlertRules()
+}
+
+async function loadAlertHistory() {
+  const body = document.getElementById('alertHistoryBody')
+  const cnt  = document.getElementById('alertHistCount')
+  try {
+    const { data, error } = await db.from('alerts').select('*').order('triggered_at',{ascending:false}).limit(100)
+    if (error) throw error
+    cnt.textContent = (data?.length || 0) + ' 条记录'
+    if (!data?.length) { body.innerHTML = '<div style="color:#333;font-size:12px;padding:20px;text-align:center">暂无触发记录</div>'; return }
+    const metricLabel = {frequency:'频率',cpl:'CPL',cpr:'CPR',spend:'花费(MYR)'}
+    body.innerHTML = data.map(r => {
+      const d = new Date(r.triggered_at)
+      const timeStr = d.toLocaleDateString('zh') + ' ' + d.toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})
+      const severity = r.metric==='frequency' && r.value>5 ? 'high' : r.metric==='cpl' && r.value>1000 ? 'high' : 'med'
+      return `<div class="alert-row">
+        <span style="color:#444;font-size:11px">${timeStr}</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.campaign_name||'')}">${esc(r.campaign_name||'—')}</span>
+        <span class="alert-badge ${severity}">${metricLabel[r.metric]||r.metric}</span>
+        <span style="color:#f59e0b;font-weight:600">${Number(r.value).toFixed(2)}</span>
+        <span style="color:#555">&gt; ${r.threshold}</span>
+      </div>`
+    }).join('')
+  } catch(e) {
+    body.innerHTML = `<div style="color:#ef4444;font-size:12px;padding:20px">${esc(e.message)}</div>`
+  }
+}
+
+async function checkAlertsNow() {
+  const btn = document.querySelector('#alertsPage .btn-primary')
+  if (btn) { btn.disabled = true; btn.textContent = '检测中…' }
+  try {
+    const res = await callOrchestrator({ action: 'check_alerts' })
+    if (res.triggered !== undefined) {
+      toast(`检测完成，触发 ${res.triggered} 条预警`, res.triggered > 0 ? 'warn' : 'success')
+      loadAlertHistory()
+    } else {
+      toast(res.error || '检测失败', 'error')
+    }
+  } catch(e) { toast(e.message, 'error') }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '立即检测' } }
+}
+
+// ── Session history ────────────────────────────────────────────────────
+function toggleSessionHistory(e) {
+  e.stopPropagation()
+  const panel = document.getElementById('sessionHistoryPanel')
+  if (panel.classList.contains('open')) { panel.classList.remove('open'); return }
+  panel.classList.add('open')
+  panel.innerHTML = '<div style="padding:12px;color:#444;font-size:12px">加载中…</div>'
+  db.from('conversations').select('session_id,content,created_at').eq('role','user')
+    .order('created_at',{ascending:false}).limit(120)
+    .then(({data}) => {
+      const seen = {}, list = []
+      for (const r of data || []) {
+        if (!seen[r.session_id]) { seen[r.session_id] = true; list.push(r) }
+        if (list.length >= 20) break
+      }
+      if (!list.length) { panel.innerHTML = '<div style="padding:12px;color:#444;font-size:12px">暂无历史对话</div>'; return }
+      panel.innerHTML = list.map(s => {
+        const active = s.session_id === sessionId ? ' sh-active' : ''
+        return `<div class="sh-item${active}" onclick="loadSession('${s.session_id}')">
+          <div class="sh-time">${new Date(s.created_at).toLocaleString('zh-CN')}</div>
+          <div class="sh-preview">${esc((s.content||'').slice(0,80))}</div>
+        </div>`
+      }).join('')
+    }).catch(e => { panel.innerHTML = `<div style="padding:12px;color:#ef4444;font-size:12px">${esc(e.message)}</div>` })
+}
+
+async function loadSession(sid) {
+  document.getElementById('sessionHistoryPanel').classList.remove('open')
+  sessionId = sid
+  document.getElementById('sessionInfo').textContent = 'Session: ' + sid.slice(0,8)
+  const msgs = document.getElementById('messages')
+  msgs.innerHTML = '<div class="msg ai"><div class="msg-meta">orchestrator</div>加载中…</div>'
+  try {
+    const { data, error } = await db.from('conversations').select('role,content,agent,created_at').eq('session_id',sid).order('created_at').limit(60)
+    if (error) throw error
+    if (!data?.length) { msgs.innerHTML = '<div class="msg ai"><div class="msg-meta">orchestrator</div>会话为空</div>'; return }
+    msgs.innerHTML = data.map(r => {
+      if (r.role === 'user') return `<div class="msg user">${esc(r.content||'')}</div>`
+      return `<div class="msg ai"><div class="msg-meta">${esc(r.agent||'orchestrator')}</div><div class="md-content">${marked.parse(r.content||'')}</div></div>`
+    }).join('')
+    msgs.scrollTop = msgs.scrollHeight
+  } catch(e) {
+    msgs.innerHTML = `<div class="msg ai"><div class="msg-meta" style="color:#ef4444">加载失败</div>${esc(e.message)}</div>`
+  }
+}
+
+// Close session history when clicking outside
+document.addEventListener('click', e => {
+  const panel = document.getElementById('sessionHistoryPanel')
+  if (panel && !panel.contains(e.target)) panel.classList.remove('open')
+})
+
+// ── CSV Import ─────────────────────────────────────────────────────────
+let _importTab = 'leads', _importRows = []
+
+function triggerImport(tab) {
+  _importTab = tab
+  _importRows = []
+  document.getElementById('importModalTitle').textContent = tab === 'leads' ? '导入线索 CSV' : '导入广告报告 CSV'
+  document.getElementById('importModalDesc').textContent = tab === 'leads'
+    ? '列名示例：date, name, phone, labels（首行为列名）'
+    : '列名示例：campaign_name, day, amount_spent_myr, results, frequency …'
+  document.getElementById('importPreview').textContent = '请选择文件…'
+  document.getElementById('importConfirmBtn').disabled = true
+  document.getElementById('csvFileInput').value = ''
+  document.getElementById('importModalBg').classList.add('open')
+  document.getElementById('csvFileInput').click()
+}
+
+function closeImportModal() {
+  document.getElementById('importModalBg').classList.remove('open')
+  _importRows = []
+}
+
+function onCSVFileSelected(e) {
+  const file = e.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = ev => {
+    const text = ev.target.result
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim())
+    if (lines.length < 2) { document.getElementById('importPreview').textContent = '文件为空或格式错误'; return }
+    const headers = parseCSVLine(lines[0])
+    _importRows = []
+    for (let i = 1; i < lines.length; i++) {
+      const vals = parseCSVLine(lines[i])
+      if (!vals.length) continue
+      const row = {}
+      headers.forEach((h, idx) => { if (vals[idx] !== undefined) row[h.trim()] = vals[idx].trim() })
+      _importRows.push(row)
+    }
+    document.getElementById('importPreview').textContent =
+      `✓ ${_importRows.length} 行数据 | 列：${headers.join(', ')}\n\n示例第1行：${JSON.stringify(_importRows[0]||{})}`
+    document.getElementById('importConfirmBtn').disabled = _importRows.length === 0
+  }
+  reader.readAsText(file, 'utf-8')
+}
+
+function parseCSVLine(line) {
+  const result = [], re = /("(?:[^"]|"")*"|[^,]*)/g
+  let m
+  while ((m = re.exec(line)) !== null) {
+    if (m.index === re.lastIndex) { re.lastIndex++; break }
+    let val = m[1]
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1,-1).replace(/""/g,'"')
+    result.push(val)
+  }
+  return result
+}
+
+async function confirmImport() {
+  if (!_importRows.length) return
+  const btn = document.getElementById('importConfirmBtn')
+  btn.disabled = true; btn.textContent = '导入中…'
+  const table = _importTab === 'leads' ? 'leads' : 'ad_reports'
+  const chunkSize = 200
+  let inserted = 0, errors = 0
+  try {
+    for (let i = 0; i < _importRows.length; i += chunkSize) {
+      const chunk = _importRows.slice(i, i + chunkSize)
+      const { error } = await db.from(table).upsert(chunk, { ignoreDuplicates: true })
+      if (error) { errors += chunk.length; console.error(error) }
+      else inserted += chunk.length
+      btn.textContent = `导入中… ${Math.min(i+chunkSize, _importRows.length)}/${_importRows.length}`
+    }
+    closeImportModal()
+    toast(`✓ 导入完成：${inserted} 行成功${errors ? '，' + errors + ' 行失败' : ''}`, errors ? 'warn' : 'success')
+    if (_importTab === 'leads') loadLeads(1)
+    else loadAdReports(1)
+  } catch(e) {
+    toast('导入失败：' + e.message, 'error')
+  } finally {
+    btn.disabled = false; btn.textContent = '确认导入'
+  }
 }
 </script>
 </body>
