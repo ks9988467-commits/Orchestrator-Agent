@@ -53,7 +53,10 @@
       "Bash(python -m json.tool --no-ensure-ascii)",
       "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Agent:', d.get\\('agent'\\)\\); print\\('Response \\(first 200\\):', d.get\\('response',''\\)[:200]\\)\")",
       "Bash(curl -s -X POST https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator -H \"Content-Type: application/json\" --data-binary \"{\\\\\"message\\\\\":\\\\\"帮我写一个 python 函数，计算斐波那契数列\\\\\"}\")",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Agent:', d.get\\('agent'\\)\\); print\\('Response:', d.get\\('response',''\\)[:400]\\)\")"
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Agent:', d.get\\('agent'\\)\\); print\\('Response:', d.get\\('response',''\\)[:400]\\)\")",
+      "mcp__349dd2fa-01bf-4736-a1d2-cb0a3203fd9b__list_migrations",
+      "mcp__349dd2fa-01bf-4736-a1d2-cb0a3203fd9b__list_branches",
+      "mcp__349dd2fa-01bf-4736-a1d2-cb0a3203fd9b__reset_branch"
     ]
   }
 }
