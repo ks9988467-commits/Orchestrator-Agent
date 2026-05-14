@@ -403,6 +403,50 @@ select{background:#171e2f;border:1px solid #2a3452;color:#c8d3e8;border-radius:7
 .int-chip.on{border-color:#059669;color:#34d399;background:#059669}
 .int-chip .dot{width:5px;height:5px}
 
+/* ── Knowledge Base ── */
+.kb-layout{display:flex;flex:1;overflow:hidden}
+.kb-sidebar{width:180px;flex-shrink:0;border-right:1px solid #1a1a1a;padding:8px}
+.kb-type-btn{display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:none;width:100%;text-align:left;font-size:13px;color:#666;-webkit-appearance:none;transition:background .15s}
+.kb-type-btn:hover{background:#161616;color:#aaa}
+.kb-type-btn.active{background:#1d4ed812;border-color:#1d4ed830;color:#93c5fd}
+.kb-type-icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.kb-count{font-size:10px;background:#1e1e1e;color:#444;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
+.kb-count.has{background:#22c55e18;color:#22c55e}
+.kb-main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.kb-toolbar{padding:12px 20px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.kb-search{flex:1;background:#111;border:1px solid #1e1e1e;border-radius:7px;padding:7px 12px;color:#d4d4d4;font-size:13px;outline:none;transition:border-color .15s}
+.kb-search:focus{border-color:#333}
+.kb-search::placeholder{color:#333}
+.kb-items{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:8px}
+.kb-card{background:#111;border:1px solid #1e1e1e;border-radius:9px;padding:13px 16px;transition:border-color .15s}
+.kb-card:hover{border-color:#2a2a2a}
+.kb-card-hd{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.kb-card-type{font-size:10px;padding:2px 7px;border-radius:4px;font-weight:500;flex-shrink:0}
+.kb-card-type.note{background:#1d4ed815;color:#60a5fa}
+.kb-card-type.conversation{background:#05966915;color:#34d399}
+.kb-card-type.document{background:#7c3aed15;color:#a78bfa}
+.kb-card-type.webpage{background:#d9770615;color:#fb923c}
+.kb-card-title{flex:1;font-size:13px;color:#ccc;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-card-del{background:none;border:1px solid #1e1e1e;border-radius:5px;color:#333;padding:2px 8px;font-size:11px;cursor:pointer;transition:all .15s;-webkit-appearance:none;flex-shrink:0}
+.kb-card-del:hover{border-color:#ef444460;color:#ef4444;background:#ef444410}
+.kb-card-preview{font-size:12px;color:#555;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.kb-card-meta{font-size:11px;color:#2a2a2a;margin-top:6px;font-family:monospace;display:flex;gap:8px}
+.kb-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:6px}
+.kb-tag{font-size:10px;padding:1px 6px;border-radius:3px;background:#1a1a1a;color:#444;border:1px solid #222}
+.kb-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#2a2a2a;gap:8px}
+.kb-empty span{font-size:32px}.kb-empty p{font-size:13px}
+.kb-modal-bg{display:none;position:fixed;inset:0;background:#00000088;z-index:300;align-items:center;justify-content:center}
+.kb-modal-bg.open{display:flex}
+.kb-modal{background:#111;border:1px solid #1e1e1e;border-radius:12px;width:520px;max-width:92vw;display:flex;flex-direction:column;box-shadow:0 24px 60px #000a}
+.kb-modal-hd{padding:18px 22px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.kb-modal-hd h4{flex:1;font-size:14px;font-weight:600;color:#fff}
+.kb-modal-body{padding:20px 22px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;max-height:60vh}
+.kb-modal-ft{padding:14px 22px;border-top:1px solid #1e1e1e;display:flex;gap:8px;justify-content:flex-end;align-items:center}
+.kb-field label{display:block;font-size:11px;color:#555;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+.kb-field input,.kb-field select,.kb-field textarea{width:100%;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:7px;padding:9px 12px;color:#d4d4d4;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s}
+.kb-field input:focus,.kb-field select:focus,.kb-field textarea:focus{border-color:#333}
+.kb-field select option{background:#111}.kb-field textarea{min-height:120px;resize:vertical;line-height:1.5}
+
 /* ── Lock Screen ── */
 #lockScreen{position:fixed;inset:0;z-index:9999;background:#1a1f2e;display:flex;align-items:center;justify-content:center}
 #lockScreen.hidden{display:none}
@@ -491,6 +535,9 @@ select{background:#171e2f;border:1px solid #2a3452;color:#c8d3e8;border-radius:7
     <div class="nav-group-label">记录</div>
     <button class="nav-item" onclick="showPage('logs',this)">
       <span class="icon">📋</span> 记录
+    </button>
+    <button class="nav-item" onclick="showPage('kb',this)">
+      <span class="icon">📚</span> 知识库
     </button>
   </nav>
   <div class="sidebar-footer">
@@ -965,7 +1012,88 @@ select{background:#171e2f;border:1px solid #2a3452;color:#c8d3e8;border-radius:7
   </div>
 
 
+
+  <!-- Knowledge Base -->
+  <div class="page" id="kbPage">
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div><h2>个人知识库</h2><p>笔记、对话、文档、网页 — AI 自动检索引用</p></div>
+      <button class="btn-primary" style="font-size:12px;padding:7px 16px" onclick="openKbAdd()">+ 新增</button>
+    </div>
+    <div class="kb-layout">
+      <div class="kb-sidebar">
+        <button class="kb-type-btn active" data-type="" onclick="kbSetType(this,'')">
+          <span class="kb-type-icon">📚</span><span style="flex:1">全部</span><span class="kb-count" id="kbc-all">—</span>
+        </button>
+        <button class="kb-type-btn" data-type="note" onclick="kbSetType(this,'note')">
+          <span class="kb-type-icon">📝</span><span style="flex:1">笔记</span><span class="kb-count" id="kbc-note">—</span>
+        </button>
+        <button class="kb-type-btn" data-type="conversation" onclick="kbSetType(this,'conversation')">
+          <span class="kb-type-icon">💬</span><span style="flex:1">对话</span><span class="kb-count" id="kbc-conversation">—</span>
+        </button>
+        <button class="kb-type-btn" data-type="document" onclick="kbSetType(this,'document')">
+          <span class="kb-type-icon">📄</span><span style="flex:1">文档</span><span class="kb-count" id="kbc-document">—</span>
+        </button>
+        <button class="kb-type-btn" data-type="webpage" onclick="kbSetType(this,'webpage')">
+          <span class="kb-type-icon">🌐</span><span style="flex:1">网页</span><span class="kb-count" id="kbc-webpage">—</span>
+        </button>
+      </div>
+      <div class="kb-main">
+        <div class="kb-toolbar">
+          <input type="text" class="kb-search" id="kbSearch" placeholder="搜索知识库… (语义搜索)" onkeydown="if(event.key==='Enter')kbDoSearch()">
+          <button class="btn-secondary" style="font-size:12px;padding:6px 14px" onclick="kbDoSearch()">搜索</button>
+          <button class="btn-secondary" style="font-size:12px;padding:6px 14px" onclick="loadKb()">↻</button>
+        </div>
+        <div class="kb-items" id="kbItems">
+          <div class="kb-empty"><span>📚</span><p>还没有知识条目</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /main -->
+
+<!-- KB Add Modal -->
+<div class="kb-modal-bg" id="kbAddModal" onclick="if(event.target===this)closeKbAdd()">
+  <div class="kb-modal">
+    <div class="kb-modal-hd">
+      <h4>新增知识</h4>
+      <button style="background:none;border:none;color:#555;font-size:18px;cursor:pointer;padding:4px" onclick="closeKbAdd()">✕</button>
+    </div>
+    <div class="kb-modal-body">
+      <div class="kb-field">
+        <label>类型</label>
+        <select id="kbAddType">
+          <option value="note">📝 笔记</option>
+          <option value="document">📄 文档</option>
+          <option value="webpage">🌐 网页</option>
+          <option value="conversation">💬 对话</option>
+        </select>
+      </div>
+      <div class="kb-field">
+        <label>标题（可选）</label>
+        <input type="text" id="kbAddTitle" placeholder="给这条知识起个名字…">
+      </div>
+      <div class="kb-field">
+        <label>内容 *</label>
+        <textarea id="kbAddContent" placeholder="输入知识内容…"></textarea>
+      </div>
+      <div class="kb-field">
+        <label>来源链接（可选）</label>
+        <input type="text" id="kbAddUrl" placeholder="https://…">
+      </div>
+      <div class="kb-field">
+        <label>标签（逗号分隔，可选）</label>
+        <input type="text" id="kbAddTags" placeholder="技术, 产品, 客户…">
+      </div>
+    </div>
+    <div class="kb-modal-ft">
+      <span id="kbAddStatus" class="status-txt"></span>
+      <button class="btn-secondary" onclick="closeKbAdd()">取消</button>
+      <button class="btn-primary" onclick="submitKbAdd()">保存</button>
+    </div>
+  </div>
+</div>
+
 </div><!-- /app -->
 
 <!-- Workflow Modal -->
@@ -1192,6 +1320,7 @@ function loadPage(id) {
   if (id === 'logs')     { initLogsAgentFilter(); loadLogs() }
   if (id === 'data')     initDataPage()
   if (id === 'workflows') loadWorkflowsPage()
+  if (id === 'kb')        loadKb()
 }
 
 // ── Home Overview ──────────────────────────────────────────────────────
@@ -1509,8 +1638,15 @@ function finalizeStreamBubble(div, convId, agentId) {
     badBtn.textContent = '👎'
     badBtn.dataset.convId = String(convId)
     badBtn.addEventListener('click', function() { submitFeedback(this.dataset.convId, 'bad', this) })
+    const saveBtn = document.createElement('button')
+    saveBtn.className = 'fb-btn'
+    saveBtn.textContent = '📚'
+    saveBtn.title = '保存到知识库'
+    saveBtn.dataset.convId = String(convId)
+    saveBtn.addEventListener('click', function() { kbSaveFromChat(this.dataset.convId, this) })
     fb.appendChild(goodBtn)
     fb.appendChild(badBtn)
+    fb.appendChild(saveBtn)
     div.appendChild(fb)
   }
 }
@@ -3280,6 +3416,136 @@ async function confirmImport() {
   } finally {
     btn.disabled = false; btn.textContent = '确认导入'
   }
+}
+
+// ── Knowledge Base ────────────────────────────────────────────────────
+let kbCurrentType = ''
+
+async function loadKb() {
+  document.getElementById('kbSearch').value = ''
+  const body = { action: 'kb_list', page: 1, limit: 30 }
+  if (kbCurrentType) body.type = kbCurrentType
+  try {
+    const r = await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const { items = [] } = await r.json()
+    renderKbItems(items)
+  } catch(e) { document.getElementById('kbItems').innerHTML = `<div class="kb-empty"><span>⚠️</span><p>${e.message}</p></div>` }
+  updateKbCounts()
+}
+
+async function kbDoSearch() {
+  const q = document.getElementById('kbSearch').value.trim()
+  if (!q) { loadKb(); return }
+  const el = document.getElementById('kbItems')
+  el.innerHTML = '<div class="kb-empty"><span>🔍</span><p>搜索中…</p></div>'
+  try {
+    const r = await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'kb_search', query: q }) })
+    const { results = [] } = await r.json()
+    renderKbItems(results, true)
+  } catch(e) { el.innerHTML = `<div class="kb-empty"><span>⚠️</span><p>${e.message}</p></div>` }
+}
+
+function renderKbItems(items, isSearch = false) {
+  const el = document.getElementById('kbItems')
+  if (!items.length) {
+    el.innerHTML = `<div class="kb-empty"><span>${isSearch ? '🔍' : '📚'}</span><p>${isSearch ? '没有找到相关知识' : '还没有知识条目'}</p></div>`
+    return
+  }
+  const typeLabels = { note: '笔记', conversation: '对话', document: '文档', webpage: '网页' }
+  el.innerHTML = items.map(item => {
+    const tags = (item.tags || []).map(t => `<span class="kb-tag">${escHtml(t)}</span>`).join('')
+    const preview = escHtml((item.content || '').slice(0, 140).replace(/\n/g, ' '))
+    const sim = item.similarity != null && isSearch ? `<span>匹配 ${Math.round(item.similarity * 100)}%</span>` : ''
+    const urlLink = item.source_url ? `<a href="${escHtml(item.source_url)}" target="_blank" onclick="event.stopPropagation()" style="color:#444;text-decoration:none">🔗</a>` : ''
+    return `<div class="kb-card">
+      <div class="kb-card-hd">
+        <span class="kb-card-type ${escHtml(item.type)}">${typeLabels[item.type] || item.type}</span>
+        <span class="kb-card-title">${escHtml(item.title || '（无标题）')}</span>
+        <button class="kb-card-del" onclick="kbDelete('${item.id}',this)">删除</button>
+      </div>
+      <div class="kb-card-preview">${preview}</div>
+      ${tags ? `<div class="kb-tags">${tags}</div>` : ''}
+      <div class="kb-card-meta">
+        <span>${new Date(item.created_at).toLocaleDateString('zh')}</span>
+        ${sim}${urlLink}
+      </div>
+    </div>`
+  }).join('')
+}
+
+async function updateKbCounts() {
+  const map = [['', 'kbc-all'], ['note', 'kbc-note'], ['conversation', 'kbc-conversation'], ['document', 'kbc-document'], ['webpage', 'kbc-webpage']]
+  for (const [t, elId] of map) {
+    const body = { action: 'kb_list', page: 1, limit: 1 }
+    if (t) body.type = t
+    try {
+      const r = await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const { total = 0 } = await r.json()
+      const el = document.getElementById(elId)
+      if (el) { el.textContent = total; el.className = 'kb-count' + (total > 0 ? ' has' : '') }
+    } catch {}
+  }
+}
+
+function kbSetType(btn, type) {
+  document.querySelectorAll('.kb-type-btn').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+  kbCurrentType = type
+  loadKb()
+}
+
+async function kbDelete(id, btn) {
+  if (!confirm('确认删除这条知识？')) return
+  btn.textContent = '…'; btn.disabled = true
+  await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'kb_delete', id }) })
+  loadKb()
+}
+
+function openKbAdd(prefill = {}) {
+  if (prefill.type)       document.getElementById('kbAddType').value    = prefill.type
+  if (prefill.title)      document.getElementById('kbAddTitle').value   = prefill.title
+  if (prefill.content)    document.getElementById('kbAddContent').value = prefill.content
+  if (prefill.source_url) document.getElementById('kbAddUrl').value     = prefill.source_url
+  document.getElementById('kbAddModal').classList.add('open')
+  setTimeout(() => document.getElementById('kbAddContent').focus(), 50)
+}
+function closeKbAdd() {
+  document.getElementById('kbAddModal').classList.remove('open')
+  ;['kbAddTitle','kbAddContent','kbAddUrl','kbAddTags'].forEach(id => document.getElementById(id).value = '')
+  document.getElementById('kbAddStatus').textContent = ''
+}
+async function submitKbAdd() {
+  const type    = document.getElementById('kbAddType').value
+  const title   = document.getElementById('kbAddTitle').value.trim()
+  const content = document.getElementById('kbAddContent').value.trim()
+  const url     = document.getElementById('kbAddUrl').value.trim()
+  const tagsRaw = document.getElementById('kbAddTags').value.trim()
+  if (!content) { document.getElementById('kbAddStatus').textContent = '内容不能为空'; return }
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : []
+  const st = document.getElementById('kbAddStatus')
+  st.textContent = '保存中…'; st.className = 'status-txt'
+  try {
+    const r = await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'kb_add', type, title: title || null, content, source_url: url || null, tags }) })
+    const res = await r.json()
+    if (res.ok) { closeKbAdd(); if (pageLoaded['kb']) loadKb() }
+    else { st.textContent = res.error || '保存失败'; st.className = 'status-txt err' }
+  } catch(e) { st.textContent = e.message; st.className = 'status-txt err' }
+}
+
+async function kbSaveFromChat(convId, btn) {
+  btn.textContent = '…'; btn.disabled = true
+  try {
+    const r = await fetch(EDGE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'kb_save_conv', conversation_id: convId }) })
+    const res = await r.json()
+    if (res.ok) { btn.textContent = '✓'; btn.style.color = '#22c55e' }
+    else { btn.textContent = '📚'; btn.disabled = false }
+  } catch { btn.textContent = '📚'; btn.disabled = false }
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 </script>
 </body>

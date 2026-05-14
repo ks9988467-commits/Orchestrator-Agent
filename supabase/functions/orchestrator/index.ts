@@ -489,6 +489,49 @@ async function loadAgentSkills(agentId: string): Promise<string> {
   if (!rows.length) return ''
   return '\n\nLearned skills:\n' + (rows as {skill:string}[]).map(r => `- ${r.skill}`).join('\n')
 }
+// \u2500\u2500 Knowledge Base helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+async function generateEmbedding(text: string, providers: ProviderRow[]): Promise<number[] | null> {
+  const openai = providers.find(p => p.provider === 'openai')
+  if (!openai) return null
+  try {
+    const r = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${openai.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'text-embedding-3-small', input: text.slice(0, 8000) }),
+    })
+    if (!r.ok) return null
+    return (await r.json()).data?.[0]?.embedding ?? null
+  } catch { return null }
+}
+async function kbVectorSearch(embedding: number[], matchCount = 5, threshold = 0.65): Promise<Record<string,unknown>[]> {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_knowledge`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query_embedding: embedding, match_count: matchCount, match_threshold: threshold }),
+  })
+  return r.ok ? (await r.json()) : []
+}
+async function kbTextSearch(query: string, matchCount = 5): Promise<Record<string,unknown>[]> {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_knowledge_text`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query_text: query, match_count: matchCount }),
+  })
+  return r.ok ? (await r.json()) : []
+}
+async function searchKnowledge(query: string, providers: ProviderRow[]): Promise<string> {
+  try {
+    const embedding = await generateEmbedding(query, providers)
+    let rows: Record<string,unknown>[] = embedding ? await kbVectorSearch(embedding, 4, 0.65) : []
+    if (!rows.length) rows = await kbTextSearch(query, 4)
+    if (!rows.length) return ''
+    const chunks = (rows as {title?:string;content:string;type:string}[]).map(r =>
+      `[${r.type}${r.title ? ': ' + r.title : ''}]\n${r.content.slice(0, 600)}`
+    )
+    return '\n\n## Relevant personal knowledge:\n' + chunks.join('\n\n---\n')
+  } catch { return '' }
+}
+
 // \u2500\u2500 Multi-turn history loader \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 async function loadHistory(sessionId: string, limit = 10): Promise<{role:string; content:string}[]> {
   if (!sessionId) return []
@@ -1374,6 +1417,67 @@ Deno.serve(async (req: Request) => {
     }
 
     // \u2500\u2500 Streaming chat action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    
+    // ── Knowledge Base: add ─────────────────────────────────────────
+    if (body.action === 'kb_add') {
+      const { type, title, content, source_url, tags } = body
+      if (!type || !content) return new Response(JSON.stringify({ error: 'type and content required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const providers = await loadProviders()
+      const embedding = await generateEmbedding((title ? title + '\n' : '') + content, providers)
+      const item = await dbInsertReturning('knowledge_items', { type, title: title || null, content, source_url: source_url || null, tags: tags || [], ...(embedding ? { embedding: JSON.stringify(embedding) } : {}) })
+      return new Response(JSON.stringify({ ok: true, item }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Knowledge Base: list ────────────────────────────────────────
+    if (body.action === 'kb_list') {
+      const page  = Number(body.page  ?? 1)
+      const limit = Math.min(Number(body.limit ?? 20), 50)
+      const offset = (page - 1) * limit
+      const params = new URLSearchParams({ select: 'id,type,title,content,source_url,tags,created_at', order: 'created_at.desc', limit: String(limit), offset: String(offset) })
+      if (body.type) params.set('type', `eq.${body.type}`)
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/knowledge_items?${params}`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'count=exact' }
+      })
+      const items = await r.json()
+      const total = parseInt(r.headers.get('content-range')?.split('/')[1] ?? '0')
+      return new Response(JSON.stringify({ items, total }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Knowledge Base: search ──────────────────────────────────────
+    if (body.action === 'kb_search') {
+      const { query } = body
+      if (!query) return new Response(JSON.stringify({ error: 'query required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const providers = await loadProviders()
+      const embedding = await generateEmbedding(query, providers)
+      let rows: Record<string,unknown>[] = embedding ? await kbVectorSearch(embedding, 10, 0.5) : []
+      if (!rows.length) rows = await kbTextSearch(query, 10)
+      return new Response(JSON.stringify({ results: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Knowledge Base: delete ──────────────────────────────────────
+    if (body.action === 'kb_delete') {
+      const { id } = body
+      if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_items?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Knowledge Base: save conversation ───────────────────────────
+    if (body.action === 'kb_save_conv') {
+      const { conversation_id, title } = body
+      if (!conversation_id) return new Response(JSON.stringify({ error: 'conversation_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const aRows = await dbGet('conversations', 'session_id,content,agent', { id: `eq.${conversation_id}`, role: 'eq.assistant' })
+      const aMsg = aRows[0]
+      if (!aMsg) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const uRows = await dbGet('conversations', 'content', { session_id: `eq.${aMsg.session_id}`, role: 'eq.user', id: `lt.${conversation_id}` }, 'id.desc', 1)
+      const content = `Q: ${uRows[0]?.content || ''}\n\nA: ${aMsg.content}`
+      const kbTitle = title || '对话记录'
+      const providers = await loadProviders()
+      const embedding = await generateEmbedding(kbTitle + '\n' + content, providers)
+      const item = await dbInsertReturning('knowledge_items', { type: 'conversation', title: kbTitle, content, source_conv: conversation_id, ...(embedding ? { embedding: JSON.stringify(embedding) } : {}) })
+      return new Response(JSON.stringify({ ok: true, item }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     if (body.stream === true) {
       const { message: smsg, session_id: ssid, target_agent: sta } = body
       if (!smsg) return new Response(JSON.stringify({ error: 'message required' }),
@@ -1383,8 +1487,8 @@ Deno.serve(async (req: Request) => {
       let sagent: AgentRow
       if (sta) sagent = sagents.find((a:AgentRow) => a.id === sta) ?? await classifyIntent(smsg, sagents, sproviders, sdefProv)
       else     sagent = keywordRoute(smsg, sagents) ?? await classifyIntent(smsg, sagents, sproviders, sdefProv)
-      const [shistory, sskillText] = await Promise.all([loadHistory(sid2, 10), loadAgentSkills(sagent.id)])
-      const ssystem  = (sagent.system_prompt || 'You are a helpful assistant.') + (SOUL ? '\n\n' + SOUL : '') + sskillText
+      const [shistory, sskillText, sknowledge] = await Promise.all([loadHistory(sid2, 10), loadAgentSkills(sagent.id), searchKnowledge(smsg, sproviders)])
+      const ssystem  = (sagent.system_prompt || 'You are a helpful assistant.') + (SOUL ? '\n\n' + SOUL : '') + sskillText + sknowledge
       const suseTools = DATA_AGENTS.has(sagent.id)
       const smessages: {role:string;content:string}[] = [...shistory, { role:'user', content:smsg }]
 
@@ -1439,14 +1543,16 @@ Deno.serve(async (req: Request) => {
         ?? await classifyIntent(message, agents, providers, defaultProvider)
     }
 
-    // A: load history + skills in parallel
-    const [history, skillText] = await Promise.all([
+    // A: load history + skills + knowledge in parallel
+    const [history, skillText, knowledge] = await Promise.all([
       loadHistory(sid, 10),
       loadAgentSkills(agent.id),
+      searchKnowledge(message, providers),
     ])
     const system   = (agent.system_prompt || 'You are a helpful assistant.')
       + (SOUL ? '\n\n' + SOUL : '')
       + skillText
+      + knowledge
     const useTools = DATA_AGENTS.has(agent.id)
 
     // A: build messages with history prefix
