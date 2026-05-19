@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGC Cover Generator</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg: #0e0e0f;
+    --surface: #161618;
+    --border: #2a2a2e;
+    --accent: #f5e642;
+    --accent2: #ff4d4d;
+    --text: #f0f0ee;
+    --muted: #6b6b6f;
+    --card: #1c1c1f;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(28px, 5vw, 48px);
+    font-weight: 800;
+    letter-spacing: -1px;
+    line-height: 1;
+  }
+
+  .header h1 span { color: var(--accent); }
+
+  .header p {
+    color: var(--muted);
+    font-size: 14px;
+    margin-top: 8px;
+    font-weight: 300;
+  }
+
+  .container { max-width: 760px; margin: 0 auto; }
+
+  .input-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 24px;
+  }
+
+  .label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: block;
+  }
+
+  textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+    padding: 14px 16px;
+    resize: vertical;
+    min-height: 160px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--muted); font-size: 13px; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    padding: 12px 14px;
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6b6f' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+  }
+
+  select:focus { border-color: var(--accent); }
+
+  .btn-generate {
+    width: 100%;
+    margin-top: 20px;
+    padding: 16px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 10px;
+    font-family: 'Syne', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .btn-generate:hover { background: #ffe900; transform: translateY(-1px); }
+  .btn-generate:active { transform: translateY(0); }
+  .btn-generate:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid #00000040;
+    border-top-color: #000;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .results {
+    display: none;
+    flex-direction: column;
+    gap: 16px;
+    animation: fadeUp 0.4s ease;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .result-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  .result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .result-tag {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .btn-copy {
+    font-size: 11px;
+    color: var(--muted);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    transition: all 0.15s;
+  }
+
+  .btn-copy:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-copy.copied { border-color: #4caf50; color: #4caf50; }
+
+  .result-body { padding: 20px; }
+
+  .cover-preview {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .cover-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+
+  .cover-card .tag {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .cover-main {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 22px;
+    line-height: 1.2;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  .cover-sub {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.4;
+    font-weight: 300;
+  }
+
+  .hook-box {
+    background: var(--bg);
+    border-left: 3px solid var(--accent2);
+    border-radius: 0 8px 8px 0;
+    padding: 14px 16px;
+    font-size: 16px;
+    line-height: 1.6;
+    font-weight: 500;
+  }
+
+  .kw-list { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .kw-chip {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-size: 13px;
+    color: var(--text);
+    transition: border-color 0.2s;
+  }
+
+  .kw-chip:hover { border-color: var(--accent); cursor: default; }
+  .kw-chip.hot { border-color: var(--accent2); color: var(--accent2); }
+
+  .post-copy {
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 16px;
+    font-size: 14px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    color: var(--text);
+  }
+
+  .tone-row { display: flex; gap: 8px; margin-top: 12px; }
+
+  .tone-badge {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .tone-badge.curiosity { background: #2a2000; color: var(--accent); }
+  .tone-badge.resonance { background: #200a0a; color: var(--accent2); }
+  .tone-badge.disbelief { background: #0a1a20; color: #4dd9ff; }
+
+  .error-box {
+    background: #200a0a;
+    border: 1px solid #5a1a1a;
+    border-radius: 10px;
+    padding: 16px;
+    color: #ff8080;
+    font-size: 14px;
+    display: none;
+  }
+
+  .lang-tabs { display: flex; gap: 8px; margin-bottom: 4px; }
+
+  .lang-tab {
+    flex: 1;
+    padding: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .lang-tab:hover { border-color: var(--accent); color: var(--text); }
+  .lang-tab.active { border-color: var(--accent); color: var(--accent); background: #1a1a00; }
+
+  .lang-panel { display: none; flex-direction: column; gap: 16px; }
+  .lang-panel.active { display: flex; }
+
+  @media (max-width: 500px) {
+    .cover-preview, .row { grid-template-columns: 1fr; }
+    .cover-main { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <h1>UGC <span>封面</span> Generator</h1>
+    <p>贴入字幕 → AI自动生成封面大小标 + Hook + 痛点词</p>
+  </div>
+
+  <div class="input-card">
+    <label class="label">字幕 / 脚本内容</label>
+    <textarea id="scriptInput" placeholder="把字幕或脚本贴进来...
+
+例如：
+老鼠最可怕的地方，
+不是你看到它跑过去那一秒。
+而是它留下的东西，
+很多时候你根本看不到..."></textarea>
+
+    <div class="row">
+      <div>
+        <label class="label" style="margin-top:0">产品线</label>
+        <select id="productLine">
+          <option value="ultra_cleaning">🏢 ULTRA CLEANING</option>
+          <option value="hour_clean">🕐 HOUR CLEAN</option>
+          <option value="pro_clean">✨ PRO CLEAN</option>
+          <option value="maint_clean">🔧 MAINT CLEAN</option>
+          <option value="aircon_care">❄️ AIRCON CARE</option>
+          <option value="pest_care">🐀 PEST CARE</option>
+          <option value="pool_care">🏊 POOL CARE</option>
+          <option value="handy_care">🔨 HANDY CARE</option>
+          <option value="home_care">🏠 HOME CARE</option>
+          <option value="garden_care">🌿 GARDEN CARE</option>
+          <option value="hygiene">🧴 HYGIENE</option>
+          <option value="agency">👔 AGENCY</option>
+          <option value="academy">🎓 ACADEMY</option>
+        </select>
+      </div>
+      <div>
+        <label class="label" style="margin-top:0">目标观众</label>
+        <select id="audience">
+          <option value="Homeowner">住家业主</option>
+          <option value="Business Owner / Boss">企业主/老板</option>
+          <option value="SME">中小企业</option>
+          <option value="General Public">一般大众</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="btn-generate" id="btnGenerate" onclick="generate()">
+      <div class="spinner" id="spinner"></div>
+      <span id="btnText">⚡ 生成封面文案</span>
+    </button>
+  </div>
+
+  <div class="error-box" id="errorBox"></div>
+
+  <div class="results" id="results">
+
+    <div class="lang-tabs">
+      <button class="lang-tab active" onclick="switchLang('zh', this)">🇨🇳 中文</button>
+      <button class="lang-tab" onclick="switchLang('en', this)">🇬🇧 English</button>
+      <button class="lang-tab" onclick="switchLang('ms', this)">🇲🇾 Bahasa</button>
+    </div>
+
+    <!-- ZH Panel -->
+    <div class="lang-panel active" id="panel-zh">
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">封面标题</span><button class="btn-copy" onclick="copyEl('coverPreviewText-zh')">复制</button></div>
+        <div class="result-body">
+          <div class="cover-preview" id="coverPreview-zh"></div>
+          <div id="coverPreviewText-zh" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">前3秒 Hook</span><button class="btn-copy" onclick="copyEl('hookText-zh')">复制</button></div>
+        <div class="result-body">
+          <div class="hook-box" id="hookDisplay-zh"></div>
+          <div class="tone-row" id="toneRow-zh"></div>
+          <div id="hookText-zh" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">痛点关键词</span><button class="btn-copy" onclick="copyEl('kwText-zh')">复制</button></div>
+        <div class="result-body">
+          <div class="kw-list" id="kwList-zh"></div>
+          <div id="kwText-zh" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">贴文开头句</span><button class="btn-copy" onclick="copyEl('postText-zh')">复制</button></div>
+        <div class="result-body">
+          <div class="post-copy" id="postDisplay-zh"></div>
+          <div id="postText-zh" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- EN Panel -->
+    <div class="lang-panel" id="panel-en">
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Cover Title</span><button class="btn-copy" onclick="copyEl('coverPreviewText-en')">Copy</button></div>
+        <div class="result-body">
+          <div class="cover-preview" id="coverPreview-en"></div>
+          <div id="coverPreviewText-en" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">3-sec Hook</span><button class="btn-copy" onclick="copyEl('hookText-en')">Copy</button></div>
+        <div class="result-body">
+          <div class="hook-box" id="hookDisplay-en"></div>
+          <div class="tone-row" id="toneRow-en"></div>
+          <div id="hookText-en" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Pain Point Keywords</span><button class="btn-copy" onclick="copyEl('kwText-en')">Copy</button></div>
+        <div class="result-body">
+          <div class="kw-list" id="kwList-en"></div>
+          <div id="kwText-en" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Post Opener</span><button class="btn-copy" onclick="copyEl('postText-en')">Copy</button></div>
+        <div class="result-body">
+          <div class="post-copy" id="postDisplay-en"></div>
+          <div id="postText-en" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MS Panel -->
+    <div class="lang-panel" id="panel-ms">
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Tajuk Cover</span><button class="btn-copy" onclick="copyEl('coverPreviewText-ms')">Salin</button></div>
+        <div class="result-body">
+          <div class="cover-preview" id="coverPreview-ms"></div>
+          <div id="coverPreviewText-ms" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Hook 3 Saat</span><button class="btn-copy" onclick="copyEl('hookText-ms')">Salin</button></div>
+        <div class="result-body">
+          <div class="hook-box" id="hookDisplay-ms"></div>
+          <div class="tone-row" id="toneRow-ms"></div>
+          <div id="hookText-ms" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Kata Kunci</span><button class="btn-copy" onclick="copyEl('kwText-ms')">Salin</button></div>
+        <div class="result-body">
+          <div class="kw-list" id="kwList-ms"></div>
+          <div id="kwText-ms" style="display:none"></div>
+        </div>
+      </div>
+      <div class="result-section">
+        <div class="result-header"><span class="result-tag">Ayat Pembuka</span><button class="btn-copy" onclick="copyEl('postText-ms')">Salin</button></div>
+        <div class="result-body">
+          <div class="post-copy" id="postDisplay-ms"></div>
+          <div id="postText-ms" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API_URL = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/ugc'
+const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
+
+const PRODUCT_LABELS = {
+  ultra_cleaning: 'ULTRA CLEANING', hour_clean: 'HOUR CLEAN', pro_clean: 'PRO CLEAN',
+  maint_clean: 'MAINT CLEAN', aircon_care: 'AIRCON CARE', pest_care: 'PEST CARE',
+  pool_care: 'POOL CARE', handy_care: 'HANDY CARE', home_care: 'HOME CARE',
+  garden_care: 'GARDEN CARE', hygiene: 'HYGIENE', agency: 'AGENCY', academy: 'ACADEMY'
+}
+
+const TYPE_CONFIG = {
+  resonance: { label: '共鸣型', cls: 'resonance' },
+  curiosity:  { label: '好奇型', cls: 'curiosity' },
+  disbelief:  { label: '质疑型', cls: 'disbelief' }
+}
+
+function switchLang(lang, btn) {
+  document.querySelectorAll('.lang-tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('.lang-panel').forEach(p => p.classList.remove('active'))
+  btn.classList.add('active')
+  document.getElementById('panel-' + lang).classList.add('active')
+}
+
+async function generate() {
+  const script = document.getElementById('scriptInput').value.trim()
+  if (!script) { showError('请先贴入字幕或脚本内容。'); return }
+
+  const product = PRODUCT_LABELS[document.getElementById('productLine').value]
+  const audience = document.getElementById('audience').value
+
+  setLoading(true)
+  hideError()
+  document.getElementById('results').style.display = 'none'
+
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + ANON_KEY
+      },
+      body: JSON.stringify({ script, product, audience })
+    })
+
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'API error ' + res.status)
+
+    renderLang('zh', data.zh)
+    renderLang('en', data.en)
+    renderLang('ms', data.ms)
+
+    document.getElementById('results').style.display = 'flex'
+  } catch (e) {
+    showError('生成失败：' + e.message + '。请重试。')
+  } finally {
+    setLoading(false)
+  }
+}
+
+function renderLang(lang, d) {
+  if (!d) return
+
+  const textArr = []
+  let html = ''
+  d.covers.forEach((c, i) => {
+    const cfg = TYPE_CONFIG[c.type] || TYPE_CONFIG.curiosity
+    textArr.push(`V${i+1} Main: ${c.main}\nV${i+1} Sub: ${c.sub}`)
+    html += `<div class="cover-card">
+      <div class="tag">V${i+1} · ${cfg.label}</div>
+      <div class="cover-main">${c.main}</div>
+      <div class="cover-sub">${c.sub}</div>
+    </div>`
+  })
+  document.getElementById('coverPreview-' + lang).innerHTML = html
+  document.getElementById('coverPreviewText-' + lang).textContent = textArr.join('\n\n')
+
+  document.getElementById('hookDisplay-' + lang).textContent = `"${d.hook}"`
+  const hookCfg = TYPE_CONFIG[d.hookType] || TYPE_CONFIG.curiosity
+  document.getElementById('toneRow-' + lang).innerHTML =
+    `<span class="tone-badge ${hookCfg.cls}">${d.hookLabel || hookCfg.label}</span>`
+  document.getElementById('hookText-' + lang).textContent = d.hook
+
+  document.getElementById('kwList-' + lang).innerHTML =
+    d.keywords.map(k => `<span class="kw-chip ${k.hot ? 'hot' : ''}">${k.hot ? '🔥 ' : ''}${k.word}</span>`).join('')
+  document.getElementById('kwText-' + lang).textContent = d.keywords.map(k => k.word).join(' · ')
+
+  document.getElementById('postDisplay-' + lang).textContent = d.postOpener
+  document.getElementById('postText-' + lang).textContent = d.postOpener
+}
+
+function copyEl(id) {
+  const el = document.getElementById(id)
+  if (!el) return
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const btn = event.target
+    const orig = btn.textContent
+    btn.textContent = '✓'
+    btn.classList.add('copied')
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied') }, 1500)
+  })
+}
+
+function setLoading(on) {
+  document.getElementById('btnGenerate').disabled = on
+  document.getElementById('spinner').style.display = on ? 'block' : 'none'
+  document.getElementById('btnText').textContent = on ? '生成中...' : '⚡ 生成封面文案'
+}
+
+function showError(msg) {
+  const box = document.getElementById('errorBox')
+  box.textContent = msg
+  box.style.display = 'block'
+}
+
+function hideError() {
+  document.getElementById('errorBox').style.display = 'none'
+}
+</script>
+</body>
+</html>
