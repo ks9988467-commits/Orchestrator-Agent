@@ -323,22 +323,22 @@ select{background:#f5f5f5;border:1px solid #e5e5e5;color:#111111;border-radius:7
 /* ── Logs page (Dify-inspired) ── */
 .logs-toolbar{padding:14px 28px;border-bottom:1px solid #e5e5e5;display:flex;align-items:center;gap:10px;flex-shrink:0}
 .logs-filter{background:#ffffff;border:1px solid #e5e5e5;border-radius:7px;padding:6px 12px;color:#555555;font-size:12px;cursor:pointer;outline:none}
-.logs-refresh{background:none;border:1px solid #e5e5e5;border-radius:7px;padding:6px 12px;color:#77787b;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none}
+.logs-refresh{background:none;border:1px solid #e5e5e5;border-radius:7px;padding:6px 12px;color:#77787b;font-size:12px;cursor:pointer;transition:all .15s;-webkit-appearance:none;appearance:none;white-space:nowrap;flex-shrink:0}
 .logs-refresh:hover{color:#555555;border-color:#999999}
 .logs-count{font-size:12px;color:#999999;margin-left:auto}
 .logs-body{flex:1;overflow-y:auto;padding:0}
-.log-row{display:grid;grid-template-columns:100px 90px 1fr 110px 70px;align-items:center;padding:10px 28px;border-bottom:1px solid #f8f8f8;gap:12px;transition:background .12s}
+.log-row{display:grid;grid-template-columns:60px 88px 1fr 120px 56px;align-items:center;padding:9px 28px;border-bottom:1px solid #f8f8f8;gap:12px;transition:background .12s}
 .log-row:hover{background:#f5f5f5}
-.log-row-hd{display:grid;grid-template-columns:100px 90px 1fr 110px 70px;padding:8px 28px;border-bottom:1px solid #e5e5e5;gap:12px}
+.log-row-hd{display:grid;grid-template-columns:60px 88px 1fr 120px 56px;padding:8px 28px;border-bottom:1px solid #e5e5e5;gap:12px}
 .log-row-hd span{font-size:10px;color:#999999;text-transform:uppercase;letter-spacing:.07em}
 .fb-btns{display:flex;gap:4px}
 .fb-btn{background:none;border:1px solid #e5e5e5;border-radius:5px;padding:2px 7px;font-size:13px;cursor:pointer;color:#aaaaaa;transition:all .15s;-webkit-appearance:none;appearance:none}
 .fb-btn:hover{border-color:#aaaaaa;color:#ccc}
 .fb-btn.good.active{border-color:#22c55e;background:#22c55e;color:#22c55e}
 .fb-btn.bad.active{border-color:#ef4444;background:#ef4444;color:#ef4444}
-.log-role{font-size:11px;padding:2px 8px;border-radius:4px;text-align:center;font-weight:500}
-.log-role.user{background:#da0d15;color:#fff}
-.log-role.assistant{background:#059669;color:#34d399}
+.log-role{font-size:10px;padding:2px 7px;border-radius:4px;text-align:center;font-weight:600;white-space:nowrap}
+.log-role.user{background:#fef2f2;color:#da0d15;border:1px solid #fca5a5}
+.log-role.assistant{background:#f0fdf4;color:#16a34a;border:1px solid #86efac}
 .log-agent{font-size:11px;color:#77787b;font-family:monospace}
 .log-content{font-size:13px;color:#555555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .log-time{font-size:11px;color:#999999;text-align:right;font-family:monospace}
@@ -478,6 +478,31 @@ select{background:#f5f5f5;border:1px solid #e5e5e5;color:#111111;border-radius:7
 .ugc-rule-body{padding:14px 16px;display:none}
 .ugc-rule-body.open{display:block}
 .ugc-save-ok{font-size:11px;color:#22c55e;display:none;margin-left:10px}
+
+/* ── Stat cards (usage page) ── */
+.stat-card{background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:18px 20px}
+.stat-card h4{font-size:12px;font-weight:600;color:#77787b;margin:0 0 12px;text-transform:uppercase;letter-spacing:.05em}
+
+/* ── Tasks page ── */
+.tasks-toolbar{padding:12px 28px;border-bottom:1px solid #e5e5e5;display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:nowrap;background:#fff}
+.tasks-toolbar select{width:auto;flex-shrink:0;max-width:160px}
+.tasks-toolbar button{flex-shrink:0}
+.tasks-body{flex:1;overflow-y:auto;padding:16px 28px;background:#fafafa;display:flex;flex-direction:column;gap:6px}
+.task-item{background:#fff;border:1px solid #e5e5e5;border-radius:9px;padding:12px 14px;display:flex;align-items:flex-start;gap:12px;transition:border-color .15s}
+.task-item:hover{border-color:#ccc}
+.task-check{width:20px;height:20px;border-radius:5px;border:2px solid #ddd;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;transition:all .15s;margin-top:2px;user-select:none}
+.task-check.todo:hover{border-color:#da0d15}
+.task-check.in_progress{border-color:#f59e0b;background:#fffbeb;color:#f59e0b}
+.task-check.done{border-color:#22c55e;background:#dcfce7;color:#22c55e}
+.task-main{flex:1;min-width:0}
+.task-title{font-size:13px;font-weight:500;color:#111;line-height:1.5}
+.task-title.done{text-decoration:line-through;color:#aaa}
+.task-meta{display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap}
+.task-badge{font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600}
+.task-badge.priority-high{background:#fef2f2;color:#dc2626}
+.task-badge.priority-normal{background:#f3f4f6;color:#6b7280}
+.task-badge.priority-low{background:#f0fdf4;color:#16a34a}
+.task-actions{display:flex;gap:6px;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -699,36 +724,42 @@ select{background:#f5f5f5;border:1px solid #e5e5e5;color:#111111;border-radius:7
       </div>
     </div>
 
+    <div class="scroll-page" style="gap:20px">
     <!-- Summary cards -->
-    <div id="usageSummaryCards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px">
-      <div class="stat-card" style="text-align:center">
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px">总费用 (USD)</div>
-        <div id="uTotalCost" style="font-size:28px;font-weight:700;color:#22c55e">—</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+      <div class="stat-card">
+        <div style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">总费用</div>
+        <div id="uTotalCost" style="font-size:22px;font-weight:700;color:#111">—</div>
+        <div style="font-size:10px;color:#aaa;margin-top:3px">USD</div>
       </div>
-      <div class="stat-card" style="text-align:center">
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px">总 Token 用量</div>
-        <div id="uTotalTokens" style="font-size:28px;font-weight:700;color:#3b82f6">—</div>
+      <div class="stat-card">
+        <div style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Token 用量</div>
+        <div id="uTotalTokens" style="font-size:22px;font-weight:700;color:#111">—</div>
+        <div style="font-size:10px;color:#aaa;margin-top:3px">tokens</div>
       </div>
-      <div class="stat-card" style="text-align:center">
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px">对话次数</div>
-        <div id="uTotalCalls" style="font-size:28px;font-weight:700;color:#f59e0b">—</div>
+      <div class="stat-card">
+        <div style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">对话次数</div>
+        <div id="uTotalCalls" style="font-size:22px;font-weight:700;color:#111">—</div>
+        <div style="font-size:10px;color:#aaa;margin-top:3px">次</div>
       </div>
-      <div class="stat-card" style="text-align:center">
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px">均次费用</div>
-        <div id="uAvgCost" style="font-size:28px;font-weight:700;color:#a78bfa">—</div>
+      <div class="stat-card">
+        <div style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">均次费用</div>
+        <div id="uAvgCost" style="font-size:22px;font-weight:700;color:#111">—</div>
+        <div style="font-size:10px;color:#aaa;margin-top:3px">USD / 次</div>
       </div>
     </div>
 
-    <!-- By agent table -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+    <!-- By agent + by day -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="stat-card">
-        <h4 style="margin:0 0 14px;font-size:13px;color:#555">按 Agent 分布</h4>
+        <h4>按 Agent 分布</h4>
         <div id="usageByAgent" style="font-size:13px"></div>
       </div>
       <div class="stat-card">
-        <h4 style="margin:0 0 14px;font-size:13px;color:#555">按天费用趋势</h4>
+        <h4>按天费用趋势</h4>
         <div id="usageByDay" style="font-size:12px;color:#888"></div>
       </div>
+    </div>
     </div>
   </div>
 
@@ -760,7 +791,7 @@ select{background:#f5f5f5;border:1px solid #e5e5e5;color:#111111;border-radius:7
         <span class="logs-count" id="logsCount"></span>
       </div>
       <div class="log-row-hd">
-        <span>角色</span><span>Agent</span><span>内容</span><span>时间</span><span>评价</span>
+        <span>角色</span><span>Agent</span><span>内容</span><span>时间 / 费用</span><span>评价</span>
       </div>
       <div class="logs-body" id="logsBody">
         <div class="log-empty">加载中…</div>
@@ -2885,14 +2916,17 @@ async function loadLogs() {
       const agId = r.agent || 'chat'
       const isHermes = agId === 'chat'
       const agentTag = `<span style="display:inline-flex;align-items:center;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:4px;padding:2px 7px;background:${isHermes?'#f0f0f0':'#ffd405'};color:${isHermes?'#77787b':'#000'}">${esc(agId)}</span>`
+      const metaTime = `<span class="log-time" style="display:flex;flex-direction:column;gap:2px">
+        <span>${fmtTime(r.created_at)}</span>
+        ${r.cost_usd>0?`<span style="color:#22c55e;font-size:10px">$${Number(r.cost_usd).toFixed(4)}</span>`:''}
+        ${r.tokens_in||r.tokens_out?`<span style="color:#bbb;font-size:10px">${(r.tokens_in||0)+' ↑ '+(r.tokens_out||0)+' ↓'}</span>`:''}
+      </span>`
       return `
       <div class="log-row">
         <span class="log-role ${r.role}">${r.role==='user'?'User':'AI'}</span>
         <span class="log-agent">${agentTag}</span>
         <span class="log-content" style="cursor:pointer" title="点击查看全文" data-title="${encodeURIComponent((r.role==="user"?"👤 ":"🤖 ")+(r.agent||"")+" · "+new Date(r.created_at).toLocaleString())}" data-content="${encodeURIComponent(r.content||"")}" onclick="openLogModal(this)">${esc(r.content)}</span>
-        <span class="log-time">${fmtTime(r.created_at)}</span>
-        <span class="log-tokens" style="font-size:11px;color:#888;min-width:100px;text-align:right">${r.tokens_in||r.tokens_out ? (r.tokens_in||0)+'↑ '+(r.tokens_out||0)+'↓' : ''}</span>
-        <span class="log-cost" style="font-size:11px;color:#22c55e;min-width:60px;text-align:right">${r.cost_usd>0 ? '$'+Number(r.cost_usd).toFixed(4) : ''}</span>
+        ${metaTime}
         ${fbBtns}
       </div>`
     }).join('')
