@@ -1092,27 +1092,53 @@ async function extractFileData(
 }
 
 // \u2500\u2500 Workflow scheduler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// schedule format: 'daily:09:00' | 'weekly:1:09:00' | 'hourly' | 'interval:30' | 'monthly:09:00'
-function calcNextRun(schedule: string, from = new Date()): Date {
-  const now = new Date(from)
-  if (schedule === 'hourly') {
-    return new Date(now.getTime() + 60 * 60 * 1000)
+// schedule format: standard 5-field cron (MIN HOUR DOM MON DOW) or legacy daily:/weekly:/hourly/interval:
+function matchCronField(field: string, value: number): boolean {
+  if (field === '*') return true
+  for (const part of field.split(',')) {
+    if (part.includes('/')) {
+      const [range, stepStr] = part.split('/'); const step = parseInt(stepStr) || 1
+      let start = 0, end = 9999
+      if (range !== '*') {
+        if (range.includes('-')) { const [a, b] = range.split('-').map(Number); start = a; end = b }
+        else start = parseInt(range)
+      }
+      for (let v = start; v <= value; v += step) { if (v === value) return true }
+    } else if (part.includes('-')) {
+      const [a, b] = part.split('-').map(Number); if (value >= a && value <= b) return true
+    } else { if (parseInt(part) === value) return true }
   }
-  if (schedule.startsWith('interval:')) {
-    const mins = parseInt(schedule.split(':')[1]) || 60
+  return false
+}
+function nextCronRun(expr: string, from: Date): Date {
+  const [minF, hourF, domF, monF, dowF] = expr.trim().split(/\s+/)
+  const d = new Date(from); d.setSeconds(0, 0); d.setMinutes(d.getMinutes() + 1)
+  for (let i = 0; i < 527040; i++) {
+    if (matchCronField(monF, d.getMonth() + 1) && matchCronField(domF, d.getDate()) &&
+        matchCronField(dowF, d.getDay()) && matchCronField(hourF, d.getHours()) &&
+        matchCronField(minF, d.getMinutes())) return d
+    d.setMinutes(d.getMinutes() + 1)
+  }
+  return new Date(from.getTime() + 24 * 60 * 60 * 1000)
+}
+function calcNextRun(schedule: string, from = new Date()): Date {
+  const s = schedule.trim()
+  const now = new Date(from)
+  if (/^[\d/*,\-]+([ \t]+[\d/*,\-]+){4}$/.test(s)) return nextCronRun(s, now)
+  if (s === 'hourly') return new Date(now.getTime() + 60 * 60 * 1000)
+  if (s.startsWith('interval:')) {
+    const mins = parseInt(s.split(':')[1]) || 60
     return new Date(now.getTime() + mins * 60 * 1000)
   }
-  if (schedule.startsWith('daily:')) {
-    const parts = schedule.split(':')
+  if (s.startsWith('daily:')) {
+    const parts = s.split(':')
     const h = parseInt(parts[1]), m = parseInt(parts[2]) || 0
     const next = new Date(now); next.setHours(h, m, 0, 0)
     if (next <= now) next.setDate(next.getDate() + 1)
     return next
   }
-  if (schedule.startsWith('weekly:')) {
-    // weekly:1:09:00  (1=Mon\u20267=Sun)
-    const parts = schedule.split(':')
-    const targetDay = parseInt(parts[1]) % 7  // JS: 0=Sun
+  if (s.startsWith('weekly:')) {
+    const parts = s.split(':'); const targetDay = parseInt(parts[1]) % 7
     const h = parseInt(parts[2]), m = parseInt(parts[3]) || 0
     const next = new Date(now); next.setHours(h, m, 0, 0)
     let daysUntil = (targetDay - now.getDay() + 7) % 7
@@ -1120,9 +1146,8 @@ function calcNextRun(schedule: string, from = new Date()): Date {
     next.setDate(next.getDate() + daysUntil)
     return next
   }
-  if (schedule.startsWith('monthly:')) {
-    const parts = schedule.split(':')
-    const h = parseInt(parts[1]), m = parseInt(parts[2]) || 0
+  if (s.startsWith('monthly:')) {
+    const parts = s.split(':'); const h = parseInt(parts[1]), m = parseInt(parts[2]) || 0
     const next = new Date(now); next.setDate(1); next.setHours(h, m, 0, 0)
     if (next <= now) { next.setMonth(next.getMonth() + 1); next.setDate(1) }
     return next
