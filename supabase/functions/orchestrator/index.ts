@@ -1,4 +1,4 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+﻿import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -26,7 +26,43 @@ say i do not know when unsure. never fabricate
 when steps exceed 5, ask before proceeding
 `.trim()
 
-// \u2500\u2500 Module-level cache (reused across requests in same isolate) \u2500\u2500\u2500\u2500\u2500\u2500
+// ── Cost calculator ──────────────────────────────────────────────────
+const COST_PER_M: Record<string,[number,number]> = {
+  'claude-3-5-sonnet':[3,15],'claude-sonnet':[3,15],'claude-3-7-sonnet':[3,15],
+  'claude-3-5-haiku':[0.8,4],'claude-haiku':[0.8,4],
+  'claude-opus':[15,75],
+  'gpt-4o-mini':[0.15,0.6],'gpt-4o':[2.5,10],'gpt-4':[30,60],'o1-mini':[3,12],'o3-mini':[1.1,4.4],
+  'gemini-2.0-flash':[0.1,0.4],'gemini-1.5-flash':[0.075,0.3],'gemini-1.5-pro':[3.5,10.5],'gemini-2.5':[1.25,10],
+}
+function calcCost(model: string, tokensIn: number, tokensOut: number): number {
+  const key = Object.keys(COST_PER_M).find(k => (model||'').toLowerCase().includes(k)) ?? ''
+  const [inP, outP] = COST_PER_M[key] ?? [2.5, 10]
+  return Number(((tokensIn * inP + tokensOut * outP) / 1_000_000).toFixed(6))
+}
+
+// ── Per-request token accumulator (reset each request) ───────────────
+let _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: '' }
+function resetUsage(model='') { _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: model } }
+
+// ── Slack webhook ─────────────────────────────────────────────────────
+async function sendSlackWebhook(webhookUrl: string, text: string, mrkdwn?: string) {
+  const blocks = mrkdwn ? [{ type:'section', text:{ type:'mrkdwn', text: mrkdwn } }] : undefined
+  const payload: Record<string,unknown> = { text }
+  if (blocks) payload.blocks = blocks
+  await fetch(webhookUrl, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  })
+}
+async function notifySlack(title: string, body: string) {
+  try {
+    const rows = await dbGet('api_integrations','credentials,active',{service:'eq.slack',active:'eq.true'},undefined,1)
+    const url = (rows[0] as {credentials:Record<string,string>}|undefined)?.credentials?.webhook_url
+    if (url) await sendSlackWebhook(url, title, `*${title}*\n${body}`)
+  } catch { /* non-fatal */ }
+}
+
+// ── Module-level cache (reused across requests in same isolate) ──────
 interface CacheEntry<T> { data: T; expires: number }
 let _cacheProviders: CacheEntry<ProviderRow[]> | null = null
 let _cacheAgents:    CacheEntry<AgentRow[]>    | null = null
@@ -36,12 +72,30 @@ const CACHE_TTL = 60_000 // 60 s
 // ── Per-request tenant context (reset each request) ──────────────────
 let _reqTenantId: string | null = null
 let _reqIsMaster = false
+// ── Per-request LLM context (for use inside executeTool) ─────────────
+let _reqProviders: ProviderRow[] = []
+let _reqAgents: AgentRow[] = []
+let _reqDefaultProvider = ''
+let _reqDelegated = false        // true when delegate_to_agent was called this request
+let _reqSessionId = ''           // current request session_id (for delegate history lookup)
+let _reqDelegatedId   = ''       // agent_id that was delegated to
+let _reqDelegatedName = ''       // agent display name that was delegated to
+let _reqHermesMode = false       // true when calling agent is 'chat' (Hermes) — limits tools to delegation-only
 function tenantFilters(extra: Record<string,string> = {}): Record<string,string> {
   if (!_reqIsMaster && _reqTenantId) return { ...extra, tenant_id: `eq.${_reqTenantId}` }
   return extra
 }
 
-// \u2500\u2500 DB helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── DB patch helper ───────────────────────────────────────────────────
+async function dbPatch(table: string, id: string, data: object) {
+  await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
+    method: 'PATCH',
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify(data),
+  })
+}
+
+// ── DB helpers ──────────────────────────────────────────────────────
 async function dbGet(table: string, select = '*', filters: Record<string,string> = {}, order?: string, limit?: number) {
   const params = new URLSearchParams({ select })
   if (order) params.set('order', order)
@@ -78,7 +132,59 @@ async function dbInsertReturning(table: string, data: object): Promise<Record<st
   return Array.isArray(rows) ? (rows[0] ?? {}) : rows
 }
 
-// \u2500\u2500 Tool definitions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── Lark helpers ────────────────────────────────────────────────────
+async function getLarkConfig(): Promise<{webhook_url?:string;app_id?:string;app_secret?:string}|null> {
+  try {
+    const rows = await dbGet('api_integrations', 'credentials,active', { service: 'eq.lark', active: 'eq.true' }, undefined, 1)
+    const row = (rows as {credentials:Record<string,string>;active:boolean}[])[0]
+    return row?.credentials ?? null
+  } catch { return null }
+}
+
+async function sendLarkWebhook(webhookUrl: string, title: string, bodyMd: string, fileUrl?: string) {
+  const elements: unknown[] = [{ tag: 'div', text: { tag: 'lark_md', content: bodyMd } }]
+  if (fileUrl) elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '查看文件' }, type: 'primary', url: fileUrl }] })
+  await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msg_type: 'interactive', card: { header: { title: { tag: 'plain_text', content: title }, template: 'red' }, elements } }),
+  })
+}
+
+async function getLarkToken(appId: string, appSecret: string): Promise<string|null> {
+  try {
+    const r = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    })
+    const d = await r.json() as {tenant_access_token?:string}
+    return d.tenant_access_token ?? null
+  } catch { return null }
+}
+
+async function sendLarkMessage(token: string, receiveId: string, receiveIdType: string, text: string) {
+  await fetch(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ receive_id: receiveId, msg_type: 'text', content: JSON.stringify({ text }) }),
+  })
+}
+
+async function createLarkTask(token: string, title: string, desc: string, dueMs?: number): Promise<string|null> {
+  try {
+    const payload: Record<string,unknown> = { summary: title, description: desc }
+    if (dueMs) payload.due = { timestamp: String(Math.floor(dueMs / 1000)) }
+    const r = await fetch('https://open.feishu.cn/open-apis/task/v2/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    })
+    const d = await r.json() as {data?:{task?:{guid?:string}}}
+    return d.data?.task?.guid ?? null
+  } catch { return null }
+}
+
+// ── Tool definitions ─────────────────────────────────────────────────
 const TOOL_DEFS = [
   {
     name: 'query_leads',
@@ -157,6 +263,18 @@ const TOOL_DEFS = [
         type:      { type: 'string', description: 'Report type: "daily" or "weekly" (default: weekly)' },
       },
       required: [],
+    },
+  },
+  {
+    name: 'delegate_to_agent',
+    description: 'MANDATORY: Delegate any business task or specialized query to the appropriate sub-agent. You MUST call this tool whenever the user\'s request falls within any sub-agent\'s domain. NEVER answer business questions directly — always delegate. Only respond directly for pure greetings or meta questions about yourself.',
+    parameters: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'The ID of the agent to delegate to — use the IDs listed in your system prompt (e.g. "crm", "account", "ugc", "code", "report")' },
+        query:    { type: 'string', description: 'The full question or task to send to the agent, preserving all user context and details' },
+      },
+      required: ['agent_id', 'query'],
     },
   },
   {
@@ -364,6 +482,29 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       })
     }
 
+    if (name === 'delegate_to_agent') {
+      _reqDelegated = true
+      const targetId = String(args.agent_id || '').toLowerCase().trim()
+      const query    = String(args.query    || '')
+      const target   = _reqAgents.find(a => a.id === targetId && a.active)
+      if (!target) return JSON.stringify({ error: `Agent '${targetId}' not found or inactive. Available: ${_reqAgents.filter(a=>a.active&&a.id!=='chat').map(a=>a.id).join(', ')}` })
+      _reqDelegatedId   = target.id
+      _reqDelegatedName = target.name || target.id
+      // Load session history + sub-agent skills in parallel
+      const [history, subSkills] = await Promise.all([
+        _reqSessionId ? loadHistory(_reqSessionId, 10) : Promise.resolve([]),
+        loadAgentSkills(target.id),
+      ])
+      // Hermes context injected into sub-agent system prompt
+      const hermesCtx = `\n\n**[系统上下文]** 你是被 Hermes 调度系统委派的专项 Agent。当前用户问题：${query}\n请结合对话历史，给出专业回答。`
+      const sys      = (target.system_prompt || 'You are a helpful assistant.') + hermesCtx + '\n\n' + SOUL + subSkills
+      const useTools = DATA_AGENTS.has(target.id)
+      _reqHermesMode = false  // sub-agents get full tool access
+      const messages = [...history, { role: 'user', content: query }]
+      const { text } = await callLLM(_reqProviders, target.provider || _reqDefaultProvider, target.model, sys, messages, useTools)
+      return text
+    }
+
     if (name === 'remember') {
       const cat = String(args.category || 'general').toLowerCase().replace(/[^a-z]/g, '')
       const k   = String(args.key || '').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0,30)
@@ -456,6 +597,17 @@ async function listModels(provider: string, apiKey: string): Promise<string[]> {
       .map((m: {name:string}) => m.name.replace('models/', ''))
       .filter((id: string) => id.includes('gemini'))
   }
+  if (provider === 'openrouter') {
+    const r = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    })
+    if (!r.ok) throw new Error(`OpenRouter ${r.status}`)
+    const KNOWN = /^(deepseek|anthropic|openai|google|meta-llama|mistralai|qwen|x-ai|cohere|nvidia)\//
+    return ((await r.json()).data || [])
+      .map((m: {id:string}) => m.id)
+      .filter((id: string) => KNOWN.test(id) && !id.includes(':extended'))
+      .sort()
+  }
   throw new Error(`Unknown provider: ${provider}`)
 }
 
@@ -480,7 +632,7 @@ async function getDefaultProvider(): Promise<string> {
 }
 async function loadAgents(): Promise<AgentRow[]> {
   if (_cacheAgents && Date.now() < _cacheAgents.expires) return _cacheAgents.data
-  const data = await dbGet('agents', 'id,name,system_prompt,provider,model,active')
+  const data = await dbGet('agents', 'id,name,system_prompt,provider,model,active,description')
   _cacheAgents = { data: data as AgentRow[], expires: Date.now() + CACHE_TTL }
   return data as AgentRow[]
 }
@@ -502,6 +654,13 @@ async function loadHistory(sessionId: string, limit = 10): Promise<{role:string;
 }
 
 // \u2500\u2500 LLM callers with Tool Use \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Tools available to Hermes (router-only): cannot use sub-agent tools directly
+const HERMES_TOOL_NAMES = new Set(['delegate_to_agent', 'remember', 'learn_gaps', 'learn'])
+function getActiveTools() {
+  const all = TOOL_DEFS
+  return _reqHermesMode ? all.filter(t => HERMES_TOOL_NAMES.has(t.name)) : all
+}
+
 async function callAnthropic(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
   const body: Record<string,unknown> = {
     model: model || 'claude-sonnet-4-6',
@@ -509,7 +668,7 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
     system,
     messages,
   }
-  if (useTools) body.tools = TOOL_DEFS.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  if (useTools) body.tools = getActiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
 
   const msgs = [...messages] as Record<string,unknown>[]
   let iterations = 0
@@ -544,7 +703,7 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
 async function callOpenAI(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
   const msgs: Record<string,unknown>[] = [{ role: 'system', content: system }, ...messages as Record<string,unknown>[]]
   const body: Record<string,unknown> = { model: model || 'gpt-4o-mini', messages: msgs }
-  if (useTools) body.tools = TOOL_DEFS.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
+  if (useTools) body.tools = getActiveTools().map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
 
   let iterations = 0
   while (iterations++ < 8) {
@@ -582,7 +741,7 @@ async function callGoogle(apiKey: string, model: string, system: string, message
     system_instruction: { parts: [{ text: system }] },
     contents,
   }
-  if (useTools) body.tools = [{ function_declarations: TOOL_DEFS.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }]
+  if (useTools) body.tools = [{ function_declarations: getActiveTools().map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }]
 
   let iterations = 0
   while (iterations++ < 8) {
@@ -642,6 +801,8 @@ async function streamAnthropic(apiKey: string, model: string, system: string, me
       const raw = line.slice(6).trim(); if (!raw || raw === '[DONE]') continue
       try {
         const evt = JSON.parse(raw)
+        if (evt.type === 'message_start')    _lastUsage.tokens_in  += evt.message?.usage?.input_tokens  || 0
+        if (evt.type === 'message_delta')    _lastUsage.tokens_out += evt.usage?.output_tokens           || 0
         if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta' && evt.delta.text)
           await onChunk(evt.delta.text)
       } catch { /* skip */ }
@@ -658,7 +819,7 @@ async function streamOpenAI(apiKey: string, model: string, system: string, messa
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: model || 'gpt-4o-mini', messages: msgs, stream: true }),
+    body: JSON.stringify({ model: model || 'gpt-4o-mini', messages: msgs, stream: true, stream_options: { include_usage: true } }),
   })
   if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text()}`)
   const reader = r.body!.getReader(); const dec = new TextDecoder(); let buf = ''
@@ -669,8 +830,41 @@ async function streamOpenAI(apiKey: string, model: string, system: string, messa
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       const raw = line.slice(6).trim(); if (raw === '[DONE]') return; if (!raw) continue
-      try { const chunk = JSON.parse(raw).choices?.[0]?.delta?.content; if (chunk) await onChunk(chunk) }
-      catch { /* skip */ }
+      try {
+        const parsed = JSON.parse(raw)
+        const chunk = parsed.choices?.[0]?.delta?.content; if (chunk) await onChunk(chunk)
+        if (parsed.usage) { _lastUsage.tokens_in += parsed.usage.prompt_tokens||0; _lastUsage.tokens_out += parsed.usage.completion_tokens||0 }
+      } catch { /* skip */ }
+    }
+  }
+}
+
+async function streamOpenRouter(apiKey: string, model: string, system: string, messages: object[], onChunk: ChunkFn): Promise<void> {
+  const msgs = [{ role: 'system', content: system }, ...messages as object[]]
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://orchestrator-agent.ks9988467.workers.dev',
+      'X-Title': 'Orchestrator Agent',
+    },
+    body: JSON.stringify({ model: model || 'deepseek/deepseek-r1', messages: msgs, stream: true }),
+  })
+  if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${await r.text()}`)
+  const reader = r.body!.getReader(); const dec = new TextDecoder(); let buf = ''
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break
+    buf += dec.decode(value, { stream: true })
+    const lines = buf.split('\n'); buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const raw = line.slice(6).trim(); if (raw === '[DONE]') return; if (!raw) continue
+      try {
+        const parsed = JSON.parse(raw)
+        const chunk = parsed.choices?.[0]?.delta?.content; if (chunk) await onChunk(chunk)
+        if (parsed.usage) { _lastUsage.tokens_in += parsed.usage.prompt_tokens||0; _lastUsage.tokens_out += parsed.usage.completion_tokens||0 }
+      } catch { /* skip */ }
     }
   }
 }
@@ -697,8 +891,12 @@ async function streamGoogle(apiKey: string, model: string, system: string, messa
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       const raw = line.slice(6).trim(); if (!raw) continue
-      try { const chunk = JSON.parse(raw).candidates?.[0]?.content?.parts?.[0]?.text; if (chunk) await onChunk(chunk) }
-      catch { /* skip */ }
+      try {
+        const parsed = JSON.parse(raw)
+        const chunk = parsed.candidates?.[0]?.content?.parts?.[0]?.text; if (chunk) await onChunk(chunk)
+        const meta = parsed.usageMetadata
+        if (meta) { _lastUsage.tokens_in += meta.promptTokenCount||0; _lastUsage.tokens_out += meta.candidatesTokenCount||0 }
+      } catch { /* skip */ }
     }
   }
 }
@@ -715,9 +913,11 @@ async function streamWithFallback(
   for (const p of ordered) {
     const model = (p.provider === preferProvider && preferModel) ? preferModel : p.model
     try {
-      if      (p.provider === 'anthropic') await streamAnthropic(p.api_key, model, system, messages, useTools, onChunk)
-      else if (p.provider === 'openai')    await streamOpenAI(p.api_key, model, system, messages, useTools, onChunk)
-      else if (p.provider === 'google')    await streamGoogle(p.api_key, model, system, messages, useTools, onChunk)
+      resetUsage(model)
+      if      (p.provider === 'anthropic')   await streamAnthropic(p.api_key, model, system, messages, useTools, onChunk)
+      else if (p.provider === 'openai')      await streamOpenAI(p.api_key, model, system, messages, useTools, onChunk)
+      else if (p.provider === 'google')      await streamGoogle(p.api_key, model, system, messages, useTools, onChunk)
+      else if (p.provider === 'openrouter')  await streamOpenRouter(p.api_key, model, system, messages, onChunk)
       else throw new Error(`Unknown: ${p.provider}`)
       return p.provider
     } catch(e) { errors.push(`${p.provider}: ${(e as Error).message}`) }
@@ -828,8 +1028,68 @@ function keywordRoute(message: string, agents: AgentRow[]): AgentRow | null {
   return null
 }
 
-// \u2500\u2500 Agents that use data tools \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-const DATA_AGENTS = new Set(['crm', 'account', 'cpl', 'cpr', 'frequency', 'marketing', 'report'])
+// ── Agents that use data tools ───────────────────────────────────────
+const DATA_AGENTS = new Set(['chat', 'crm', 'account', 'cpl', 'cpr', 'frequency', 'marketing', 'review', 'report'])
+
+// ── Data extraction keyword detection ────────────────────────────────
+const DATA_EXTRACT_KW = ['录入','提取','读取数据','导入','解析文件','抽取','存入系统','数据录入','extract','import data']
+function needsDataExtract(msg: string): boolean {
+  return DATA_EXTRACT_KW.some(k => msg.includes(k))
+}
+
+// ── Extract structured data from a file via Anthropic multimodal ─────
+async function extractFileData(
+  providers: ProviderRow[], fileUrl: string, fileName: string,
+  fileType: string, note: string
+): Promise<{ structured: Record<string,unknown>; summary: string; dataType: string }> {
+  const anth = providers.find(p => p.provider === 'anthropic' && p.active)
+  if (!anth?.api_key) return { structured: {}, summary: '未配置 Anthropic API Key', dataType: '' }
+
+  const content: object[] = []
+  const headers: Record<string,string> = {
+    'x-api-key': anth.api_key,
+    'anthropic-version': '2023-06-01',
+    'Content-Type': 'application/json',
+  }
+
+  if (fileType === 'image') {
+    content.push({ type: 'image', source: { type: 'url', url: fileUrl } })
+  } else if (fileType === 'pdf' || fileType === 'word') {
+    content.push({ type: 'document', source: { type: 'url', url: fileUrl } })
+    headers['anthropic-beta'] = 'pdfs-2024-09-25'
+  } else {
+    // Excel / CSV: fetch raw text
+    try {
+      const r = await fetch(fileUrl)
+      const raw = await r.text()
+      content.push({ type: 'text', text: `文件内容（${fileName}）：\n${raw.slice(0, 8000)}` })
+    } catch { content.push({ type: 'text', text: `文件：${fileName}（无法读取内容）` }) }
+  }
+
+  content.push({
+    type: 'text',
+    text: (note ? `用户说明：${note}\n\n` : '') +
+      '请从以上文件中提取所有关键数据字段，返回严格JSON格式：\n' +
+      '{"fields":{"字段名":"值",...},"summary":"一行中文摘要","data_type":"文件类型/业务描述"}'
+  })
+
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers,
+    body: JSON.stringify({ model: anth.model || 'claude-sonnet-4-6', max_tokens: 2048, messages: [{ role: 'user', content }] })
+  })
+  if (!r.ok) return { structured: {}, summary: `提取失败 ${r.status}`, dataType: '' }
+
+  const d = await r.json() as { content: { text: string }[] }
+  const text = d.content?.[0]?.text || ''
+  const m = text.match(/\{[\s\S]*\}/)
+  if (m) {
+    try {
+      const parsed = JSON.parse(m[0])
+      return { structured: parsed.fields || {}, summary: parsed.summary || '', dataType: parsed.data_type || '' }
+    } catch { /* fall through */ }
+  }
+  return { structured: {}, summary: text.slice(0, 300), dataType: '' }
+}
 
 // \u2500\u2500 Workflow scheduler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // schedule format: 'daily:09:00' | 'weekly:1:09:00' | 'hourly' | 'interval:30' | 'monthly:09:00'
@@ -870,7 +1130,44 @@ function calcNextRun(schedule: string, from = new Date()): Date {
   return new Date(now.getTime() + 60 * 60 * 1000) // fallback: +1h
 }
 
+async function learnFromGaps(): Promise<{ ok: boolean; skills_added: number; processed: number }> {
+  // Fetch up to 50 unhandled gap questions
+  const rows = await dbGet('agent_suggestions', 'id,message', { handled: 'eq.false' }, 'asked_at.asc', 50) as { id: string; message: string }[]
+  if (!rows.length) return { ok: true, skills_added: 0, processed: 0 }
+
+  const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
+  const questions = rows.map(r => `- ${r.message}`).join('\n')
+
+  // Ask LLM to identify patterns and generate routing rules for Hermes
+  const { text } = await callLLM(providers, defaultProvider, undefined,
+    `You analyze unanswered questions and generate delegation routing rules for an AI orchestrator called Hermes.
+Hermes routes to these sub-agents: crm (客户关系), account (财务), cpl (获客成本), cpr (转化率), frequency (频率分析), report (报告), review (文件审核).
+For each theme you identify, output ONE routing rule in this exact format:
+"When user asks about [topic], delegate to [agent_id] agent."
+Output only the rules, one per line, max 5 rules. If a question doesn't fit any agent, skip it.`,
+    [{ role: 'user', content: `Questions Hermes answered directly without delegating:\n${questions}` }], false)
+
+  const rules = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('When'))
+  const ids = rows.map(r => r.id)
+
+  // Save each rule as a skill for chat (Hermes)
+  await Promise.all([
+    ...rules.map(rule => dbInsert('agent_skills', { agent: 'chat', skill: rule })),
+    // Mark all processed suggestions as handled
+    fetch(`${SUPABASE_URL}/rest/v1/agent_suggestions?id=in.(${ids.join(',')})`, {
+      method: 'PATCH',
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ handled: true }),
+    }),
+  ])
+
+  return { ok: true, skills_added: rules.length, processed: rows.length }
+}
+
 async function runWorkflows() {
+  // System learning: analyze gap questions → Hermes routing skills (silent, non-blocking)
+  learnFromGaps().catch(() => {})
+
   // Find all active workflows due to run
   const dueResp = await fetch(
     `${SUPABASE_URL}/rest/v1/workflows?active=eq.true&next_run=lte.${new Date().toISOString()}&select=*`,
@@ -980,6 +1277,11 @@ Deno.serve(async (req: Request) => {
     // Set per-request tenant context
     _reqTenantId = (body.tenant_id as string) || null
     _reqIsMaster = (body.role as string) === 'master'
+    _reqDelegated      = false
+    _reqSessionId      = ''
+    _reqDelegatedId    = ''
+    _reqDelegatedName  = ''
+    _reqHermesMode     = false
 
     // ── WhatsApp incoming messages ─────────────────────────────────
     if (body.object === 'whatsapp_business_account') {
@@ -992,7 +1294,7 @@ Deno.serve(async (req: Request) => {
           const text    = String(waMsg.text.body)
           const sid     = `wa_${from}`
           const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
-          const agent   = keywordRoute(text, agents) ?? await classifyIntent(text, agents, providers, defaultProvider)
+          const agent   = agents.find((a: AgentRow) => a.id === 'chat') ?? agents[0]
           const [history, skillText] = await Promise.all([loadHistory(sid, 6), loadAgentSkills(agent.id)])
           const system  = (agent.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
           const { text: reply } = await callLLM(providers, agent.provider || defaultProvider, agent.model,
@@ -1068,21 +1370,20 @@ Deno.serve(async (req: Request) => {
         headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
         body: JSON.stringify({ used: true })
       })
-      // Lookup tenant
-      const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${encodeURIComponent(email)}` })
-      const tu = (tuRows[0] as {tenant_id:string;role:string}|undefined)
+      // Resolve tenant + role from tenant_users
+      const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${email}` })
+      let tenantId: string|null = tuRows[0]?.tenant_id ?? null
+      let role: string = tuRows[0]?.role ?? 'member'
       let tenantName = ''
-      if (tu?.tenant_id) {
-        const tRows = await dbGet('tenants', 'name', { id: `eq.${tu.tenant_id}` })
-        tenantName = (tRows[0] as {name:string}|undefined)?.name ?? ''
+      if (tenantId) {
+        const tRows = await dbGet('tenants', 'name', { id: `eq.${tenantId}` })
+        tenantName = tRows[0]?.name ?? ''
+      } else {
+        // Fallback: treat as master if no tenant_users record
+        const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
+        if (masterRows.length) { tenantId = masterRows[0].id; role = 'master'; tenantName = masterRows[0].name }
       }
-      return new Response(JSON.stringify({ ok: true, tenant_id: tu?.tenant_id ?? null, role: tu?.role ?? 'member', tenant_name: tenantName }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    // \u2500\u2500 Run workflows (called by pg_cron every minute) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-    if (body.action === 'run_workflows') {
-      runWorkflows() // fire-and-forget \u2014 respond immediately
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -1324,6 +1625,114 @@ Deno.serve(async (req: Request) => {
     }
 
     // \u2500\u2500 Learn from feedback action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if (body.action === 'learn_gaps') {
+      try {
+        const result = await learnFromGaps()
+        return new Response(JSON.stringify(result), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── UGC: platform rules ───────────────────────────────────────────
+    const UGC_DEFAULT_RULES: Record<string,{maxWords:string,style:string,special:string}> = {
+      tiktok:      {maxWords:'旁白短句，每句≤10字',       style:'冲击口语，像真人说话，节奏快',        special:'需要字幕关键句，前3秒必须抓住注意力'},
+      ig_reels:    {maxWords:'说明栏≤150字',              style:'有温度，生活感，轻松自然',            special:'说明栏配合视频，引导互动'},
+      ig_feed:     {maxWords:'正文150-300字',             style:'故事感，有画面，细节丰富',            special:'需要封面框架，排版留白，适合存图'},
+      fb_reels:    {maxWords:'说明栏≤120字',              style:'轻松直接，像朋友分享',                special:'说明栏简洁，CTA清晰'},
+      fb_post:     {maxWords:'正文200-400字',             style:'对话感，像朋友喝咖啡聊天，真实自然',  special:'可以有Q&A格式，步骤条列，Emoji适量'},
+      xiaohongshu: {maxWords:'正文200-350字',             style:'生活感强，像日记，温暖分享',          special:'标题要有吸引力，多用换行，emoji较多，适合存图'},
+      youtube:     {maxWords:'说明栏≤100字',              style:'简洁专业，有SEO意识',                 special:'加入关键词，引导订阅'},
+    }
+
+    if (body.action === 'ugc_get_rules') {
+      const tid = _reqTenantId || 'default'
+      const rows = await dbGet('ugc_platform_rules', 'platform,max_words,style,special', { tenant_id: `eq.${tid}` })
+      const result: Record<string,unknown> = { ...UGC_DEFAULT_RULES }
+      for (const r of rows as {platform:string,max_words:string,style:string,special:string}[]) {
+        result[r.platform] = { maxWords: r.max_words, style: r.style, special: r.special }
+      }
+      return new Response(JSON.stringify({ ok: true, rules: result }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'ugc_save_rule') {
+      const { platform, max_words, style, special } = body
+      if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const tid = _reqTenantId || 'default'
+      await dbUpsert('ugc_platform_rules',
+        { tenant_id: tid, platform, max_words: max_words||'', style: style||'', special: special||'', updated_at: new Date().toISOString() },
+        'tenant_id,platform'
+      )
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'ugc_reset_rule') {
+      const { platform } = body
+      if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const tid = _reqTenantId || 'default'
+      await fetch(`${SUPABASE_URL}/rest/v1/ugc_platform_rules?tenant_id=eq.${encodeURIComponent(tid)}&platform=eq.${encodeURIComponent(platform)}`, {
+        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+      })
+      const def = UGC_DEFAULT_RULES[platform] || {}
+      return new Response(JSON.stringify({ ok: true, rule: def }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'ugc_generate') {
+      const { type, product, audience, content, duration, platforms: ugcPlatforms } = body
+      if (!type || !content) return new Response(JSON.stringify({ error: 'type and content required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+
+      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+      const ugcAgent = agents.find((a:AgentRow) => a.id === 'ugc') ?? agents.find((a:AgentRow) => a.id === 'chat') ?? agents[0]
+      const sysPrompt = ugcAgent.system_prompt || 'You are a UGC content creator. Output only valid JSON.'
+
+      // Phone CTA lookup
+      const PHONES: Record<string,{num:string,wa:string,name?:string,special?:boolean}> = {
+        ultra_cleaning:{num:'019-291 1001',wa:'60192911001'}, hour_clean:{num:'019-291 1001',wa:'60192911001'},
+        pro_clean:{num:'016-224 2788',wa:'60162242788',name:'Aaron'}, maint_clean:{num:'019-291 1001',wa:'60192911001'},
+        aircon_care:{num:'017-242 6722',wa:'60172426722',name:'午哥'}, pest_care:{num:'019-291 1001',wa:'60192911001'},
+        pool_care:{num:'019-238 2788',wa:'60192382788',name:'Andy'}, handy_care:{num:'019-291 1001',wa:'60192911001'},
+        home_care:{num:'019-291 1001',wa:'60192911001'}, garden_care:{num:'019-291 1001',wa:'60192911001'},
+        hygiene:{num:'019-444 2549',wa:'60194442549',name:'Daniel',special:true},
+        agency:{num:'019-291 1001',wa:'60192911001'}, academy:{num:'019-291 1001',wa:'60192911001'},
+      }
+      const ph = PHONES[product] || PHONES['ultra_cleaning']
+      const cta = ph.special
+        ? `想买？点导购👇\nhttps://shopee.com.my/ultracleaningmy\n大量购买？WhatsApp PM我！\nhttps://wa.me/${ph.wa}`
+        : `📲 ${ph.num}${ph.name?' ('+ph.name+')':''}\nhttps://wa.me/${ph.wa}`
+
+      let userMsg = ''
+      if (type === 'script') {
+        userMsg = `Product: ${product} | Audience: ${audience} | Duration: ${duration||30}s\nInput:\n${content}\n\nOutput JSON: {"voiceover":"full voiceover script with \\n for line breaks","captions":["line1","line2","line3","line4","line5"],"hook":"opening hook sentence"}`
+      } else if (type === 'cover') {
+        userMsg = `Product: ${product} | Audience: ${audience}\nScript:\n${content}\n\nOutput JSON with keys zh,en,ms. Each: {"covers":[{"main":"","sub":"","type":"resonance|curiosity|disbelief"},{"main":"","sub":"","type":""}],"hook":"","hookType":"resonance|curiosity|disbelief","hookLabel":"","keywords":[{"word":"","hot":true|false}]}`
+      } else if (type === 'post') {
+        // Load platform rules for this tenant
+        const tid = _reqTenantId || 'default'
+        const ruleRows = await dbGet('ugc_platform_rules', 'platform,max_words,style,special', { tenant_id: `eq.${tid}` })
+        const customRules: Record<string,unknown> = {}
+        for (const r of ruleRows as {platform:string,max_words:string,style:string}[]) customRules[r.platform] = r
+        const selPlatforms = (ugcPlatforms as string[]) || []
+        let rulesDesc = ''
+        for (const pv of selPlatforms) {
+          const r = (customRules[pv] || UGC_DEFAULT_RULES[pv] || {}) as {maxWords?:string,style?:string,max_words?:string}
+          rulesDesc += `\n${pv}: ${r.maxWords||r.max_words||''} | ${r.style||''}`
+        }
+        userMsg = `Product: ${product} | Audience: ${audience}\nCTA:\n${cta}\nPlatform rules:${rulesDesc}\nScript:\n${content}\n\nOutput JSON with keys zh/en/ms. Each language has keys: ${selPlatforms.join(',')}. Each value = complete post body + 10-15 hashtags + CTA. Use \\n for line breaks.`
+      }
+
+      try {
+        const { text } = await callLLM(providers, ugcAgent.provider || defaultProvider, ugcAgent.model || undefined,
+          sysPrompt, [{ role: 'user', content: userMsg }], false)
+        // Strip markdown fences
+        const cleaned = text.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()
+        const start = cleaned.search(/[{[]/)
+        const json = start >= 0 ? cleaned.slice(start) : cleaned
+        return new Response(JSON.stringify({ ok: true, result: json }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
     if (body.action === 'learn') {
       const { conversation_id, feedback } = body
       if (!conversation_id || !feedback) return new Response(
@@ -1373,19 +1782,613 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // \u2500\u2500 Streaming chat action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // ── Tenant management actions (master only) ─────────────────────
+    if (body.action === 'list_tenants') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const rows = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.desc')
+      return new Response(JSON.stringify({ tenants: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'create_tenant') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const { name, contact_name, contact_email } = body
+      if (!name) return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const row = await dbInsertReturning('tenants', { name, contact_name: contact_name||null, contact_email: contact_email||null, active: true })
+      return new Response(JSON.stringify({ ok: true, tenant: row }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'update_tenant') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const { tenant_id, active, name, contact_name, contact_email } = body
+      if (!tenant_id) return new Response(JSON.stringify({ error: 'tenant_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const patch: Record<string,unknown> = {}
+      if (active !== undefined) patch.active = active
+      if (name !== undefined) patch.name = name
+      if (contact_name !== undefined) patch.contact_name = contact_name
+      if (contact_email !== undefined) patch.contact_email = contact_email
+      await dbPatch('tenants', tenant_id as string, patch)
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'add_tenant_user') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const { tenant_id, email, role: uRole } = body
+      if (!tenant_id || !email) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await dbInsert('tenant_users', { tenant_id, email, role: uRole || 'member' })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'get_master_summary') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const tenants = await dbGet('tenants', 'id,name,active', { active: 'eq.true' })
+      const results = await Promise.all((tenants as {id:string,name:string,active:boolean}[]).map(async t => {
+        const [convs, alerts, reviews] = await Promise.all([
+          dbGet('conversations', 'id', { tenant_id: `eq.${t.id}` }, 'id.desc', 100),
+          dbGet('alerts', 'id,rule_name,triggered_at', { tenant_id: `eq.${t.id}` }, 'triggered_at.desc', 5),
+          dbGet('reviews', 'id,status', { tenant_id: `eq.${t.id}`, status: 'eq.pending' }),
+        ])
+        return { ...t, conversation_count: convs.length, alerts, pending_reviews: reviews.length }
+      }))
+      return new Response(JSON.stringify({ tenants: results }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Review agent actions ────────────────────────────────────────
+    if (body.action === 'get_reviewers') {
+      // Flat list of all reviewers (for manual tagging in upload modal)
+      const filters = tenantFilters({ active: 'eq.true' })
+      const rows = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', filters, 'reviewer_name.asc')
+      return new Response(JSON.stringify({ reviewers: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'get_department_routes') {
+      const filters = tenantFilters({ active: 'eq.true' })
+      const rows = await dbGet('department_routes', 'id,department,reviewer_name,reviewer_email,reviewer_company_id', filters, 'department.asc')
+      return new Response(JSON.stringify({ routes: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'save_department_route') {
+      const { id: routeId, department, reviewer_name, reviewer_email, reviewer_company_id } = body
+      if (!department || !reviewer_name || (!reviewer_email && !reviewer_company_id))
+        return new Response(JSON.stringify({ error: 'department, reviewer_name, and reviewer_email or reviewer_company_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const data = { department, reviewer_name, reviewer_email: reviewer_email||null, reviewer_company_id: reviewer_company_id||null }
+      if (routeId) {
+        await dbPatch('department_routes', routeId as string, data)
+      } else {
+        await dbInsert('department_routes', { ...data, tenant_id: _reqTenantId, active: true })
+      }
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'delete_department_route') {
+      const { id: routeId } = body
+      if (!routeId) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await dbPatch('department_routes', routeId as string, { active: false })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'submit_review') {
+      const { file_name, file_type, file_content, file_url, reviewer_id, note, submitted_by } = body
+      if (!file_name || !file_type)
+        return new Response(JSON.stringify({ error: 'file_name and file_type required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      try {
+        let route: Record<string,string>|null = null
+        let department = 'Unknown'
+        let summary = ''
+        let key_info: Record<string,unknown> = {}
+        let classification_reason = ''
+
+        if (reviewer_id) {
+          // ── Direct mode: reviewer manually chosen, no AI classification ──
+          const routeRows = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', { id: `eq.${reviewer_id}` }, undefined, 1)
+          route = (routeRows[0] as Record<string,string>|undefined) ?? null
+          department = route?.department || 'Unknown'
+          summary = String(note || '')
+          classification_reason = '手动指定审核人'
+        } else if (file_content) {
+          // ── AI classification mode: paste text, auto-route by department ──
+          const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
+          const classifyPrompt = `Analyze this document and respond with ONLY valid JSON (no markdown):\n{\n  "department": "Finance|HR|IT|Sales|Purchase|Operations|Unknown",\n  "reason": "one sentence why",\n  "key_info": { "extracted key fields": "values" },\n  "summary": "2-3 sentence summary"\n}\nDocument: ${file_name}\nContent:\n${(file_content as string).slice(0, 8000)}`
+          const { text } = await callLLM(providers, defaultProvider, undefined,
+            'You are a document classification expert. Analyze documents and output only valid JSON.',
+            [{ role: 'user', content: classifyPrompt }], false)
+          let cl: Record<string,unknown> = { department: 'Unknown', reason: '', key_info: {}, summary: '' }
+          try { const m = text.match(/\{[\s\S]*\}/); if (m) cl = { ...cl, ...JSON.parse(m[0]) } } catch { /* default */ }
+          department = String(cl.department)
+          summary    = String(cl.summary)
+          key_info   = cl.key_info as Record<string,unknown>
+          classification_reason = String(cl.reason)
+          const routeFilters = tenantFilters({ department: `eq.${department}`, active: 'eq.true' })
+          const routes = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id', routeFilters, undefined, 1)
+          route = (routes[0] as Record<string,string>|undefined) ?? null
+        }
+
+        // Insert review record
+        const review = await dbInsertReturning('reviews', {
+          tenant_id: _reqTenantId,
+          file_name, file_type,
+          file_content: file_content || null,
+          file_url: file_url || null,
+          department,
+          classification_reason,
+          key_info,
+          summary,
+          submitted_by: submitted_by || 'unknown',
+          reviewer_route_id: route?.id ?? null,
+          status: 'pending',
+        })
+
+        // Email notification if reviewer has email
+        let notified = false
+        if (route?.reviewer_email) {
+          try {
+            const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+            const client = new SmtpClient()
+            await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
+            const fileInfo = file_url ? `\n文件链接：${file_url}` : ''
+            await client.send({
+              from: 'Orchestrator Agent <ks9988467@gmail.com>',
+              to: route.reviewer_email,
+              subject: `[审核请求] ${department} - ${file_name}`,
+              content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}${fileInfo}${summary ? '\n说明：' + summary : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by || 'unknown'}`,
+            })
+            await client.close()
+            await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
+            notified = true
+          } catch { /* email failure is non-fatal */ }
+        }
+        // Lark webhook notification
+        try {
+          const lark = await getLarkConfig()
+          if (lark?.webhook_url) {
+            await sendLarkWebhook(lark.webhook_url,
+              `📋 新文件审核请求 — ${department}`,
+              `**文件：** ${file_name}\n**提交人：** ${submitted_by || 'unknown'}\n${summary ? '**摘要：** ' + summary : ''}`,
+              file_url as string|undefined)
+            if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
+          }
+        } catch { /* non-fatal */ }
+        // Slack notification
+        await notifySlack(`📋 新审核请求 — ${department}`, `文件：${file_name}\n提交人：${submitted_by||'unknown'}${summary ? '\n摘要：'+summary : ''}`)
+
+        return new Response(JSON.stringify({
+          ok: true,
+          review_id: review.id,
+          department,
+          summary,
+          reviewer: route ? { name: route.reviewer_name, email: route.reviewer_email||null, company_id: route.reviewer_company_id||null } : null,
+          notified,
+        }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    if (body.action === 'test_lark') {
+      const { webhook_url } = body
+      if (!webhook_url) return new Response(JSON.stringify({ error: 'webhook_url required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      try {
+        await sendLarkWebhook(String(webhook_url), '✅ 连接测试成功', '系统连接正常，Lark 群组机器人已配置。')
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    if (body.action === 'create_lark_task') {
+      const { title, description, due_date } = body
+      if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const lark = await getLarkConfig()
+      if (!lark?.app_id || !lark?.app_secret) return new Response(JSON.stringify({ error: '未配置 Lark App ID/Secret，请先在 API 集成页面配置' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const token = await getLarkToken(lark.app_id, lark.app_secret)
+      if (!token) return new Response(JSON.stringify({ error: '获取 Lark token 失败，检查 App ID/Secret' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const dueMs = due_date ? new Date(String(due_date)).getTime() : undefined
+      const taskId = await createLarkTask(token, String(title), String(description || ''), dueMs)
+      return new Response(JSON.stringify({ ok: true, task_id: taskId }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'list_reviews') {
+      const { status: sf, department: df } = body
+      const filters = tenantFilters()
+      if (sf) filters['status'] = `eq.${sf}`
+      if (df) filters['department'] = `eq.${df}`
+      const rows = await dbGet('reviews', 'id,file_name,file_type,file_url,department,status,submitted_by,summary,classification_reason,key_info,review_notes,created_at,reviewed_at,notified_at', filters, 'created_at.desc', 50)
+      return new Response(JSON.stringify({ reviews: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'update_review_status') {
+      const { review_id, status: newStatus, review_notes } = body
+      if (!review_id || !newStatus) return new Response(JSON.stringify({ error: 'review_id and status required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await dbPatch('reviews', review_id as string, { status: newStatus, review_notes: review_notes||null, reviewed_at: new Date().toISOString() })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── RAG: embed text ─────────────────────────────────────────────
+    if (body.action === 'embed') {
+      const { text: embedText, kb_id } = body
+      if (!embedText) return new Response(JSON.stringify({ error: 'text required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const providers = await loadProviders()
+      const oai = providers.find(p => p.provider === 'openai' && p.active)
+      if (!oai?.api_key) return new Response(JSON.stringify({ error: 'OpenAI key required for embeddings' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const r = await fetch('https://api.openai.com/v1/embeddings', {
+        method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ model:'text-embedding-3-small', input: String(embedText).slice(0,8000) }),
+      })
+      if (!r.ok) return new Response(JSON.stringify({ error:`Embedding failed: ${r.status}` }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      const d = await r.json() as { data:[{embedding:number[]}] }
+      const embedding = d.data?.[0]?.embedding
+      if (!embedding) return new Response(JSON.stringify({ error:'No embedding returned' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      return new Response(JSON.stringify({ embedding }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── RAG: ingest document chunks ─────────────────────────────────
+    if (body.action === 'kb_ingest') {
+      const { kb_id, source_name, content: rawContent } = body
+      if (!kb_id || !rawContent) return new Response(JSON.stringify({ error:'kb_id and content required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const providers = await loadProviders()
+      const oai = providers.find(p => p.provider === 'openai' && p.active)
+      if (!oai?.api_key) return new Response(JSON.stringify({ error:'OpenAI key required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      // Split into ~500-char chunks
+      const text = String(rawContent)
+      const chunks: string[] = []
+      const chunkSize = 500, overlap = 50
+      for (let i = 0; i < text.length; i += chunkSize - overlap) chunks.push(text.slice(i, i + chunkSize))
+      // Embed all chunks
+      const results = await Promise.all(chunks.map(async (chunk, idx) => {
+        const r = await fetch('https://api.openai.com/v1/embeddings', {
+          method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
+          body: JSON.stringify({ model:'text-embedding-3-small', input: chunk }),
+        })
+        if (!r.ok) return null
+        const d = await r.json() as { data:[{embedding:number[]}] }
+        const embedding = d.data?.[0]?.embedding
+        if (!embedding) return null
+        return dbInsert('kb_chunks', { kb_id, source_name: source_name||'upload', chunk_index: idx, content: chunk, embedding: JSON.stringify(embedding), tenant_id: _reqTenantId })
+      }))
+      const saved = results.filter(Boolean).length
+      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── RAG: semantic search ─────────────────────────────────────────
+    if (body.action === 'kb_search') {
+      const { kb_id, query, limit: kLimit } = body
+      if (!kb_id || !query) return new Response(JSON.stringify({ error:'kb_id and query required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const providers = await loadProviders()
+      const oai = providers.find(p => p.provider === 'openai' && p.active)
+      if (!oai?.api_key) return new Response(JSON.stringify({ error:'OpenAI key required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const r = await fetch('https://api.openai.com/v1/embeddings', {
+        method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ model:'text-embedding-3-small', input: String(query).slice(0,500) }),
+      })
+      if (!r.ok) return new Response(JSON.stringify({ error:'Embedding query failed' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      const d = await r.json() as { data:[{embedding:number[]}] }
+      const qEmbed = d.data?.[0]?.embedding
+      if (!qEmbed) return new Response(JSON.stringify({ error:'No embedding' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      const n = Math.min(Number(kLimit)||5, 20)
+      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
+        method:'POST',
+        headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json' },
+        body: JSON.stringify({ query_embedding: qEmbed, match_kb_id: kb_id, match_count: n }),
+      }).then(res => res.ok ? res.json() : [])
+      return new Response(JSON.stringify({ results: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── KB CRUD ──────────────────────────────────────────────────────
+    if (body.action === 'list_kbs') {
+      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',{},undefined,50)
+      return new Response(JSON.stringify({ kbs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'create_kb') {
+      const { name, description, agent_id } = body
+      if (!name) return new Response(JSON.stringify({ error:'name required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const row = await dbInsertReturning('knowledge_bases',{ name, description:description||'', agent_id:agent_id||null, tenant_id:_reqTenantId })
+      return new Response(JSON.stringify({ ok:true, kb: row }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'delete_kb') {
+      const { kb_id } = body
+      if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_bases?id=eq.${kb_id}`,{
+        method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` }
+      })
+      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'list_kb_chunks') {
+      const { kb_id } = body
+      if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const rows = await dbGet('kb_chunks','id,source_name,chunk_index,content,created_at',{ kb_id:`eq.${kb_id}` },'chunk_index.asc',200)
+      return new Response(JSON.stringify({ chunks: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── Agent version history ────────────────────────────────────────
+    if (body.action === 'save_agent_version') {
+      const { agent_id, system_prompt, provider, model: aModel, note } = body
+      if (!agent_id) return new Response(JSON.stringify({ error:'agent_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const vRows = await dbGet('agent_versions','version',{ agent_id:`eq.${agent_id}` },'version.desc',1)
+      const nextVer = ((vRows[0] as {version:number}|undefined)?.version ?? 0) + 1
+      await dbInsert('agent_versions',{ agent_id, version:nextVer, system_prompt:system_prompt||'', provider:provider||null, model:aModel||null, note:note||'' })
+      return new Response(JSON.stringify({ ok:true, version:nextVer }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'list_agent_versions') {
+      const { agent_id } = body
+      if (!agent_id) return new Response(JSON.stringify({ error:'agent_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const rows = await dbGet('agent_versions','id,version,provider,model,note,saved_at',{ agent_id:`eq.${agent_id}` },'version.desc',20)
+      return new Response(JSON.stringify({ versions: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'restore_agent_version') {
+      const { agent_id, version } = body
+      if (!agent_id || !version) return new Response(JSON.stringify({ error:'agent_id and version required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const rows = await dbGet('agent_versions','system_prompt,provider,model',{ agent_id:`eq.${agent_id}`, version:`eq.${version}` })
+      const v = rows[0] as {system_prompt:string;provider:string;model:string}|undefined
+      if (!v) return new Response(JSON.stringify({ error:'Version not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
+      await dbPatch('agents', agent_id as string, { system_prompt:v.system_prompt, provider:v.provider||null, model:v.model||null, updated_at:new Date().toISOString() })
+      _cacheAgents = null
+      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── Workflow CRUD + runner ────────────────────────────────────────
+    if (body.action === 'list_workflows') {
+      const rows = await dbGet('workflows','id,name,description,active,created_at',tenantFilters(),'created_at.desc',50)
+      return new Response(JSON.stringify({ workflows: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'save_workflow') {
+      const { id: wfId, name, description, nodes, edges } = body
+      if (!name) return new Response(JSON.stringify({ error:'name required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const data = { name, description:description||'', nodes:nodes||[], edges:edges||[], updated_at:new Date().toISOString() }
+      if (wfId) { await dbPatch('workflows', wfId as string, data); return new Response(JSON.stringify({ ok:true, id:wfId }), { headers:{...CORS,'Content-Type':'application/json'} }) }
+      const row = await dbInsertReturning('workflows',{ ...data, tenant_id:_reqTenantId, active:true })
+      return new Response(JSON.stringify({ ok:true, id:row.id }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'delete_workflow') {
+      const { id: wfId } = body
+      if (!wfId) return new Response(JSON.stringify({ error:'id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      await dbPatch('workflows', wfId as string, { active:false })
+      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'run_workflow') {
+      const { id: wfId, input: wfInput } = body
+      if (!wfId) return new Response(JSON.stringify({ error:'id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const wfRows = await dbGet('workflows','nodes,edges',{ id:`eq.${wfId}` })
+      const wf = wfRows[0] as { nodes:{id:string;type:string;config:Record<string,string>}[]; edges:{from:string;to:string}[] }|undefined
+      if (!wf) return new Response(JSON.stringify({ error:'Workflow not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
+      const runRow = await dbInsertReturning('workflow_runs',{ workflow_id:wfId, input:wfInput||{}, status:'running' })
+      // Execute nodes sequentially
+      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+      let context: Record<string,unknown> = { input: wfInput || {} }
+      let error = ''
+      try {
+        // Build adjacency: find start node (no incoming edges)
+        const incoming = new Set(wf.edges.map(e => e.to))
+        const nodeMap = Object.fromEntries(wf.nodes.map(n => [n.id, n]))
+        const start = wf.nodes.find(n => !incoming.has(n.id))
+        if (!start) throw new Error('No start node found')
+        const visited = new Set<string>()
+        let cur: string|undefined = start.id
+        while (cur && !visited.has(cur)) {
+          visited.add(cur)
+          const node = nodeMap[cur]
+          if (!node) break
+          if (node.type === 'agent') {
+            const agentId = node.config?.agent_id
+            const agent = agents.find(a => a.id === agentId) ?? agents.find(a => a.id === 'chat') ?? agents[0]
+            const prompt = (node.config?.prompt || '{{input}}').replace('{{input}}', JSON.stringify(context.input))
+            const { text } = await callLLM(providers, agent?.provider || defaultProvider, agent?.model, agent?.system_prompt || 'You are a helpful assistant.', [{ role:'user', content:prompt }])
+            context[node.id] = text
+            context.last_output = text
+          } else if (node.type === 'condition') {
+            // Basic condition: check if last_output contains keyword
+            const keyword = node.config?.keyword || ''
+            const passed = String(context.last_output||'').toLowerCase().includes(keyword.toLowerCase())
+            context[node.id] = passed ? 'true' : 'false'
+          } else if (node.type === 'output') {
+            context.final_output = context.last_output
+          }
+          const nextEdge = wf.edges.find(e => e.from === cur)
+          cur = nextEdge?.to
+        }
+        await dbPatch('workflow_runs', String(runRow.id), { status:'done', output:context, finished_at:new Date().toISOString() })
+      } catch(e) {
+        error = (e as Error).message
+        await dbPatch('workflow_runs', String(runRow.id), { status:'error', error, finished_at:new Date().toISOString() })
+      }
+      return new Response(JSON.stringify({ ok:!error, run_id:runRow.id, output:context, error }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── Cost summary ─────────────────────────────────────────────────
+    if (body.action === 'cost_summary') {
+      const { days } = body
+      const since = new Date(Date.now() - (Number(days)||30) * 86400000).toISOString()
+      const filters = tenantFilters({ created_at:`gte.${since}`, role:'eq.assistant' })
+      const rows = await dbGet('conversations','agent,tokens_in,tokens_out,cost_usd',filters,undefined,5000)
+      const byAgent: Record<string,{tokens_in:number;tokens_out:number;cost_usd:number;count:number}> = {}
+      for (const r of rows as {agent:string;tokens_in:number;tokens_out:number;cost_usd:number}[]) {
+        if (!byAgent[r.agent]) byAgent[r.agent] = { tokens_in:0, tokens_out:0, cost_usd:0, count:0 }
+        byAgent[r.agent].tokens_in  += r.tokens_in  || 0
+        byAgent[r.agent].tokens_out += r.tokens_out || 0
+        byAgent[r.agent].cost_usd   += Number(r.cost_usd) || 0
+        byAgent[r.agent].count++
+      }
+      return new Response(JSON.stringify({ summary: byAgent }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    // ── Streaming chat action ───────────────────────────────────────
     if (body.stream === true) {
-      const { message: smsg, session_id: ssid, target_agent: sta } = body
-      if (!smsg) return new Response(JSON.stringify({ error: 'message required' }),
+      const { message: smsg, session_id: ssid, target_agent: sta, system_prompt_override: sPromptOverride } = body
+      if (!smsg && !body.file_url) return new Response(JSON.stringify({ error: 'message required' }),
         { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const sid2 = ssid || crypto.randomUUID()
+
+      // ── File attached → data extraction if keyword detected ─────────
+      if (body.file_url && body.file_name && needsDataExtract(smsg || '')) {
+        const { readable, writable } = new TransformStream()
+        const writer = writable.getWriter()
+        const encoder = new TextEncoder()
+        const ssed = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        ;(async () => {
+          try {
+            const [providers] = await Promise.all([loadProviders()])
+            const file_name = String(body.file_name)
+            const file_url  = String(body.file_url)
+            const extMap: Record<string,string> = { pdf:'pdf', doc:'word', docx:'word', xls:'excel', xlsx:'excel', csv:'excel', jpg:'image', jpeg:'image', png:'image', gif:'image', webp:'image' }
+            const ext = file_name.split('.').pop()?.toLowerCase() ?? ''
+            const file_type = extMap[ext] ?? 'pdf'
+            const note = (smsg || '').replace(new RegExp(DATA_EXTRACT_KW.join('|'), 'g'), '').trim()
+
+            for (const ch of `⏳ 正在读取 ${file_name}，请稍候…`) await ssed({ chunk: ch })
+
+            const { structured, summary, dataType } = await extractFileData(providers, file_url, file_name, file_type, note)
+
+            // Store in data_entries
+            await dbInsert('data_entries', {
+              file_name, file_url, file_type,
+              data_type: dataType,
+              structured_data: structured,
+              summary,
+              tenant_id: _reqTenantId
+            })
+
+            // Build result message
+            const fields = Object.entries(structured)
+            let msg = `✅ 数据已提取录入\n\n📄 **${file_name}**`
+            if (dataType) msg += `\n🏷️ 类型：${dataType}`
+            if (summary) msg += `\n📝 摘要：${summary}`
+            if (fields.length > 0) {
+              msg += `\n\n**提取字段（${fields.length} 项）：**\n`
+              for (const [k, v] of fields.slice(0, 25)) msg += `• **${k}**：${v}\n`
+              if (fields.length > 25) msg += `…还有 ${fields.length - 25} 项\n`
+            }
+            msg += '\n可在「📊 数据」页面查看所有录入记录。'
+
+            for (const ch of msg) await ssed({ chunk: ch })
+
+            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[数据录入] ${file_name}`, agent: 'data', tenant_id: _reqTenantId })
+            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: msg, agent: 'data', tenant_id: _reqTenantId })
+            await ssed({ done: true, agent: 'data', session_id: sid2, conversation_id: aRow.id })
+          } catch(e) {
+            await ssed({ error: (e as Error).message })
+          } finally {
+            await writer.close()
+          }
+        })()
+        return new Response(readable, { headers: { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
+      }
+
+      // ── File attached in chat → run review workflow directly ────────
+      if (body.file_url && body.file_name) {
+        const { readable, writable } = new TransformStream()
+        const writer = writable.getWriter()
+        const encoder = new TextEncoder()
+        const sse2 = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        ;(async () => {
+          try {
+            const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
+            const file_name = String(body.file_name)
+            const file_url  = String(body.file_url)
+            const extMap: Record<string,string> = { pdf:'pdf', doc:'word', docx:'word', xls:'excel', xlsx:'excel', csv:'excel', jpg:'image', jpeg:'image', png:'image', gif:'image', webp:'image' }
+            const ext = file_name.split('.').pop()?.toLowerCase() ?? ''
+            const file_type = extMap[ext] ?? 'pdf'
+            const note = smsg && !smsg.startsWith('请审核这份文件') ? String(smsg) : ''
+            const submitted_by = String(body.submitted_by || 'chat')
+            const submitted_by_staff_id = body.submitted_by_staff_id ? String(body.submitted_by_staff_id) : null
+
+            // AI classify
+            let department = 'General', summary = '', key_info: Record<string,unknown> = {}, classification_reason = ''
+            try {
+              const { text } = await callLLM(providers, defaultProvider, undefined,
+                `You are a document classifier. Analyze the filename and return JSON only:
+{"department":"Finance|HR|Legal|Procurement|General","summary":"one line description in Chinese","key_info":{},"reason":"why this department in Chinese"}`,
+                [{ role:'user', content: `File: ${file_name}${note ? '\nNote: '+note : ''}` }], false)
+              const m = text.match(/\{[\s\S]*\}/)
+              if (m) {
+                const cl = JSON.parse(m[0])
+                department = String(cl.department || 'General')
+                summary = String(cl.summary || '')
+                key_info = cl.key_info || {}
+                classification_reason = String(cl.reason || '')
+              }
+            } catch { /* use defaults */ }
+
+            // Find reviewer by department
+            const routeFilters = tenantFilters({ department: `eq.${department}`, active: 'eq.true' })
+            const routes = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', routeFilters, undefined, 1)
+            const route = (routes[0] as Record<string,string>|undefined) ?? null
+
+            // Insert review record
+            const review = await dbInsertReturning('reviews', {
+              tenant_id: _reqTenantId, file_name, file_type, file_url,
+              file_content: null, department, classification_reason, key_info, summary,
+              submitted_by, submitted_by_staff_id, reviewer_route_id: route?.id ?? null, status: 'pending',
+            })
+
+            // Send email notification
+            let notified = false
+            if (route?.reviewer_email) {
+              try {
+                const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+                const client = new SmtpClient()
+                await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
+                await client.send({
+                  from: 'Orchestrator Agent <ks9988467@gmail.com>',
+                  to: route.reviewer_email,
+                  subject: `[审核请求] ${department} - ${file_name}`,
+                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${file_url}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
+                })
+                await client.close()
+                await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
+                notified = true
+              } catch { /* email failure non-fatal */ }
+            }
+            // Lark webhook notification
+            try {
+              const lark = await getLarkConfig()
+              if (lark?.webhook_url) {
+                await sendLarkWebhook(lark.webhook_url,
+                  `📋 新文件审核请求 — ${department}`,
+                  `**文件：** ${file_name}\n**提交人：** ${submitted_by}\n${summary ? '**摘要：** ' + summary : ''}${note ? '\n**备注：** ' + note : ''}`,
+                  String(file_url))
+                if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
+              }
+            } catch { /* non-fatal */ }
+
+            // Build confirmation message
+            let confirmMsg = `✅ 文件已提交审核\n\n📄 **${file_name}**\n🏷️ 部门：${department}`
+            if (summary) confirmMsg += `\n📝 摘要：${summary}`
+            if (route) {
+              confirmMsg += `\n👤 审核人：${route.reviewer_name}`
+              confirmMsg += notified ? `\n📧 已发送邮件通知` : `\n⚠️ 邮件发送失败（检查审核人邮箱配置）`
+            } else {
+              confirmMsg += `\n⚠️ 未找到「${department}」部门审核人，请在文件审核 → 审核路由配置中添加`
+            }
+            confirmMsg += `\n\n可在「📋 文件审核」查看审核进度。`
+
+            // Stream confirmation char by char
+            for (const ch of confirmMsg) { await sse2({ chunk: ch }) }
+
+            // Save to conversation history
+            await dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg || `[文件] ${file_name}`, agent: 'review', tenant_id: _reqTenantId })
+            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: confirmMsg, agent: 'review', tenant_id: _reqTenantId })
+            await sse2({ done: true, agent: 'review', agent_name: '文件审核', session_id: sid2, provider: 'system', conversation_id: aRow.id })
+          } catch(e) {
+            await sse2({ error: (e as Error).message })
+          } finally {
+            await writer.close()
+          }
+        })()
+        return new Response(readable, { headers: { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
+      }
       const [sproviders, sdefProv, sagents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+      _reqProviders = sproviders; _reqAgents = sagents; _reqDefaultProvider = sdefProv
+      _reqSessionId = sid2
       let sagent: AgentRow
-      if (sta) sagent = sagents.find((a:AgentRow) => a.id === sta) ?? await classifyIntent(smsg, sagents, sproviders, sdefProv)
-      else     sagent = keywordRoute(smsg, sagents) ?? await classifyIntent(smsg, sagents, sproviders, sdefProv)
+      if (sta) sagent = sagents.find((a:AgentRow) => a.id === sta) ?? sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
+      else     sagent = sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
       const [shistory, sskillText] = await Promise.all([loadHistory(sid2, 10), loadAgentSkills(sagent.id)])
-      const ssystem  = (sagent.system_prompt || 'You are a helpful assistant.') + (SOUL ? '\n\n' + SOUL : '') + sskillText
+      const sSubAgents = sagents.filter((a:AgentRow) => a.active && a.id !== 'chat')
+      const sAgentList = sSubAgents.map((a:AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
+      const sHermesInject = sagent.id === 'chat'
+        ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${sAgentList}\n\n规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。`
+        : ''
+      const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + (SOUL ? '\n\n' + SOUL : '') + sskillText
       const suseTools = DATA_AGENTS.has(sagent.id)
+      _reqHermesMode = (sagent.id === 'chat')   // restrict Hermes to delegate_to_agent only
       const smessages: {role:string;content:string}[] = [...shistory, { role:'user', content:smsg }]
 
       const { readable, writable } = new TransformStream()
@@ -1400,10 +2403,18 @@ Deno.serve(async (req: Request) => {
             sproviders, sagent.provider || sdefProv, sagent.model, ssystem, smessages, suseTools,
             async (chunk) => { fullText += chunk; await sse({ chunk }) }
           )
-          // Save to DB, get assistant row id for feedback
-          await dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg, agent: sagent.id, tenant_id: _reqTenantId })
-          const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: fullText, agent: sagent.id, tenant_id: _reqTenantId })
-          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, session_id: sid2, provider: usedProvider, conversation_id: aRow.id })
+          // Save to DB with token usage
+          const _cost = calcCost(_lastUsage.used_model || sagent.model || '', _lastUsage.tokens_in, _lastUsage.tokens_out)
+          const sInserts: Promise<unknown>[] = [
+            dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg, agent: sagent.id, tenant_id: _reqTenantId }),
+          ]
+          if (sagent.id === 'chat' && !_reqDelegated && smsg.trim().length > 10) {
+            sInserts.push(dbInsert('agent_suggestions', { message: smsg.trim(), session_id: sid2, tenant_id: _reqTenantId }))
+            learnFromGaps().catch(() => {})  // 立即异步学习，不阻塞响应
+          }
+          await Promise.all(sInserts)
+          const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: fullText, agent: _reqDelegatedId || sagent.id, tenant_id: _reqTenantId, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost })
+          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, delegated_agent: _reqDelegatedId || undefined, delegated_agent_name: _reqDelegatedName || undefined, session_id: sid2, provider: usedProvider, conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost })
           extractPrefs(smsg, fullText, sproviders, sdefProv)
         } catch(e) {
           await sse({ error: (e as Error).message })
@@ -1416,7 +2427,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // \u2500\u2500 Chat action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-    const { message, session_id, target_agent } = body
+    const { message, session_id, target_agent, system_prompt_override: promptOverride } = body
     if (!message) return new Response(
       JSON.stringify({ error: 'message required' }),
       { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } }
@@ -1427,16 +2438,21 @@ Deno.serve(async (req: Request) => {
     const [providers, defaultProvider, agents] = await Promise.all([
       loadProviders(), getDefaultProvider(), loadAgents()
     ])
+    // Expose to executeTool (module-level, reset per request)
+    _reqProviders       = providers
+    _reqAgents          = agents
+    _reqDefaultProvider = defaultProvider
+    _reqSessionId       = sid
 
-    // E: keyword pre-routing \u2192 skip LLM classify when obvious
-    // target_agent (from UI) takes highest priority
+    // Hermes: chat agent is the orchestrator and entry point for all messages.
+    // target_agent from UI allows manual override to a specific agent.
     let agent: AgentRow
     if (target_agent) {
       agent = agents.find((a: AgentRow) => a.id === target_agent)
-        ?? await classifyIntent(message, agents, providers, defaultProvider)
+        ?? agents.find((a: AgentRow) => a.id === 'chat')
+        ?? agents[0]
     } else {
-      agent = keywordRoute(message, agents)
-        ?? await classifyIntent(message, agents, providers, defaultProvider)
+      agent = agents.find((a: AgentRow) => a.id === 'chat') ?? agents[0]
     }
 
     // A: load history + skills in parallel
@@ -1444,10 +2460,20 @@ Deno.serve(async (req: Request) => {
       loadHistory(sid, 10),
       loadAgentSkills(agent.id),
     ])
-    const system   = (agent.system_prompt || 'You are a helpful assistant.')
+
+    // Build dynamic agent list for Hermes system prompt
+    const subAgents = agents.filter((a: AgentRow) => a.active && a.id !== 'chat')
+    const agentList = subAgents.map((a: AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
+    const hermesInject = agent.id === 'chat'
+      ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${agentList}\n\n规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。`
+      : ''
+
+    const system   = (promptOverride || agent.system_prompt || 'You are a helpful assistant.')
+      + (promptOverride ? '' : hermesInject)
       + (SOUL ? '\n\n' + SOUL : '')
       + skillText
     const useTools = DATA_AGENTS.has(agent.id)
+    _reqHermesMode = (agent.id === 'chat')   // restrict Hermes to delegate_to_agent only
 
     // A: build messages with history prefix
     const messages: { role: string; content: string }[] = [
@@ -1459,13 +2485,19 @@ Deno.serve(async (req: Request) => {
       providers, agent.provider || defaultProvider, agent.model, system, messages, useTools
     )
 
-    await Promise.all([
+    const saves: Promise<unknown>[] = [
       dbInsert('conversations', { session_id:sid, role:'user',      content:message,  agent:agent.id, tenant_id:_reqTenantId }),
-      dbInsert('conversations', { session_id:sid, role:'assistant', content:response, agent:agent.id, tenant_id:_reqTenantId }),
-    ])
+      dbInsert('conversations', { session_id:sid, role:'assistant', content:response, agent: _reqDelegatedId || agent.id, tenant_id:_reqTenantId }),
+    ]
+    // Log uncovered questions (chat answered directly without delegating)
+    if (agent.id === 'chat' && !_reqDelegated && message.trim().length > 10) {
+      saves.push(dbInsert('agent_suggestions', { message: message.trim(), session_id: sid, tenant_id: _reqTenantId }))
+      learnFromGaps().catch(() => {})  // 立即异步学习，不阻塞响应
+    }
+    await Promise.all(saves)
     extractPrefs(message, response, providers, defaultProvider)
     return new Response(
-      JSON.stringify({ agent:agent.id, agent_name:agent.name, response, session_id:sid, provider:usedProvider }),
+      JSON.stringify({ agent:agent.id, agent_name:agent.name, delegated_agent: _reqDelegatedId||undefined, delegated_agent_name: _reqDelegatedName||undefined, response, session_id:sid, provider:usedProvider }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 
