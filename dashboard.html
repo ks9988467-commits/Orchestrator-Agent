@@ -4842,7 +4842,7 @@ async function confirmRunWorkflow() {
       <div style="border:1px solid ${res.ok?'#22c55e':'#ef4444'};border-radius:8px;padding:16px;background:${res.ok?'#f0fdf4':'#fef2f2'}">
         <div style="font-weight:600;margin-bottom:8px">${res.ok?'✅ 运行成功':'❌ 运行失败'}</div>
         ${res.error?`<div style="color:#ef4444;margin-bottom:8px">${esc(res.error)}</div>`:''}
-        ${res.output?.final_output||res.output?.last_output?`<div style="font-size:13px"><strong>输出：</strong><br>${esc(String(res.output?.final_output||res.output?.last_output||''))}</div>`:''}
+        ${res.output?.final_output||res.output?.last_output?(()=>{const out=String(res.output?.final_output||res.output?.last_output||'');const rendered=typeof marked!=='undefined'?marked.parse(out):esc(out);return`<div style="font-size:13px"><strong>输出：</strong><div class="md" style="margin-top:8px;line-height:1.7">${rendered}</div></div>`})():''}
       </div>`
   } catch(e) {
     document.getElementById('wfRunResult').innerHTML = `<div style="color:#ef4444">运行出错：${esc(e.message)}</div>`
