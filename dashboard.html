@@ -1482,6 +1482,23 @@ select{background:#f5f5f5;border:1px solid #e5e5e5;color:#111111;border-radius:7
         <input type="hidden" id="wfEditId">
         <div class="form-group"><label>名称</label><input id="wfName" class="form-input" placeholder="工作流名称"></div>
         <div class="form-group"><label>描述</label><input id="wfDesc" class="form-input" placeholder="选填"></div>
+        <div class="form-group">
+          <label>执行计划</label>
+          <select id="wfSchedule" class="form-input" style="font-size:13px" onchange="wfScheduleChange(this)">
+            <option value="">不自动执行（手动触发）</option>
+            <option value="daily:00:00">每天 00:00（凌晨）</option>
+            <option value="daily:08:00">每天 08:00</option>
+            <option value="daily:12:00">每天 12:00（中午）</option>
+            <option value="daily:18:00">每天 18:00</option>
+            <option value="daily:22:00">每天 22:00</option>
+            <option value="weekly:1:09:00">每周一 09:00</option>
+            <option value="weekly:5:18:00">每周五 18:00</option>
+            <option value="hourly">每小时</option>
+            <option value="interval:30">每30分钟</option>
+            <option value="custom">自定义...</option>
+          </select>
+          <input id="wfScheduleCustom" class="form-input" style="display:none;margin-top:6px;font-size:13px" placeholder="格式: daily:HH:MM / weekly:D:HH:MM / interval:分钟数">
+        </div>
         <div style="margin:12px 0 8px;font-weight:600;font-size:13px">节点配置</div>
         <div id="wfNodesEditor"></div>
         <button style="font-size:12px;color:#da0d15;background:none;border:1px dashed #da0d15;border-radius:6px;padding:6px 14px;cursor:pointer;width:100%;margin:8px 0" onclick="addWfNode()">+ 添加节点</button>
@@ -4753,7 +4770,8 @@ async function selectWorkflow(id) {
           <button class="btn-danger" style="font-size:12px;padding:6px 12px" onclick="deleteWorkflow('${wf.id}')">删除</button>
         </div>
       </div>
-      <div style="font-size:13px;color:#555;margin-bottom:20px">${esc(wf.description||'无描述')}</div>
+      <div style="font-size:13px;color:#555;margin-bottom:12px">${esc(wf.description||'无描述')}</div>
+      ${wf.schedule?`<div style="font-size:12px;color:#888;margin-bottom:16px;display:flex;align-items:center;gap:6px"><span style="background:#ffd405;color:#000;font-size:10px;font-weight:700;border-radius:4px;padding:2px 7px">定时</span>${esc(wf.schedule)}</div>`:''}
       <div style="font-weight:600;margin-bottom:12px;font-size:13px">节点流程</div>
       <div style="display:flex;flex-direction:column;gap:0">
         ${(wf.nodes||[]).map((n,i)=>`
@@ -4796,11 +4814,29 @@ async function confirmRunWorkflow() {
     document.getElementById('wfRunResult').innerHTML = `<div style="color:#ef4444">运行出错：${esc(e.message)}</div>`
   }
 }
+function wfScheduleChange(sel) {
+  const custom = document.getElementById('wfScheduleCustom')
+  custom.style.display = sel.value === 'custom' ? 'block' : 'none'
+}
+function getWfSchedule() {
+  const sel = document.getElementById('wfSchedule')
+  if (sel.value === 'custom') return document.getElementById('wfScheduleCustom').value.trim() || ''
+  return sel.value
+}
+function setWfSchedule(val) {
+  const sel = document.getElementById('wfSchedule')
+  const custom = document.getElementById('wfScheduleCustom')
+  const opts = Array.from(sel.options).map(o => o.value)
+  if (!val) { sel.value = ''; custom.style.display='none'; return }
+  if (opts.includes(val)) { sel.value = val; custom.style.display='none' }
+  else { sel.value = 'custom'; custom.style.display='block'; custom.value = val }
+}
 function showWfCreate() {
   document.getElementById('wfEditId').value=''
   document.getElementById('wfModalTitle').textContent='新建工作流'
   document.getElementById('wfName').value=''; document.getElementById('wfDesc').value=''
   document.getElementById('wfNodesEditor').innerHTML=''
+  setWfSchedule('')
   document.getElementById('wfCreateModal').style.display='flex'
 }
 function hideWfCreate() { document.getElementById('wfCreateModal').style.display='none' }
@@ -4813,6 +4849,7 @@ async function editWorkflow(id) {
     document.getElementById('wfName').value=wf.name; document.getElementById('wfDesc').value=wf.description||''
     document.getElementById('wfNodesEditor').innerHTML=''
     ;(wf.nodes||[]).forEach(n=>addWfNode(n))
+    setWfSchedule(wf.schedule||'')
     document.getElementById('wfCreateModal').style.display='flex'
   } catch(e) {
     toast(e.message || '加载失败', 'error')
@@ -4871,7 +4908,7 @@ async function saveWorkflow() {
   })
   const edges = nodes.slice(0,-1).map((n,i)=>({from:n.id,to:nodes[i+1].id}))
   try {
-    const res = await apiCall('save_workflow', { id, name, description: document.getElementById('wfDesc').value.trim(), nodes, edges })
+    const res = await apiCall('save_workflow', { id, name, description: document.getElementById('wfDesc').value.trim(), nodes, edges, schedule: getWfSchedule() })
     if (res.ok) {
       toast('工作流已保存','success')
       hideWfCreate()

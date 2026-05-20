@@ -1182,27 +1182,58 @@ async function runWorkflows() {
   ])
 
   for (const wf of due) {
-    const agentId = String(wf.agent_id)
-    const prompt  = String(wf.prompt)
     const schedule = String(wf.schedule)
     const wfId    = String(wf.id)
+    const nodes   = (wf.nodes as {id:string;type:string;config:Record<string,string>}[]) || []
+    const edges   = (wf.edges as {from:string;to:string}[]) || []
 
     let response = '', errorMsg = ''
     try {
-      const agent = agents.find(a => a.id === agentId)
-      if (!agent) throw new Error(`Agent ${agentId} not found`)
-      const skillText = await loadAgentSkills(agentId)
-      const system    = (agent.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
-      const useTools  = DATA_AGENTS.has(agentId)
-      const { text }  = await callLLM(providers, agent.provider || defaultProvider, agent.model,
-        system, [{ role: 'user', content: prompt }], useTools)
-      response = text
+      if (nodes.length > 0) {
+        // New nodes/edges style — execute sequentially
+        let context: Record<string,unknown> = { input: {} }
+        const incoming = new Set(edges.map((e:{from:string;to:string}) => e.to))
+        const nodeMap  = Object.fromEntries(nodes.map(n => [n.id, n]))
+        const start    = nodes.find(n => !incoming.has(n.id))
+        if (!start) throw new Error('No start node')
+        const visited = new Set<string>()
+        let cur: string|undefined = start.id
+        while (cur && !visited.has(cur)) {
+          visited.add(cur)
+          const node = nodeMap[cur]
+          if (!node) break
+          if (node.type === 'agent') {
+            const agent = agents.find(a => a.id === node.config?.agent_id) ?? agents.find(a => a.id === 'chat') ?? agents[0]
+            const prompt = (node.config?.prompt || '{{input}}').replace('{{input}}', JSON.stringify(context.input))
+            const skillText = await loadAgentSkills(agent?.id || '')
+            const system = (agent?.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
+            const { text } = await callLLM(providers, agent?.provider || defaultProvider, agent?.model, system, [{ role:'user', content:prompt }])
+            context[node.id] = text; context.last_output = text
+          } else if (node.type === 'condition') {
+            const passed = String(context.last_output||'').toLowerCase().includes((node.config?.keyword||'').toLowerCase())
+            context[node.id] = passed ? 'true' : 'false'
+          } else if (node.type === 'output') { context.final_output = context.last_output }
+          const nextEdge = edges.find((e:{from:string;to:string}) => e.from === cur)
+          cur = nextEdge?.to
+        }
+        response = String(context.final_output || context.last_output || '')
+      } else {
+        // Legacy agent_id/prompt style
+        const agentId = String(wf.agent_id)
+        const prompt  = String(wf.prompt)
+        const agent = agents.find(a => a.id === agentId)
+        if (!agent) throw new Error(`Agent ${agentId} not found`)
+        const skillText = await loadAgentSkills(agentId)
+        const system    = (agent.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
+        const { text }  = await callLLM(providers, agent.provider || defaultProvider, agent.model, system, [{ role: 'user', content: prompt }])
+        response = text
+      }
     } catch(e) {
       errorMsg = (e as Error).message
     }
 
     // Save run history
-    await dbInsert('workflow_runs', { workflow_id: wfId, agent_id: agentId, prompt, response, error: errorMsg || null, ran_at: new Date().toISOString() })
+    await dbInsert('workflow_runs', { workflow_id: wfId, response, error: errorMsg || null, ran_at: new Date().toISOString() })
 
     // Send notification if configured
     const notifChannel = wf.notification_channel ? String(wf.notification_channel) : null
@@ -2130,9 +2161,11 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ workflows: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'save_workflow') {
-      const { id: wfId, name, description, nodes, edges } = body
+      const { id: wfId, name, description, nodes, edges, schedule } = body
       if (!name) return new Response(JSON.stringify({ error:'name required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const data = { name, description:description||'', nodes:nodes||[], edges:edges||[], updated_at:new Date().toISOString() }
+      const data: Record<string,unknown> = { name, description:description||'', nodes:nodes||[], edges:edges||[], updated_at:new Date().toISOString() }
+      if (schedule) { data.schedule = schedule; data.next_run = calcNextRun(schedule as string).toISOString() }
+      else { data.schedule = null; data.next_run = null }
       if (wfId) { await dbPatch('workflows', wfId as string, data); return new Response(JSON.stringify({ ok:true, id:wfId }), { headers:{...CORS,'Content-Type':'application/json'} }) }
       const row = await dbInsertReturning('workflows',{ ...data, tenant_id:_reqTenantId, active:true })
       return new Response(JSON.stringify({ ok:true, id:row.id }), { headers:{...CORS,'Content-Type':'application/json'} })
