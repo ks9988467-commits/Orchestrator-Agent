@@ -44,6 +44,112 @@ function calcCost(model: string, tokensIn: number, tokensOut: number): number {
 let _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: '' }
 function resetUsage(model='') { _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: model } }
 
+// ── Agent Task tools ─────────────────────────────────────────────────
+// web_search: handled inline in executeTaskSteps via perplexity/sonar on OpenRouter
+async function fetchUrl(url: string): Promise<string> {
+  const res = await fetch(`https://r.jina.ai/${url}`, {
+    headers: { 'Accept': 'text/plain', 'X-Retain-Images': 'none' }
+  })
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
+  return (await res.text()).slice(0, 6000)
+}
+
+type TaskStep = { id:string; desc:string; tool:string; params:Record<string,string>; status:string; result:string|null }
+type AgentTask = { id:string; goal:string; plan:TaskStep[]; current_step:number; status:string; output:Record<string,string>; final_output:string|null; session_id:string|null; tenant_id:string|null }
+
+// 20s timeout wrapper — prevents any single step from hanging
+function withTimeout<T>(p: Promise<T>, ms = 20_000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`步骤超时 (${ms/1000}s)`)), ms))
+  ])
+}
+
+// Execute exactly ONE step per call, then self-chain to next step (fire-and-forget)
+async function executeTaskSteps(taskId: string, providers: ProviderRow[], defaultProvider: string, agents: AgentRow[]) {
+  const rows = await dbGet('agent_tasks','*',{ id:`eq.${taskId}` })
+  const task = rows[0] as AgentTask
+  if (!task || task.status === 'cancelled' || task.status === 'failed' || task.status === 'done') return
+
+  const plan = task.plan as TaskStep[]
+  const idx = task.current_step as number
+
+  // All steps complete
+  if (idx >= plan.length) {
+    const finalOutput = plan.filter(s=>s.status==='done').slice(-1)[0]?.result || ''
+    await dbPatch('agent_tasks', taskId, { status:'done', final_output:finalOutput, updated_at:new Date().toISOString() })
+    return
+  }
+
+  const step = plan[idx]
+  // Concurrency guard: skip if another invocation already picked up this step
+  if (step.status === 'running') return
+
+  await dbPatch('agent_tasks', taskId, { status:'running', updated_at:new Date().toISOString() })
+  plan[idx] = { ...step, status:'running' }
+  await dbPatch('agent_tasks', taskId, { plan, updated_at:new Date().toISOString() })
+
+  let result = '', stepError = ''
+  try {
+    const prevOutput = task.output as Record<string,string>
+    const fillRef = (s:string) => s.replace(/\{\{(step_\d+)\}\}/g, (_:string,k:string) => prevOutput[k] || '')
+
+    if (step.tool === 'web_search') {
+      const query = fillRef(step.params.query || '')
+      resetUsage('perplexity/sonar')
+      const { text } = await withTimeout(callLLM(
+        providers, 'openrouter', 'perplexity/sonar',
+        '你是联网搜索助手。用中文返回详细、准确、最新的搜索结果，包含关键事实和来源。',
+        [{ role: 'user', content: `搜索：${query}` }]
+      ), 50_000)
+      result = text
+      const _sc = calcCost(_lastUsage.used_model||'perplexity/sonar', _lastUsage.tokens_in, _lastUsage.tokens_out)
+      dbInsert('conversations', { session_id:`task_${taskId}`, role:'assistant', content:result.slice(0,200), agent:'task_search', tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_sc }).catch(()=>{})
+    } else if (step.tool === 'fetch_url') {
+      result = await withTimeout(fetchUrl(step.params.url || ''), 15_000)
+    } else if (step.tool === 'call_agent') {
+      const agent = agents.find(a=>a.id===step.params.agent_id) ?? agents.find(a=>a.id==='chat') ?? agents[0]
+      const prompt = fillRef(step.params.prompt || step.params.q || '')
+      const skillText = await loadAgentSkills(agent?.id || '')
+      const system = (agent?.system_prompt||'You are a helpful assistant.')+'\n\n'+SOUL+skillText
+      resetUsage(agent?.model || '')
+      const { text } = await withTimeout(callLLM(providers, agent?.provider||defaultProvider, agent?.model, system, [{ role:'user', content:prompt }]), 50_000)
+      result = text
+      const _ac = calcCost(_lastUsage.used_model||agent?.model||'', _lastUsage.tokens_in, _lastUsage.tokens_out)
+      dbInsert('conversations', { session_id:`task_${taskId}`, role:'assistant', content:result.slice(0,200), agent:`task_${agent?.id||'chat'}`, tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_ac }).catch(()=>{})
+    } else if (step.tool === 'send_notification') {
+      const msg = fillRef(step.params.message || '')
+      await sendNotification(step.params.channel||'slack', msg, step.params.to)
+      result = `通知已发送 (${step.params.channel||'slack'})`
+    } else {
+      result = `(跳过：未知工具 ${step.tool})`
+    }
+  } catch(e) { stepError = (e as Error).message }
+
+  plan[idx] = { ...plan[idx], status:stepError?'failed':'done', result:result||stepError }
+  const newOutput = { ...(task.output as Record<string,string>), [step.id]: result }
+  const nextIdx = idx + 1
+  const allDone = nextIdx >= plan.length
+
+  await dbPatch('agent_tasks', taskId, {
+    plan, current_step:nextIdx, output:newOutput,
+    status: stepError?'failed': allDone?'done':'running',
+    final_output: allDone ? (result||'') : null,
+    updated_at: new Date().toISOString()
+  })
+
+  // Chain: trigger next step after 1s delay (prevents request storm)
+  if (!stepError && !allDone) {
+    setTimeout(() => {
+      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'execute_task_step', task_id: taskId })
+      }).catch(() => {})
+    }, 1000)
+  }
+}
+
 // ── Slack webhook ─────────────────────────────────────────────────────
 async function sendSlackWebhook(webhookUrl: string, text: string, mrkdwn?: string) {
   const blocks = mrkdwn ? [{ type:'section', text:{ type:'mrkdwn', text: mrkdwn } }] : undefined
@@ -81,6 +187,7 @@ let _reqSessionId = ''           // current request session_id (for delegate his
 let _reqDelegatedId   = ''       // agent_id that was delegated to
 let _reqDelegatedName = ''       // agent display name that was delegated to
 let _reqHermesMode = false       // true when calling agent is 'chat' (Hermes) — limits tools to delegation-only
+let _reqDelegationContext = ''   // accumulated context from previous delegations this request
 function tenantFilters(extra: Record<string,string> = {}): Record<string,string> {
   if (!_reqIsMaster && _reqTenantId) return { ...extra, tenant_id: `eq.${_reqTenantId}` }
   return extra
@@ -188,14 +295,16 @@ async function createLarkTask(token: string, title: string, desc: string, dueMs?
 const TOOL_DEFS = [
   {
     name: 'query_leads',
-    description: 'Query customer leads/CRM data. Use to answer questions about leads, customers, contacts.',
+    description: 'Query customer leads/CRM data. Use to answer questions about leads, customers, contacts. Supports free-text search by name, phone, or email.',
     parameters: {
       type: 'object',
       properties: {
-        label:     { type: 'string', description: 'Filter by label keyword e.g. "Google", "potential", "new leads"' },
-        date_from: { type: 'string', description: 'Start date YYYY-MM-DD' },
-        date_to:   { type: 'string', description: 'End date YYYY-MM-DD' },
-        limit:     { type: 'number', description: 'Max records (default 20, max 100)' },
+        search:          { type: 'string', description: 'Free-text search across name, phone, email (partial match). Use this when user asks about a specific person or number.' },
+        label:           { type: 'string', description: 'Filter by label keyword e.g. "Google", "potential", "new leads"' },
+        campaign_source: { type: 'string', description: 'Filter by campaign source (partial match)' },
+        date_from:       { type: 'string', description: 'Start date YYYY-MM-DD' },
+        date_to:         { type: 'string', description: 'End date YYYY-MM-DD' },
+        limit:           { type: 'number', description: 'Max records (default 20, max 100)' },
       },
       required: [],
     },
@@ -315,6 +424,19 @@ const TOOL_DEFS = [
       required: ['message', 'channel'],
     },
   },
+  {
+    name: 'search_knowledge_base',
+    description: 'Search the knowledge base for relevant information using semantic search. Use this when the user asks questions that might be answered by company documentation, product manuals, FAQs, policies, SOPs, or any other stored knowledge. Always try this before saying you don\'t know something.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Describe what information you are looking for in natural language' },
+        kb_id: { type: 'string', description: 'Specific knowledge base UUID to search (optional — omit to search all available KBs)' },
+        limit: { type: 'number', description: 'Max results to return (default 3, max 8)' },
+      },
+      required: ['query'],
+    },
+  },
 ]
 
 // \u2500\u2500 Tool executor \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -322,11 +444,23 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   try {
     if (name === 'query_leads') {
       const filters = tenantFilters()
-      if (args.label)     filters['labels'] = `ilike.*${args.label}*`
-      if (args.date_from) filters['date']   = `gte.${args.date_from}`
-      if (args.date_to)   filters['date']   = `lte.${args.date_to}`
+      if (args.label)           filters['labels']          = `ilike.*${args.label}*`
+      if (args.campaign_source) filters['campaign_source'] = `ilike.*${args.campaign_source}*`
+      // Free-text search across name / phone / email
+      if (args.search) {
+        const s = String(args.search).replace(/[()]/g, '')  // sanitise
+        filters['or'] = `(name.ilike.*${s}*,phone.ilike.*${s}*,email.ilike.*${s}*)`
+      }
+      // Date range — use PostgREST `and` to avoid key collision when both present
+      if (args.date_from && args.date_to) {
+        filters['and'] = `(date.gte.${args.date_from},date.lte.${args.date_to})`
+      } else if (args.date_from) {
+        filters['date'] = `gte.${args.date_from}`
+      } else if (args.date_to) {
+        filters['date'] = `lte.${args.date_to}`
+      }
       const limit = Math.min(Number(args.limit) || 20, 100)
-      const rows = await dbGet('leads', 'date,name,phone,labels', filters, 'date.desc', limit)
+      const rows = await dbGet('leads', 'date,name,phone,email,labels,campaign_source', filters, 'date.desc', limit)
       return JSON.stringify({ count: rows.length, leads: rows })
     }
 
@@ -377,8 +511,13 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     if (name === 'query_analytics') {
       const filters = tenantFilters()
       if (args.campaign_name) filters['campaign_name'] = `ilike.*${args.campaign_name}*`
-      if (args.date_from)     filters['date']          = `gte.${args.date_from}`
-      if (args.date_to)       filters['date']          = `lte.${args.date_to}`
+      if (args.date_from && args.date_to) {
+        filters['and'] = `(date.gte.${args.date_from},date.lte.${args.date_to})`
+      } else if (args.date_from) {
+        filters['date'] = `gte.${args.date_from}`
+      } else if (args.date_to) {
+        filters['date'] = `lte.${args.date_to}`
+      }
       const rows = await dbGet('analytics_daily',
         'date,campaign_name,spend_myr,results,cpr,new_contacts,cpl,frequency,lead_count',
         filters, 'date.desc', 200) as Record<string,unknown>[]
@@ -484,9 +623,9 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
 
     if (name === 'delegate_to_agent') {
       _reqDelegated = true
-      const targetId = String(args.agent_id || '').toLowerCase().trim()
-      const query    = String(args.query    || '')
-      const target   = _reqAgents.find(a => a.id === targetId && a.active)
+      const targetId     = String(args.agent_id || '').toLowerCase().trim()
+      const originalQuery = String(args.query   || '')
+      const target       = _reqAgents.find(a => a.id === targetId && a.active)
       if (!target) return JSON.stringify({ error: `Agent '${targetId}' not found or inactive. Available: ${_reqAgents.filter(a=>a.active&&a.id!=='chat').map(a=>a.id).join(', ')}` })
       _reqDelegatedId   = target.id
       _reqDelegatedName = target.name || target.id
@@ -495,13 +634,20 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
         _reqSessionId ? loadHistory(_reqSessionId, 10) : Promise.resolve([]),
         loadAgentSkills(target.id),
       ])
+      // Build augmented query: if previous delegations have context, pass it along
+      const query = _reqDelegationContext
+        ? `[参考——前步骤已收集信息]\n${_reqDelegationContext}\n\n---\n当前任务：${originalQuery}`
+        : originalQuery
       // Hermes context injected into sub-agent system prompt
-      const hermesCtx = `\n\n**[系统上下文]** 你是被 Hermes 调度系统委派的专项 Agent。当前用户问题：${query}\n请结合对话历史，给出专业回答。`
+      const hermesCtx = `\n\n**[系统上下文]** 你是被 Hermes 调度系统委派的专项 Agent。当前用户问题：${originalQuery}\n请结合对话历史，给出专业回答。`
       const sys      = (target.system_prompt || 'You are a helpful assistant.') + hermesCtx + '\n\n' + SOUL + subSkills
-      const useTools = DATA_AGENTS.has(target.id)
+      const useTools = DATA_AGENTS.has(target.id) || !!target.uses_tools
       _reqHermesMode = false  // sub-agents get full tool access
       const messages = [...history, { role: 'user', content: query }]
       const { text } = await callLLM(_reqProviders, target.provider || _reqDefaultProvider, target.model, sys, messages, useTools)
+      // Accumulate result for subsequent delegations (first 300 chars summary)
+      const summary = text.slice(0, 300).replace(/\n+/g, ' ')
+      _reqDelegationContext += (_reqDelegationContext ? '\n' : '') + `[${target.name || targetId}]: ${summary}`
       return text
     }
 
@@ -536,6 +682,55 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       return JSON.stringify({ ok: true, channel })
     }
 
+    if (name === 'search_knowledge_base') {
+      const query = String(args.query || '').slice(0, 500)
+      if (!query) return JSON.stringify({ error: 'query required' })
+      const limit = Math.min(Number(args.limit) || 3, 8)
+      // Need OpenAI key for embeddings
+      const providers = await loadProviders()
+      const oai = providers.find(p => p.provider === 'openai' && p.active)
+      if (!oai?.api_key) return JSON.stringify({ error: 'OpenAI key required for knowledge base search. Please configure it in LLM Providers.' })
+      // Get available KBs for this tenant (optionally filter to specific kb_id)
+      const kbFilters = tenantFilters()
+      if (args.kb_id) kbFilters['id'] = `eq.${args.kb_id}`
+      const kbs = await dbGet('knowledge_bases', 'id,name', kbFilters, undefined, 10) as Record<string,string>[]
+      if (!kbs.length) return JSON.stringify({ results: [], message: '尚未建立知识库，请先在知识库页面录入文档。' })
+      // Embed the query
+      const er = await fetch('https://api.openai.com/v1/embeddings', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${oai.api_key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'text-embedding-3-small', input: query }),
+      })
+      if (!er.ok) return JSON.stringify({ error: `Embedding failed: ${er.status}` })
+      const ed = await er.json() as { data: [{ embedding: number[] }] }
+      const qEmbed = ed.data?.[0]?.embedding
+      if (!qEmbed) return JSON.stringify({ error: 'No embedding returned' })
+      // Search across all matching KBs, collect results
+      const allResults: Array<Record<string,unknown>> = []
+      for (const kb of kbs.slice(0, 5)) {
+        const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
+          method: 'POST',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query_embedding: qEmbed, match_kb_id: kb.id, match_count: limit }),
+        }).then(res => res.ok ? res.json() : []).catch(() => [])
+        for (const row of rows as Record<string,unknown>[]) {
+          allResults.push({ ...row, kb_name: kb.name })
+        }
+      }
+      // Sort by similarity desc, return top N
+      allResults.sort((a, b) => ((b.similarity as number) || 0) - ((a.similarity as number) || 0))
+      const top = allResults.slice(0, limit)
+      if (!top.length) return JSON.stringify({ results: [], message: '知识库中未找到相关内容' })
+      return JSON.stringify({
+        results: top.map(r => ({
+          kb:         r.kb_name,
+          source:     r.source_name,
+          content:    r.content,
+          similarity: +((r.similarity as number) * 100).toFixed(1),
+        }))
+      })
+    }
+
     return JSON.stringify({ error: `Unknown tool: ${name}` })
   } catch (e) {
     return JSON.stringify({ error: (e as Error).message })
@@ -545,11 +740,12 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
 // ── Notification helper ───────────────────────────────────────────
 async function sendNotification(channel: string, message: string, recipient?: string): Promise<void> {
   try {
-    const rows = await dbGet('api_integrations', 'credentials,active', { provider: `eq.${channel}`, active: 'eq.true' })
+    // Use 'service' field (not 'provider') matching api_integrations schema
+    const rows = await dbGet('api_integrations', 'credentials,active', { service: `eq.${channel}`, active: 'eq.true' })
     const creds = (rows[0] as {credentials:Record<string,string>;active:boolean} | undefined)?.credentials
-    if (!creds) return
 
     if (channel === 'whatsapp') {
+      if (!creds) return
       const to = recipient || creds['default_recipient']
       if (!creds['phone_number_id'] || !creds['access_token'] || !to) return
       await fetch(`https://graph.facebook.com/v18.0/${creds['phone_number_id']}/messages`, {
@@ -558,6 +754,7 @@ async function sendNotification(channel: string, message: string, recipient?: st
         body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: message.slice(0, 4000) } }),
       })
     } else if (channel === 'telegram') {
+      if (!creds) return
       const chatId = recipient || creds['chat_id']
       if (!creds['bot_token'] || !chatId) return
       await fetch(`https://api.telegram.org/bot${creds['bot_token']}/sendMessage`, {
@@ -566,7 +763,36 @@ async function sendNotification(channel: string, message: string, recipient?: st
         body: JSON.stringify({ chat_id: chatId, text: message.slice(0, 4000), parse_mode: 'Markdown' }),
       })
     } else if (channel === 'email_smtp') {
-      // Email notification handled by existing OTP mailer pattern — skip for now
+      // Use stored SMTP credentials via denomailer
+      if (!creds?.host || !creds?.username || !creds?.password) return
+      const to = recipient || creds['from_address']
+      if (!to) return
+      const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+      const client = new SmtpClient()
+      const port = parseInt(String(creds['port'] || '587'))
+      if (port === 465) {
+        await client.connectTLS({ hostname: String(creds['host']), port: 465, username: String(creds['username']), password: String(creds['password']) })
+      } else {
+        await client.connect({ hostname: String(creds['host']), port, username: String(creds['username']), password: String(creds['password']) })
+      }
+      await client.send({ from: String(creds['from_address'] || creds['username']), to, subject: '📋 Orchestrator 通知', content: message.slice(0, 4000) })
+      await client.close()
+    } else if (channel === 'sendgrid' || channel === 'email') {
+      // Try SendGrid API key
+      const sgRows = await dbGet('api_integrations', 'credentials,active', { service: 'eq.sendgrid', active: 'eq.true' }, undefined, 1)
+      const sgCreds = (sgRows[0] as any)?.credentials
+      if (sgCreds?.api_key && recipient) {
+        await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${sgCreds.api_key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            personalizations: [{ to: [{ email: recipient }] }],
+            from: { email: sgCreds.from_email || 'noreply@orchestrator.ai', name: 'Orchestrator' },
+            subject: '📋 Orchestrator 通知',
+            content: [{ type: 'text/plain', value: message }]
+          })
+        })
+      }
     }
   } catch { /* silent */ }
 }
@@ -613,7 +839,7 @@ async function listModels(provider: string, apiKey: string): Promise<string[]> {
 
 // \u2500\u2500 Types \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 interface ProviderRow { provider: string; api_key: string; model: string; active: boolean }
-interface AgentRow    { id: string; name: string; system_prompt: string; provider: string|null; model: string|null; active: boolean }
+interface AgentRow    { id: string; name: string; system_prompt: string; provider: string|null; model: string|null; active: boolean; uses_tools?: boolean }
 
 // \u2500\u2500 Config loaders (with module-level cache) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 async function loadProviders(): Promise<ProviderRow[]> {
@@ -632,7 +858,7 @@ async function getDefaultProvider(): Promise<string> {
 }
 async function loadAgents(): Promise<AgentRow[]> {
   if (_cacheAgents && Date.now() < _cacheAgents.expires) return _cacheAgents.data
-  const data = await dbGet('agents', 'id,name,system_prompt,provider,model,active,description')
+  const data = await dbGet('agents', 'id,name,system_prompt,provider,model,active,description,uses_tools')
   _cacheAgents = { data: data as AgentRow[], expires: Date.now() + CACHE_TTL }
   return data as AgentRow[]
 }
@@ -668,7 +894,9 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
     system,
     messages,
   }
-  if (useTools) body.tools = getActiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  if (useTools) {
+    body.tools = getActiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  }
 
   const msgs = [...messages] as Record<string,unknown>[]
   let iterations = 0
@@ -839,7 +1067,11 @@ async function streamOpenAI(apiKey: string, model: string, system: string, messa
   }
 }
 
-async function streamOpenRouter(apiKey: string, model: string, system: string, messages: object[], onChunk: ChunkFn): Promise<void> {
+async function streamOpenRouter(apiKey: string, model: string, system: string, messages: object[], useTools: boolean, onChunk: ChunkFn): Promise<void> {
+  if (useTools) {
+    const text = await callOpenRouter(apiKey, model, system, messages, true)
+    await streamText(text, onChunk); return
+  }
   const msgs = [{ role: 'system', content: system }, ...messages as object[]]
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -867,6 +1099,38 @@ async function streamOpenRouter(apiKey: string, model: string, system: string, m
       } catch { /* skip */ }
     }
   }
+}
+
+async function callOpenRouter(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
+  const msgs: Record<string,unknown>[] = [{ role: 'system', content: system }, ...messages as Record<string,unknown>[]]
+  const body: Record<string,unknown> = { model: model || 'perplexity/sonar', messages: msgs }
+  if (useTools) body.tools = getActiveTools().map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
+  const OR_HEADERS = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://orchestrator-agent.ks9988467.workers.dev',
+    'X-Title': 'Orchestrator Agent',
+  }
+  let iterations = 0
+  while (iterations++ < 8) {
+    body.messages = msgs
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: OR_HEADERS, body: JSON.stringify(body) })
+    if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${await r.text()}`)
+    const resp = await r.json()
+    if (resp.usage) { _lastUsage.tokens_in += resp.usage.prompt_tokens||0; _lastUsage.tokens_out += resp.usage.completion_tokens||0 }
+    const msg = resp.choices?.[0]?.message
+    if (msg?.tool_calls?.length) {
+      msgs.push(msg)
+      const results = await Promise.all((msg.tool_calls as Record<string,unknown>[]).map(async (tc) => {
+        const fn = tc.function as Record<string,string>
+        return { role: 'tool', tool_call_id: tc.id, content: await executeTool(fn.name, JSON.parse(fn.arguments || '{}')) }
+      }))
+      msgs.push(...results)
+    } else {
+      return String(msg?.content || '')
+    }
+  }
+  return 'Tool loop limit reached.'
 }
 
 async function streamGoogle(apiKey: string, model: string, system: string, messages: object[], useTools: boolean, onChunk: ChunkFn): Promise<void> {
@@ -917,7 +1181,7 @@ async function streamWithFallback(
       if      (p.provider === 'anthropic')   await streamAnthropic(p.api_key, model, system, messages, useTools, onChunk)
       else if (p.provider === 'openai')      await streamOpenAI(p.api_key, model, system, messages, useTools, onChunk)
       else if (p.provider === 'google')      await streamGoogle(p.api_key, model, system, messages, useTools, onChunk)
-      else if (p.provider === 'openrouter')  await streamOpenRouter(p.api_key, model, system, messages, onChunk)
+      else if (p.provider === 'openrouter')  await streamOpenRouter(p.api_key, model, system, messages, useTools, onChunk)
       else throw new Error(`Unknown: ${p.provider}`)
       return p.provider
     } catch(e) { errors.push(`${p.provider}: ${(e as Error).message}`) }
@@ -943,9 +1207,10 @@ async function callLLM(
     const model = (p.provider === preferProvider && preferModel) ? preferModel : p.model
     try {
       let text: string
-      if      (p.provider === 'anthropic') text = await callAnthropic(p.api_key, model, system, messages, useTools)
-      else if (p.provider === 'openai')    text = await callOpenAI(p.api_key, model, system, messages, useTools)
-      else if (p.provider === 'google')    text = await callGoogle(p.api_key, model, system, messages, useTools)
+      if      (p.provider === 'anthropic')   text = await callAnthropic(p.api_key, model, system, messages, useTools)
+      else if (p.provider === 'openai')      text = await callOpenAI(p.api_key, model, system, messages, useTools)
+      else if (p.provider === 'google')      text = await callGoogle(p.api_key, model, system, messages, useTools)
+      else if (p.provider === 'openrouter')  text = await callOpenRouter(p.api_key, model, system, messages)
       else throw new Error(`Unknown provider: ${p.provider}`)
       return { text, usedProvider: p.provider }
     } catch(e) { errors.push(`${p.provider}: ${(e as Error).message}`) }
@@ -987,7 +1252,7 @@ const _c = (cps: number[]) => cps.map(c => String.fromCharCode(c)).join('')
 const ZH_CRM1  = _c([23458,25143])                           // ke hu        \u5BA2\u6237
 const ZH_CRM2  = _c([27969,22312,23458,25143])               // qian zai ke hu \u6F5C\u5728\u5BA2\u6237
 const ZH_CRM3  = _c([32852,31995,20154])                     // lian xi ren  \u8054\u7CFB\u4EBA
-const ZH_CRM4  = _c([32447,31034])                           // xian suo     \u7EBF\u7D22
+const ZH_CRM4  = _c([32447,32034])                           // xian suo     \u7EBF\u7D22
 const ZH_ACC1  = _c([24191,21578])                           // guang gao    \u5E7F\u544A
 const ZH_ACC2  = _c([25237,25918])                           // tou fang     \u6295\u653E
 const ZH_ACC3  = _c([33829,38144])                           // ying xiao    \u8425\u9500
@@ -1010,14 +1275,17 @@ const ZH_FREQ4 = _c([37325,22797,26149,20809])               // chong fu bao gua
 
 function keywordRoute(message: string, agents: AgentRow[]): AgentRow | null {
   const active = agents.filter(a => a.active)
-  const has = (...terms: string[]) => terms.some(t => message.includes(t) || message.toLowerCase().includes(t))
+  const m = message
+  // Use _c()-built constants (correct codepoints, no UTF-8 literal encoding issues)
+  // All ZH_* constants defined above — only ZH_CRM4 was fixed (32034 not 31034)
+  const has = (...terms: string[]) => terms.some(t => m.includes(t) || m.toLowerCase().includes(t))
   const ROUTES: [string, boolean][] = [
     ['cpl',       has('cpl', 'cost per lead', ZH_CPL1, ZH_CPL2)],
     ['cpr',       has('cpr', 'cost per result', ZH_CPR1)],
     ['frequency', has('frequency', 'ad fatigue', ZH_FREQ1, ZH_FREQ2, ZH_FREQ3, ZH_FREQ4)],
     ['code',      has('code','bug','error','debug','script','function','api', ZH_CODE1,ZH_CODE2,ZH_CODE3,ZH_CODE4,ZH_CODE5,ZH_CODE6,ZH_CODE7,ZH_CODE8)],
-    ['crm',       has('lead','leads','contact','crm', ZH_CRM1,ZH_CRM2,ZH_CRM3,ZH_CRM4)],
-    ['account',   has('spend','campaign','marketing', ZH_ACC1,ZH_ACC2,ZH_ACC3,ZH_ACC4)],
+    ['crm',       has('lead','leads','contact','crm', ZH_CRM1, ZH_CRM3, ZH_CRM4)],  // ZH_CRM4=线索 now fixed
+    ['account',   has('spend','campaign','marketing','budget', ZH_ACC1,ZH_ACC2,ZH_ACC3,ZH_ACC4)],
   ]
   for (const [agentId, matches] of ROUTES) {
     if (matches) {
@@ -1160,25 +1428,28 @@ async function learnFromGaps(): Promise<{ ok: boolean; skills_added: number; pro
   const rows = await dbGet('agent_suggestions', 'id,message', { handled: 'eq.false' }, 'asked_at.asc', 50) as { id: string; message: string }[]
   if (!rows.length) return { ok: true, skills_added: 0, processed: 0 }
 
+  // Load existing skills to avoid duplicates
+  const existingRows = await dbGet('agent_skills', 'skill', { agent: 'eq.chat' }, 'created_at.desc', 100) as { skill: string }[]
+  const existingList = existingRows.map(r => `- ${r.skill}`).join('\n')
+
   const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
   const questions = rows.map(r => `- ${r.message}`).join('\n')
 
-  // Ask LLM to identify patterns and generate routing rules for Hermes
   const { text } = await callLLM(providers, defaultProvider, undefined,
     `You analyze unanswered questions and generate delegation routing rules for an AI orchestrator called Hermes.
-Hermes routes to these sub-agents: crm (客户关系), account (财务), cpl (获客成本), cpr (转化率), frequency (频率分析), report (报告), review (文件审核).
-For each theme you identify, output ONE routing rule in this exact format:
-"When user asks about [topic], delegate to [agent_id] agent."
-Output only the rules, one per line, max 5 rules. If a question doesn't fit any agent, skip it.`,
-    [{ role: 'user', content: `Questions Hermes answered directly without delegating:\n${questions}` }], false)
+Hermes routes to: crm (客户关系), account (财务), cpl (获客成本), cpr (转化率), frequency (频率分析), report (报告), review (文件审核).
+Output format (one per line): "When user asks about [topic], delegate to [agent_id] agent."
+Max 5 rules. Skip questions that don't map to any agent.
+
+EXISTING RULES (do NOT generate rules that are semantically similar to these):
+${existingList || '(none yet)'}`,
+    [{ role: 'user', content: `New unanswered questions:\n${questions}` }], false)
 
   const rules = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('When'))
   const ids = rows.map(r => r.id)
 
-  // Save each rule as a skill for chat (Hermes)
   await Promise.all([
     ...rules.map(rule => dbInsert('agent_skills', { agent: 'chat', skill: rule })),
-    // Mark all processed suggestions as handled
     fetch(`${SUPABASE_URL}/rest/v1/agent_suggestions?id=in.(${ids.join(',')})`, {
       method: 'PATCH',
       headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
@@ -1190,9 +1461,6 @@ Output only the rules, one per line, max 5 rules. If a question doesn't fit any 
 }
 
 async function runWorkflows() {
-  // System learning: analyze gap questions → Hermes routing skills (silent, non-blocking)
-  learnFromGaps().catch(() => {})
-
   // Find all active workflows due to run
   const dueResp = await fetch(
     `${SUPABASE_URL}/rest/v1/workflows?active=eq.true&next_run=lte.${new Date().toISOString()}&select=*`,
@@ -1237,7 +1505,59 @@ async function runWorkflows() {
           } else if (node.type === 'condition') {
             const passed = String(context.last_output||'').toLowerCase().includes((node.config?.keyword||'').toLowerCase())
             context[node.id] = passed ? 'true' : 'false'
-          } else if (node.type === 'output') { context.final_output = context.last_output }
+          } else if (node.type === 'output') {
+            context.final_output = context.last_output
+          } else if (node.type === 'self_learn') {
+            const result = await learnFromGaps()
+            const msg = `学习完成：分析 ${result.processed} 条问题，新增 ${result.skills_added} 条路由规则`
+            context[node.id] = msg; context.last_output = msg
+          } else if (node.type === 'skill_audit') {
+            const skillRows = await dbGet('agent_skills', 'id,agent,skill', {}, 'created_at.desc', 200) as {id:string;agent:string;skill:string}[]
+            if (!skillRows.length) {
+              const msg = '技能库为空，跳过审计'
+              context[node.id] = msg; context.last_output = msg
+            } else {
+              const list = skillRows.map((r,i) => `[${i+1}] agent=${r.agent}: ${r.skill}`).join('\n')
+              const { text } = await callLLM(providers, defaultProvider, undefined,
+                `You audit an AI routing rule library. Identify rules that are exact/near-duplicate, contradictory, or overly vague.
+Return ONLY a JSON array of 1-indexed rule numbers to DELETE: [1,3] or [] if none. Nothing else.`,
+                [{ role:'user', content: `Rules:\n${list}` }], false)
+              const m = text.match(/\[[\d,\s]*\]/)
+              const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= skillRows.length) : []
+              if (toDelete.length) {
+                const ids = toDelete.map(n => skillRows[n-1].id)
+                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`, {
+                  method: 'DELETE',
+                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
+                })
+              }
+              const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
+              context[node.id] = msg; context.last_output = msg
+            }
+          } else if (node.type === 'prefs_compact') {
+            const prefRows = await dbGet('user_prefs', 'id,key,value,confidence', {}, 'confidence.asc', 200) as {id:string;key:string;value:string;confidence:number}[]
+            if (!prefRows.length) {
+              const msg = '偏好库为空，跳过压缩'
+              context[node.id] = msg; context.last_output = msg
+            } else {
+              const list = prefRows.map((r,i) => `[${i+1}] key="${r.key}" value="${r.value}" confidence=${r.confidence}`).join('\n')
+              const { text } = await callLLM(providers, defaultProvider, undefined,
+                `You compress a user preference store. Identify entries to DELETE: semantically duplicate of another, confidence<0.5 AND redundant, or contradicting a higher-confidence entry.
+Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if none. Nothing else.`,
+                [{ role:'user', content: `Preferences:\n${list}` }], false)
+              const m = text.match(/\[[\d,\s]*\]/)
+              const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= prefRows.length) : []
+              if (toDelete.length) {
+                const ids = toDelete.map(n => prefRows[n-1].id)
+                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`, {
+                  method: 'DELETE',
+                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
+                })
+              }
+              const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
+              context[node.id] = msg; context.last_output = msg
+            }
+          }
           const nextEdge = edges.find((e:{from:string;to:string}) => e.from === cur)
           cur = nextEdge?.to
         }
@@ -1318,7 +1638,7 @@ Deno.serve(async (req: Request) => {
     const token = url.searchParams.get('hub.verify_token')
     const chal  = url.searchParams.get('hub.challenge')
     if (mode === 'subscribe' && token && chal) {
-      const rows = await dbGet('api_integrations', 'credentials', { provider: 'eq.whatsapp', active: 'eq.true' })
+      const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.whatsapp', active: 'eq.true' })
       const creds = (rows[0] as {credentials:Record<string,string>} | undefined)?.credentials
       if (creds?.['webhook_verify_token'] === token)
         return new Response(chal, { status: 200, headers: CORS })
@@ -1333,11 +1653,12 @@ Deno.serve(async (req: Request) => {
     // Set per-request tenant context
     _reqTenantId = (body.tenant_id as string) || null
     _reqIsMaster = (body.role as string) === 'master'
-    _reqDelegated      = false
-    _reqSessionId      = ''
-    _reqDelegatedId    = ''
-    _reqDelegatedName  = ''
-    _reqHermesMode     = false
+    _reqDelegated         = false
+    _reqSessionId         = ''
+    _reqDelegatedId       = ''
+    _reqDelegatedName     = ''
+    _reqHermesMode        = false
+    _reqDelegationContext = ''
 
     // ── WhatsApp incoming messages ─────────────────────────────────
     if (body.object === 'whatsapp_business_account') {
@@ -1353,11 +1674,13 @@ Deno.serve(async (req: Request) => {
           const agent   = agents.find((a: AgentRow) => a.id === 'chat') ?? agents[0]
           const [history, skillText] = await Promise.all([loadHistory(sid, 6), loadAgentSkills(agent.id)])
           const system  = (agent.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
+          resetUsage(agent.model || '')
           const { text: reply } = await callLLM(providers, agent.provider || defaultProvider, agent.model,
-            system, [...history, { role:'user', content:text }], DATA_AGENTS.has(agent.id))
+            system, [...history, { role:'user', content:text }], DATA_AGENTS.has(agent.id) || !!agent.uses_tools)
+          const _waCost = calcCost(_lastUsage.used_model || agent.model || '', _lastUsage.tokens_in, _lastUsage.tokens_out)
           await Promise.all([
             dbInsert('conversations', { session_id:sid, role:'user',      content:text,  agent:agent.id }),
-            dbInsert('conversations', { session_id:sid, role:'assistant', content:reply, agent:agent.id }),
+            dbInsert('conversations', { session_id:sid, role:'assistant', content:reply, agent:agent.id, tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_waCost }),
           ])
           await sendNotification('whatsapp', reply, from)
         }
@@ -1439,7 +1762,7 @@ Deno.serve(async (req: Request) => {
         const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
         if (masterRows.length) { tenantId = masterRows[0].id; role = 'master'; tenantName = masterRows[0].name }
       }
-      return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -1517,7 +1840,7 @@ Deno.serve(async (req: Request) => {
     // \u2500\u2500 Sync Facebook Ads \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'sync_facebook_ads') {
       try {
-        const rows = await dbGet('api_integrations', 'credentials', { provider: 'eq.facebook_ads', active: 'eq.true' })
+        const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.facebook_ads', active: 'eq.true' })
         const creds = (rows[0] as {credentials:Record<string,string>}|undefined)?.credentials
         if (!creds?.access_token || !creds?.ad_account_id)
           return new Response(JSON.stringify({ error: 'Facebook Ads credentials not configured' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -1588,14 +1911,38 @@ Deno.serve(async (req: Request) => {
     }
 
     // \u2500\u2500 Check alerts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // ── Alert Rules CRUD ────────────────────────────────────────────
+    if (body.action === 'list_alert_rules') {
+      const rows = await dbGet('alert_rules', 'id,name,metric,threshold,operator,campaign_filter,active,created_at', tenantFilters(), 'created_at.desc', 50)
+      return new Response(JSON.stringify({ rules: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    if (body.action === 'save_alert_rule') {
+      const { name: rname, metric: rmetric, threshold: rthreshold, operator: rop, campaign_filter: rcf } = body
+      if (!rname || !rmetric || rthreshold === undefined)
+        return new Response(JSON.stringify({ error: 'name, metric, threshold required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const row = await dbInsertReturning('alert_rules', { name: rname, metric: rmetric, threshold: +rthreshold, operator: rop || 'gt', campaign_filter: rcf || null, active: true, tenant_id: _reqTenantId })
+      return new Response(JSON.stringify({ ok: true, rule: row }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    if (body.action === 'delete_alert_rule') {
+      const { rule_id } = body
+      if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
+      await fetch(`${SUPABASE_URL}/rest/v1/alert_rules?id=eq.${rule_id}${tenantQ}`, {
+        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+      })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     if (body.action === 'check_alerts') {
       try {
-        const rules = await dbGet('alert_rules', 'id,name,metric,threshold,operator,campaign_filter', { active: 'eq.true' }) as Record<string,unknown>[]
+        const alertFilters = { ...tenantFilters(), active: 'eq.true' }
+        const rules = await dbGet('alert_rules', 'id,name,metric,threshold,operator,campaign_filter', alertFilters) as Record<string,unknown>[]
         if (!rules.length) return new Response(JSON.stringify({ ok: true, triggered: 0, checked: 0 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
         const weekAgo = new Date(Date.now() - 7*24*3600*1000).toISOString().slice(0,10)
+        const analyticsFilters = { ...tenantFilters(), date: `gte.${weekAgo}` }
         const rows = await dbGet('analytics_daily',
           'campaign_name,date,spend_myr,cpl,cpr,frequency',
-          { date: `gte.${weekAgo}` }, 'date.desc', 500) as Record<string,unknown>[]
+          analyticsFilters, 'date.desc', 500) as Record<string,unknown>[]
         // Roll up by campaign
         const byCamp: Record<string,{spend:number;cpl:number;cpr:number;freqSum:number;freqCnt:number}> = {}
         for (const r of rows) {
@@ -1618,7 +1965,7 @@ Deno.serve(async (req: Request) => {
             if (value === undefined || value === 0) continue
             const fires = String(rule.operator) === 'gt' ? value > Number(rule.threshold) : value < Number(rule.threshold)
             if (fires) {
-              await dbInsert('alerts', { rule_id: rule.id, rule_name: rule.name, campaign_name: camp, metric: rule.metric, value: +value.toFixed(4), threshold: rule.threshold })
+              await dbInsert('alerts', { rule_id: rule.id, rule_name: rule.name, campaign_name: camp, metric: rule.metric, value: +value.toFixed(4), threshold: rule.threshold, tenant_id: _reqTenantId })
               triggered++
             }
           }
@@ -1665,6 +2012,72 @@ Deno.serve(async (req: Request) => {
         headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
       })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'run_workflows') {
+      await runWorkflows()
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agent Task actions ────────────────────────────────────────────
+    if (body.action === 'start_task') {
+      const { goal, session_id } = body
+      if (!goal) return new Response(JSON.stringify({ error:'goal required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+      const { text } = await callLLM(providers, defaultProvider, undefined,
+        `You are Hermes task planner. Break the user goal into 3-6 concrete steps.
+Available tools:
+- web_search: params {"query":"..."} — search the web
+- fetch_url: params {"url":"..."} — read a webpage
+- call_agent: params {"agent_id":"chat|code|crm|account","prompt":"... use {{step_N}} to reference previous step results"}
+- send_notification: params {"channel":"slack","message":"... use {{step_N}}"}
+Return ONLY a valid JSON array, no markdown:
+[{"id":"step_1","desc":"...","tool":"...","params":{...}},...]`,
+        [{ role:'user', content:`Goal: ${goal}` }], false)
+      let plan: TaskStep[] = []
+      try {
+        const m = text.match(/\[[\s\S]*?\]/)
+        if (m) plan = (JSON.parse(m[0]) as TaskStep[]).map((s,i) => ({ ...s, id:`step_${i+1}`, status:'pending', result:null }))
+      } catch { plan = [{ id:'step_1', desc:goal, tool:'call_agent', params:{ agent_id:'chat', prompt:goal }, status:'pending', result:null }] }
+      const task = await dbInsertReturning('agent_tasks', { goal, plan, status:'pending', session_id:session_id||null, tenant_id:_reqTenantId }) as AgentTask
+      // Kick off step execution immediately (fire-and-forget self-invoke)
+      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'execute_task_step', task_id: String(task.id) })
+      }).catch(() => {})
+      return new Response(JSON.stringify({ ok:true, task }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    if (body.action === 'execute_task_step') {
+      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+      if (body.task_id) {
+        // Targeted: chain-triggered for a specific task
+        await executeTaskSteps(String(body.task_id), providers, defaultProvider, agents).catch(()=>{})
+      } else {
+        // pg_cron safety net: rescue any stuck running/pending tasks
+        const running = await dbGet('agent_tasks','id',{ status:'eq.running' },'updated_at.asc',3) as {id:string}[]
+        const pending = await dbGet('agent_tasks','id',{ status:'eq.pending' },'created_at.asc',2) as {id:string}[]
+        const ids = [...running,...pending].map(t=>t.id).slice(0,3)
+        await Promise.all(ids.map(id => executeTaskSteps(id, providers, defaultProvider, agents).catch(()=>{})))
+      }
+      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    if (body.action === 'list_tasks') {
+      const rows = await dbGet('agent_tasks','id,goal,status,current_step,plan,created_at',{},'created_at.desc',30)
+      return new Response(JSON.stringify({ ok:true, tasks:rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    if (body.action === 'get_task') {
+      const rows = await dbGet('agent_tasks','*',{ id:`eq.${body.id}` })
+      if (!rows[0]) return new Response(JSON.stringify({ error:'not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
+      return new Response(JSON.stringify({ ok:true, task:rows[0] }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+
+    if (body.action === 'cancel_task') {
+      await dbPatch('agent_tasks', String(body.id), { status:'cancelled', updated_at:new Date().toISOString() })
+      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     if (body.action === 'run_workflow_now') {
@@ -2019,6 +2432,167 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // ── Document reviewer notifications ──────────────────────────────
+    if (body.action === 'notify_doc_reviewers') {
+      const { doc_id, doc_title, uploaded_by, reviewers } = body as any
+      const revList: Array<{name:string;contact:string}> = reviewers || []
+      const title    = String(doc_title || '文件')
+      const uploader = String(uploaded_by || '系统')
+      const dashUrl  = 'https://orchestrator-agent.ks9988467.workers.dev'
+      const msg = `📋 文件审批请求\n\n文件：${title}\n上传人：${uploader}\n\n请登入系统进行审批。\n${dashUrl}`
+      let sent = 0
+      const results: any[] = []
+      for (const rev of revList) {
+        const contact = (rev.contact || '').trim()
+        if (!contact) continue
+        const isEmail = contact.includes('@')
+        try {
+          await sendNotification(isEmail ? 'sendgrid' : 'whatsapp', msg, contact)
+          sent++
+          results.push({ name: rev.name, channel: isEmail ? 'email' : 'whatsapp', status: 'sent' })
+        } catch(e) {
+          results.push({ name: rev.name, status: 'error', error: (e as Error).message })
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, sent, results }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'notify_doc_decision') {
+      const { doc_title, decision, reviewer_name, uploaded_by } = body as any
+      if (!uploaded_by) return new Response(JSON.stringify({ ok: true, sent: 0 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const decLabel = decision === 'approved' ? '✅ 已批准' : '❌ 已拒绝'
+      const msg = `${decLabel}\n\n文件：${doc_title || '—'}\n审批人：${reviewer_name || '—'}\n\n请登入系统查看详情。`
+      const isEmail = String(uploaded_by).includes('@')
+      try {
+        await sendNotification(isEmail ? 'sendgrid' : 'whatsapp', msg, String(uploaded_by))
+        return new Response(JSON.stringify({ ok: true, sent: 1 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ ok: true, sent: 0, error: (e as Error).message }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Test LLM provider ──────────────────────────────────────────
+    if (body.action === 'test_llm') {
+      const targetProvider = String(body.provider || '')
+      if (!targetProvider) return new Response(JSON.stringify({ ok: false, error: 'provider 参数缺失' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      try {
+        const allProviders = await loadProviders()
+        const provRow = allProviders.find(p => p.provider === targetProvider)
+        if (!provRow) return new Response(JSON.stringify({ ok: false, error: `Provider "${targetProvider}" 未在数据库配置` }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (!provRow.api_key) return new Response(JSON.stringify({ ok: false, error: 'API Key 为空，请先保存 Key' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const testModel = provRow.model || undefined
+        const testMessages = [{ role: 'user', content: 'Reply with exactly one word: ok' }]
+        const testSystem = 'You are a test assistant. Follow instructions exactly.'
+        let text = ''
+        if      (targetProvider === 'anthropic')   text = await callAnthropic(provRow.api_key, testModel, testSystem, testMessages, false)
+        else if (targetProvider === 'openai')      text = await callOpenAI(provRow.api_key, testModel, testSystem, testMessages, false)
+        else if (targetProvider === 'google')      text = await callGoogle(provRow.api_key, testModel, testSystem, testMessages, false)
+        else if (targetProvider === 'openrouter')  text = await callOpenRouter(provRow.api_key, testModel, testSystem, testMessages)
+        else return new Response(JSON.stringify({ ok: false, error: `未知 provider: ${targetProvider}` }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true, response: text.slice(0, 200), model_used: testModel || '(default)' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ ok: false, error: (e as Error).message }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Test WhatsApp ───────────────────────────────────────────────
+    if (body.action === 'test_whatsapp') {
+      try {
+        const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.whatsapp', active: 'eq.true' })
+        const creds = (rows[0] as any)?.credentials
+        if (!creds?.phone_number_id || !creds?.access_token)
+          return new Response(JSON.stringify({ error: '请先保存 WhatsApp 凭证并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const to = creds.default_recipient
+        if (!to)
+          return new Response(JSON.stringify({ error: '请填写默认接收号码' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const r = await fetch(`https://graph.facebook.com/v18.0/${creds.phone_number_id}/messages`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${creds.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: '✅ Orchestrator Agent — WhatsApp 连接测试成功！' } }),
+        })
+        const rj = await r.json() as any
+        if (!r.ok) return new Response(JSON.stringify({ error: rj?.error?.message || `WhatsApp API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Test SendGrid ───────────────────────────────────────────────
+    if (body.action === 'test_sendgrid') {
+      try {
+        const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.sendgrid', active: 'eq.true' }, undefined, 1)
+        const creds = (rows[0] as any)?.credentials
+        if (!creds?.api_key)
+          return new Response(JSON.stringify({ error: '请先保存 SendGrid API Key 并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const to = creds.from_address
+        if (!to)
+          return new Response(JSON.stringify({ error: '请填写 From Address（测试邮件将发送到该地址）' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${creds.api_key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            personalizations: [{ to: [{ email: to }] }],
+            from: { email: to, name: 'Orchestrator' },
+            subject: '✅ Orchestrator Agent — SendGrid 连接测试',
+            content: [{ type: 'text/plain', value: 'SendGrid 邮件集成配置正确，连接测试成功！' }]
+          })
+        })
+        if (r.status === 202 || r.ok) return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const rj = await r.json().catch(() => ({})) as any
+        return new Response(JSON.stringify({ error: rj?.errors?.[0]?.message || `SendGrid API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Test Email SMTP ─────────────────────────────────────────────
+    if (body.action === 'test_email_smtp') {
+      try {
+        const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.email_smtp', active: 'eq.true' }, undefined, 1)
+        const creds = (rows[0] as any)?.credentials
+        if (!creds?.host || !creds?.username || !creds?.password)
+          return new Response(JSON.stringify({ error: '请先保存 SMTP 配置并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const to = creds.from_address || creds.username
+        const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+        const client = new SmtpClient()
+        const port = parseInt(String(creds.port || '587'))
+        if (port === 465) {
+          await client.connectTLS({ hostname: String(creds.host), port: 465, username: String(creds.username), password: String(creds.password) })
+        } else {
+          await client.connect({ hostname: String(creds.host), port, username: String(creds.username), password: String(creds.password) })
+        }
+        await client.send({ from: String(creds.from_address || creds.username), to, subject: '✅ Orchestrator Agent — SMTP 连接测试', content: 'SMTP 邮件集成配置正确，连接测试成功！' })
+        await client.close()
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Test Telegram ───────────────────────────────────────────────
+    if (body.action === 'test_telegram') {
+      try {
+        const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.telegram', active: 'eq.true' }, undefined, 1)
+        const creds = (rows[0] as any)?.credentials
+        if (!creds?.bot_token)
+          return new Response(JSON.stringify({ error: '请先保存 Telegram Bot Token 并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const chatId = creds.chat_id
+        if (!chatId)
+          return new Response(JSON.stringify({ error: '请填写 Default Chat ID' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const r = await fetch(`https://api.telegram.org/bot${creds.bot_token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: '✅ Orchestrator Agent — Telegram 连接测试成功！', parse_mode: 'Markdown' }),
+        })
+        const rj = await r.json() as any
+        if (!r.ok || !rj.ok) return new Response(JSON.stringify({ error: rj?.description || `Telegram API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } catch(e) {
+        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
     if (body.action === 'test_lark') {
       const { webhook_url } = body
       if (!webhook_url) return new Response(JSON.stringify({ error: 'webhook_url required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2089,19 +2663,28 @@ Deno.serve(async (req: Request) => {
       const chunkSize = 500, overlap = 50
       for (let i = 0; i < text.length; i += chunkSize - overlap) chunks.push(text.slice(i, i + chunkSize))
       // Embed all chunks
+      const errs: string[] = []
       const results = await Promise.all(chunks.map(async (chunk, idx) => {
         const r = await fetch('https://api.openai.com/v1/embeddings', {
           method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
           body: JSON.stringify({ model:'text-embedding-3-small', input: chunk }),
         })
-        if (!r.ok) return null
+        if (!r.ok) { errs.push(`embed_${idx}:${r.status}:${await r.text()}`); return null }
         const d = await r.json() as { data:[{embedding:number[]}] }
         const embedding = d.data?.[0]?.embedding
-        if (!embedding) return null
-        return dbInsert('kb_chunks', { kb_id, source_name: source_name||'upload', chunk_index: idx, content: chunk, embedding: JSON.stringify(embedding), tenant_id: _reqTenantId })
+        if (!embedding) { errs.push(`embed_${idx}:no_embedding`); return null }
+        // pgvector via PostgREST requires string format "[n1,n2,...]" not JSON array
+        const embeddingStr = `[${embedding.join(',')}]`
+        const ir = await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks`, {
+          method: 'POST',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ kb_id, source_name: source_name||'upload', chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId }),
+        })
+        if (!ir.ok) { errs.push(`insert_${idx}:${ir.status}:${await ir.text()}`); return null }
+        return true
       }))
-      const saved = results.filter(Boolean).length
-      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved }), { headers:{...CORS,'Content-Type':'application/json'} })
+      const saved = results.filter(r => r === true).length
+      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved, errors: errs }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── RAG: semantic search ─────────────────────────────────────────
@@ -2130,7 +2713,7 @@ Deno.serve(async (req: Request) => {
 
     // ── KB CRUD ──────────────────────────────────────────────────────
     if (body.action === 'list_kbs') {
-      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',{},undefined,50)
+      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',tenantFilters(),undefined,50)
       return new Response(JSON.stringify({ kbs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'create_kb') {
@@ -2142,7 +2725,8 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'delete_kb') {
       const { kb_id } = body
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_bases?id=eq.${kb_id}`,{
+      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
+      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_bases?id=eq.${kb_id}${tenantQ}`,{
         method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` }
       })
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
@@ -2207,14 +2791,11 @@ Deno.serve(async (req: Request) => {
       const wfRows = await dbGet('workflows','nodes,edges',{ id:`eq.${wfId}` })
       const wf = wfRows[0] as { nodes:{id:string;type:string;config:Record<string,string>}[]; edges:{from:string;to:string}[] }|undefined
       if (!wf) return new Response(JSON.stringify({ error:'Workflow not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
-      const runRow = await dbInsertReturning('workflow_runs',{ workflow_id:wfId, input:wfInput||{}, status:'running' })
-      // Execute nodes sequentially
       const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
       let context: Record<string,unknown> = { input: wfInput || {} }
-      let error = ''
+      let errorMsg = ''
       try {
-        // Build adjacency: find start node (no incoming edges)
-        const incoming = new Set(wf.edges.map(e => e.to))
+        const incoming = new Set(wf.edges.map((e:{from:string;to:string}) => e.to))
         const nodeMap = Object.fromEntries(wf.nodes.map(n => [n.id, n]))
         const start = wf.nodes.find(n => !incoming.has(n.id))
         if (!start) throw new Error('No start node found')
@@ -2225,29 +2806,63 @@ Deno.serve(async (req: Request) => {
           const node = nodeMap[cur]
           if (!node) break
           if (node.type === 'agent') {
-            const agentId = node.config?.agent_id
-            const agent = agents.find(a => a.id === agentId) ?? agents.find(a => a.id === 'chat') ?? agents[0]
+            const agent = agents.find(a => a.id === node.config?.agent_id) ?? agents.find(a => a.id === 'chat') ?? agents[0]
             const prompt = (node.config?.prompt || '{{input}}').replace('{{input}}', JSON.stringify(context.input))
-            const { text } = await callLLM(providers, agent?.provider || defaultProvider, agent?.model, agent?.system_prompt || 'You are a helpful assistant.', [{ role:'user', content:prompt }])
-            context[node.id] = text
-            context.last_output = text
+            const skillText = await loadAgentSkills(agent?.id || '')
+            const system = (agent?.system_prompt || 'You are a helpful assistant.') + '\n\n' + SOUL + skillText
+            const { text } = await callLLM(providers, agent?.provider || defaultProvider, agent?.model, system, [{ role:'user', content:prompt }])
+            context[node.id] = text; context.last_output = text
           } else if (node.type === 'condition') {
-            // Basic condition: check if last_output contains keyword
-            const keyword = node.config?.keyword || ''
-            const passed = String(context.last_output||'').toLowerCase().includes(keyword.toLowerCase())
+            const passed = String(context.last_output||'').toLowerCase().includes((node.config?.keyword||'').toLowerCase())
             context[node.id] = passed ? 'true' : 'false'
           } else if (node.type === 'output') {
             context.final_output = context.last_output
+          } else if (node.type === 'self_learn') {
+            const result = await learnFromGaps()
+            const msg = `学习完成：分析 ${result.processed} 条问题，新增 ${result.skills_added} 条路由规则`
+            context[node.id] = msg; context.last_output = msg
+          } else if (node.type === 'skill_audit') {
+            const skillRows = await dbGet('agent_skills','id,agent,skill',{},'created_at.desc',200) as {id:string;agent:string;skill:string}[]
+            if (!skillRows.length) { context.last_output = '技能库为空，跳过审计' }
+            else {
+              const list = skillRows.map((r,i)=>`[${i+1}] agent=${r.agent}: ${r.skill}`).join('\n')
+              const { text } = await callLLM(providers, defaultProvider, undefined,
+                `You audit an AI routing rule library. Identify rules that are exact/near-duplicate, contradictory, or overly vague. Return ONLY a JSON array of 1-indexed rule numbers to DELETE: [1,3] or [] if none. Nothing else.`,
+                [{ role:'user', content:`Rules:\n${list}` }], false)
+              const m = text.match(/\[[\d,\s]*\]/)
+              const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=skillRows.length) : []
+              if (toDelete.length) {
+                const ids = toDelete.map(n=>skillRows[n-1].id)
+                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+              }
+              const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
+              context[node.id] = msg; context.last_output = msg
+            }
+          } else if (node.type === 'prefs_compact') {
+            const prefRows = await dbGet('user_prefs','id,key,value,confidence',{},'confidence.asc',200) as {id:string;key:string;value:string;confidence:number}[]
+            if (!prefRows.length) { context.last_output = '偏好库为空，跳过压缩' }
+            else {
+              const list = prefRows.map((r,i)=>`[${i+1}] key="${r.key}" value="${r.value}" confidence=${r.confidence}`).join('\n')
+              const { text } = await callLLM(providers, defaultProvider, undefined,
+                `You compress a user preference store. Identify entries to DELETE: semantically duplicate, confidence<0.5 AND redundant, or contradicting a higher-confidence entry. Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if none. Nothing else.`,
+                [{ role:'user', content:`Preferences:\n${list}` }], false)
+              const m = text.match(/\[[\d,\s]*\]/)
+              const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=prefRows.length) : []
+              if (toDelete.length) {
+                const ids = toDelete.map(n=>prefRows[n-1].id)
+                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+              }
+              const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
+              context[node.id] = msg; context.last_output = msg
+            }
           }
-          const nextEdge = wf.edges.find(e => e.from === cur)
+          const nextEdge = wf.edges.find((e:{from:string;to:string}) => e.from === cur)
           cur = nextEdge?.to
         }
-        await dbPatch('workflow_runs', String(runRow.id), { status:'done', output:context, finished_at:new Date().toISOString() })
-      } catch(e) {
-        error = (e as Error).message
-        await dbPatch('workflow_runs', String(runRow.id), { status:'error', error, finished_at:new Date().toISOString() })
-      }
-      return new Response(JSON.stringify({ ok:!error, run_id:runRow.id, output:context, error }), { headers:{...CORS,'Content-Type':'application/json'} })
+      } catch(e) { errorMsg = (e as Error).message }
+      const response = String(context.final_output || context.last_output || '')
+      await dbInsert('workflow_runs', { workflow_id: wfId, response, error: errorMsg || null, ran_at: new Date().toISOString() })
+      return new Response(JSON.stringify({ ok:!errorMsg, output:context, error:errorMsg }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── Cost summary ─────────────────────────────────────────────────
@@ -2270,9 +2885,60 @@ Deno.serve(async (req: Request) => {
     // ── Streaming chat action ───────────────────────────────────────
     if (body.stream === true) {
       const { message: smsg, session_id: ssid, target_agent: sta, system_prompt_override: sPromptOverride } = body
-      if (!smsg && !body.file_url) return new Response(JSON.stringify({ error: 'message required' }),
+      const reqFiles = Array.isArray(body.files) ? (body.files as Array<{url:string;name:string;type:string}>) : []
+      if (!smsg && !body.file_url && !reqFiles.length) return new Response(JSON.stringify({ error: 'message required' }),
         { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const sid2 = ssid || crypto.randomUUID()
+
+      // ── Multiple files → joint Anthropic analysis ───────────────────
+      if (reqFiles.length > 1) {
+        const { readable, writable } = new TransformStream()
+        const writer = writable.getWriter()
+        const encoder = new TextEncoder()
+        const sseM = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        ;(async () => {
+          try {
+            const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+            const anth = providers.find(p => p.provider === 'anthropic' && p.active)
+            if (!anth?.api_key) throw new Error('多文件分析需要 Anthropic API Key')
+            const userMsg = smsg || `请分析以下 ${reqFiles.length} 个文件`
+            // Build multimodal content blocks
+            const contentBlocks: object[] = []
+            for (const f of reqFiles) {
+              const isImage = ['image'].includes(f.type)
+              if (isImage) {
+                contentBlocks.push({ type: 'image', source: { type: 'url', url: f.url } })
+              } else {
+                contentBlocks.push({ type: 'document', source: { type: 'url', url: f.url }, title: f.name })
+              }
+            }
+            contentBlocks.push({ type: 'text', text: userMsg })
+            for (const ch of `⏳ 正在分析 ${reqFiles.length} 个文件…`) await sseM({ chunk: ch })
+            const r = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: { 'x-api-key': anth.api_key, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'pdfs-2024-09-25', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: anth.model || 'claude-sonnet-4-6', max_tokens: 4096,
+                system: SOUL + '\n\n用中文回答，结构清晰。',
+                messages: [{ role: 'user', content: contentBlocks }] })
+            })
+            if (!r.ok) throw new Error(`Anthropic ${r.status}: ${await r.text()}`)
+            const d = await r.json() as { content: {type:string;text:string}[]; usage?: {input_tokens:number;output_tokens:number} }
+            const text = d.content?.find(b => b.type === 'text')?.text || ''
+            if (d.usage) { _lastUsage.tokens_in = d.usage.input_tokens; _lastUsage.tokens_out = d.usage.output_tokens; _lastUsage.used_model = anth.model || '' }
+            const _mc = calcCost(_lastUsage.used_model, _lastUsage.tokens_in, _lastUsage.tokens_out)
+            const fileNames = reqFiles.map(f => f.name).join('、')
+            for (const ch of ('\n\n' + text)) await sseM({ chunk: ch })
+            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[多文件分析] ${fileNames}\n${userMsg}`, agent: 'chat', tenant_id: _reqTenantId })
+            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: text, agent: 'chat', tenant_id: _reqTenantId, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _mc })
+            await sseM({ done: true, agent: 'chat', agent_name: '文件分析', session_id: sid2, provider: 'anthropic', conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _mc })
+          } catch(e) {
+            await sseM({ error: (e as Error).message })
+          } finally {
+            await writer.close()
+          }
+        })()
+        return new Response(readable, { headers: { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
+      }
 
       // ── File attached → data extraction if keyword detected ─────────
       if (body.file_url && body.file_name && needsDataExtract(smsg || '')) {
@@ -2442,10 +3108,11 @@ Deno.serve(async (req: Request) => {
       const sSubAgents = sagents.filter((a:AgentRow) => a.active && a.id !== 'chat')
       const sAgentList = sSubAgents.map((a:AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
       const sHermesInject = sagent.id === 'chat'
-        ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${sAgentList}\n\n规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。`
+        ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${sAgentList}\n\n委托规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n4. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n5. 每次委托后阅读结果，再决定是否需要下一步委托。\n6. 综合完毕后用中文给出清晰结论，不让用户二次追问。`
         : ''
-      const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + (SOUL ? '\n\n' + SOUL : '') + sskillText
-      const suseTools = DATA_AGENTS.has(sagent.id)
+      const sTodayStr = new Date().toISOString().slice(0, 10)
+      const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + `\n\n**今天日期：${sTodayStr}**（所有查询默认以此为基准）` + (SOUL ? '\n\n' + SOUL : '') + sskillText
+      const suseTools = DATA_AGENTS.has(sagent.id) || !!sagent.uses_tools
       _reqHermesMode = (sagent.id === 'chat')   // restrict Hermes to delegate_to_agent only
       const smessages: {role:string;content:string}[] = [...shistory, { role:'user', content:smsg }]
 
@@ -2457,8 +3124,44 @@ Deno.serve(async (req: Request) => {
       ;(async () => {
         let fullText = ''
         try {
+          // ── Auto web search: LLM decides if real-time info needed ──────
+          let finalMessages = smessages
+          let finalSystem = ssystem
+          let webSearched = false
+          try {
+            const { text: intent } = await callLLM(
+              sproviders, sdefProv, undefined,
+              'Reply SEARCH or CHAT only. SEARCH: needs current news, prices, today\'s events, latest releases, real-time data. CHAT: everything else.',
+              [{ role: 'user', content: smsg || '' }], false
+            )
+            if (intent.trim().toUpperCase().includes('SEARCH')) {
+              const orProvider = sproviders.find((p: ProviderRow) => p.provider === 'openrouter')
+              if (!orProvider) {
+                await sse({ chunk: '⚠️ 未配置 OpenRouter API Key，无法实时搜索。请在 LLM 配置中添加 openrouter provider。\n\n' })
+              } else {
+              await sse({ chunk: '🔍 *正在搜索最新信息…*\n\n' })
+              try {
+                const { text: sr } = await withTimeout(callLLM(
+                  sproviders, 'openrouter', 'perplexity/sonar',
+                  '你是搜索助手。用中文返回详细、准确、最新的搜索结果，包含关键事实和来源。',
+                  [{ role: 'user', content: smsg || '' }]
+                ), 50_000)
+                webSearched = true
+                finalMessages = [...shistory, { role: 'user', content: `${smsg}\n\n[网络搜索结果]\n${sr}` }]
+                // When search is done: bypass Hermes delegation, answer directly
+                finalSystem = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.')
+                  + '\n\n' + SOUL + sskillText
+                  + '\n\n[系统指令] 已通过网络搜索获取最新信息。请直接基于上面的 [网络搜索结果] 用中文给出清晰准确的回答。不要委托、不要说不知道。'
+                _reqHermesMode = false  // allow direct answer, skip delegation
+              } catch(se) {
+                await sse({ chunk: `⚠️ 搜索失败 (${(se as Error).message.slice(0,80)})，基于已有知识回答：\n\n` })
+              }
+              } // end else (orProvider exists)
+            }
+          } catch { /* intent check failed — proceed without search */ }
+
           const usedProvider = await streamWithFallback(
-            sproviders, sagent.provider || sdefProv, sagent.model, ssystem, smessages, suseTools,
+            sproviders, sagent.provider || sdefProv, sagent.model, finalSystem, finalMessages, suseTools,
             async (chunk) => { fullText += chunk; await sse({ chunk }) }
           )
           // Save to DB with token usage
@@ -2472,7 +3175,7 @@ Deno.serve(async (req: Request) => {
           }
           await Promise.all(sInserts)
           const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: fullText, agent: _reqDelegatedId || sagent.id, tenant_id: _reqTenantId, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost })
-          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, delegated_agent: _reqDelegatedId || undefined, delegated_agent_name: _reqDelegatedName || undefined, session_id: sid2, provider: usedProvider, conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost })
+          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, delegated_agent: _reqDelegatedId || undefined, delegated_agent_name: _reqDelegatedName || undefined, session_id: sid2, provider: usedProvider, conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost, web_searched: webSearched })
           extractPrefs(smsg, fullText, sproviders, sdefProv)
         } catch(e) {
           await sse({ error: (e as Error).message })
@@ -2513,24 +3216,44 @@ Deno.serve(async (req: Request) => {
       agent = agents.find((a: AgentRow) => a.id === 'chat') ?? agents[0]
     }
 
+    // ── Smart pre-routing: keyword-based direct dispatch (zero LLM calls)
+    // keywordRoute() matches Chinese/English keywords deterministically.
+    // Reliable, instant, no rate-limit risk. Falls back to Hermes only for
+    // pure chat, meta questions, or truly ambiguous requests.
+    let routedDirectly = false
+    if (!target_agent && agent.id === 'chat' && !promptOverride) {
+      const kwAgent = keywordRoute(message, agents)
+      if (kwAgent) {
+        agent = kwAgent
+        routedDirectly = true
+        _reqDelegatedId = kwAgent.id
+        _reqDelegatedName = kwAgent.name || kwAgent.id
+      }
+    }
+
     // A: load history + skills in parallel
     const [history, skillText] = await Promise.all([
       loadHistory(sid, 10),
       loadAgentSkills(agent.id),
     ])
 
-    // Build dynamic agent list for Hermes system prompt
-    const subAgents = agents.filter((a: AgentRow) => a.active && a.id !== 'chat')
-    const agentList = subAgents.map((a: AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
-    const hermesInject = agent.id === 'chat'
-      ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${agentList}\n\n规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。`
-      : ''
-
-    const system   = (promptOverride || agent.system_prompt || 'You are a helpful assistant.')
-      + (promptOverride ? '' : hermesInject)
-      + (SOUL ? '\n\n' + SOUL : '')
-      + skillText
-    const useTools = DATA_AGENTS.has(agent.id)
+    // Build dynamic agent list for Hermes system prompt (only when Hermes handles directly)
+    const todayStr = new Date().toISOString().slice(0, 10)
+    const dateInject = `\n\n**今天日期：${todayStr}**（所有查询默认以此为基准）`
+    let system: string
+    if (agent.id === 'chat') {
+      const subAgents = agents.filter((a: AgentRow) => a.active && a.id !== 'chat')
+      const agentList = subAgents.map((a: AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
+      const hermesInject = `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${agentList}\n\n委托规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n4. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n5. 每次委托后阅读结果，再决定是否需要下一步委托。\n6. 综合完毕后用中文给出清晰结论，不让用户二次追问。`
+      system = (agent.system_prompt || 'You are a helpful assistant.') + hermesInject + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText
+    } else {
+      // Sub-agent: inject today's date + soul, no Hermes routing instructions
+      const hermesCtx = routedDirectly
+        ? `\n\n**[系统上下文]** 你是被调度系统直接分配的专项 Agent。用户原始问题：${message}\n请基于对话历史给出专业回答。`
+        : ''
+      system = (promptOverride || agent.system_prompt || 'You are a helpful assistant.') + hermesCtx + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText
+    }
+    const useTools = DATA_AGENTS.has(agent.id) || !!agent.uses_tools
     _reqHermesMode = (agent.id === 'chat')   // restrict Hermes to delegate_to_agent only
 
     // A: build messages with history prefix
