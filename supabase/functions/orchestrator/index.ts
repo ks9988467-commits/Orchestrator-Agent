@@ -686,25 +686,14 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       const query = String(args.query || '').slice(0, 500)
       if (!query) return JSON.stringify({ error: 'query required' })
       const limit = Math.min(Number(args.limit) || 3, 8)
-      // Need OpenAI key for embeddings
+      // Embed using fallback chain: OpenAI → Google → OpenRouter
       const providers = await loadProviders()
-      const oai = providers.find(p => p.provider === 'openai' && p.active)
-      if (!oai?.api_key) return JSON.stringify({ error: 'OpenAI key required for knowledge base search. Please configure it in LLM Providers.' })
-      // Get available KBs for this tenant (optionally filter to specific kb_id)
       const kbFilters = tenantFilters()
       if (args.kb_id) kbFilters['id'] = `eq.${args.kb_id}`
       const kbs = await dbGet('knowledge_bases', 'id,name', kbFilters, undefined, 10) as Record<string,string>[]
       if (!kbs.length) return JSON.stringify({ results: [], message: '尚未建立知识库，请先在知识库页面录入文档。' })
-      // Embed the query
-      const er = await fetch('https://api.openai.com/v1/embeddings', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${oai.api_key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'text-embedding-3-small', input: query }),
-      })
-      if (!er.ok) return JSON.stringify({ error: `Embedding failed: ${er.status}` })
-      const ed = await er.json() as { data: [{ embedding: number[] }] }
-      const qEmbed = ed.data?.[0]?.embedding
-      if (!qEmbed) return JSON.stringify({ error: 'No embedding returned' })
+      const qEmbed = await getEmbedding(query, providers)
+      if (!qEmbed) return JSON.stringify({ error: '知识库搜索需要 Embedding API。请在 LLM Providers 中配置 OpenAI、Google 或 OpenRouter key。' })
       // Search across all matching KBs, collect results
       const allResults: Array<Record<string,unknown>> = []
       for (const kb of kbs.slice(0, 5)) {
@@ -842,6 +831,63 @@ interface ProviderRow { provider: string; api_key: string; model: string; active
 interface AgentRow    { id: string; name: string; system_prompt: string; provider: string|null; model: string|null; active: boolean; uses_tools?: boolean }
 
 // \u2500\u2500 Config loaders (with module-level cache) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── Embedding helper: OpenAI → Google → OpenRouter fallback ──────────────
+// All providers normalised to 768 dims:
+//   OpenAI  text-embedding-3-small  (dimensions=768 param)
+//   Google  text-embedding-004      (native 768)
+//   OpenRouter  openai/text-embedding-3-small  (dimensions=768)
+async function getEmbedding(text: string, providers: ProviderRow[]): Promise<number[] | null> {
+  const input = String(text).slice(0, 8000)
+
+  // 1. OpenAI
+  const oai = providers.find(p => p.provider === 'openai' && p.active && p.api_key?.trim())
+  if (oai?.api_key) {
+    const r = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${oai.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'text-embedding-3-small', input, dimensions: 768 }),
+    })
+    if (r.ok) {
+      const d = await r.json() as { data: [{ embedding: number[] }] }
+      if (d.data?.[0]?.embedding) return d.data[0].embedding
+    }
+    // non-ok (quota etc.) — fall through to next provider
+  }
+
+  // 2. Google text-embedding-004 (native 768 dims)
+  const goo = providers.find(p => p.provider === 'google' && p.active && p.api_key?.trim())
+  if (goo?.api_key) {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${goo.api_key}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT' }),
+      }
+    )
+    if (r.ok) {
+      const d = await r.json() as { embedding?: { values: number[] } }
+      if (d.embedding?.values) return d.embedding.values
+    }
+  }
+
+  // 3. OpenRouter (proxies OpenAI embedding)
+  const or_ = providers.find(p => p.provider === 'openrouter' && p.active && p.api_key?.trim())
+  if (or_?.api_key) {
+    const r = await fetch('https://openrouter.ai/api/v1/embeddings', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${or_.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'openai/text-embedding-3-small', input, dimensions: 768 }),
+    })
+    if (r.ok) {
+      const d = await r.json() as { data: [{ embedding: number[] }] }
+      if (d.data?.[0]?.embedding) return d.data[0].embedding
+    }
+  }
+
+  return null  // all providers exhausted / unconfigured
+}
+
 async function loadProviders(): Promise<ProviderRow[]> {
   if (_cacheProviders && Date.now() < _cacheProviders.expires) return _cacheProviders.data
   const rows = await dbGet('provider_config', 'provider,api_key,model,active')
@@ -2634,19 +2680,11 @@ Return ONLY a valid JSON array, no markdown:
 
     // ── RAG: embed text ─────────────────────────────────────────────
     if (body.action === 'embed') {
-      const { text: embedText, kb_id } = body
+      const { text: embedText } = body
       if (!embedText) return new Response(JSON.stringify({ error: 'text required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      const oai = providers.find(p => p.provider === 'openai' && p.active)
-      if (!oai?.api_key) return new Response(JSON.stringify({ error: 'OpenAI key required for embeddings' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const r = await fetch('https://api.openai.com/v1/embeddings', {
-        method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ model:'text-embedding-3-small', input: String(embedText).slice(0,8000) }),
-      })
-      if (!r.ok) return new Response(JSON.stringify({ error:`Embedding failed: ${r.status}` }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
-      const d = await r.json() as { data:[{embedding:number[]}] }
-      const embedding = d.data?.[0]?.embedding
-      if (!embedding) return new Response(JSON.stringify({ error:'No embedding returned' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      const embedding = await getEmbedding(String(embedText), providers)
+      if (!embedding) return new Response(JSON.stringify({ error: 'Embedding failed: no provider available (OpenAI/Google/OpenRouter)' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       return new Response(JSON.stringify({ embedding }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
@@ -2655,25 +2693,17 @@ Return ONLY a valid JSON array, no markdown:
       const { kb_id, source_name, content: rawContent } = body
       if (!kb_id || !rawContent) return new Response(JSON.stringify({ error:'kb_id and content required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      const oai = providers.find(p => p.provider === 'openai' && p.active)
-      if (!oai?.api_key) return new Response(JSON.stringify({ error:'OpenAI key required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       // Split into ~500-char chunks
       const text = String(rawContent)
       const chunks: string[] = []
       const chunkSize = 500, overlap = 50
       for (let i = 0; i < text.length; i += chunkSize - overlap) chunks.push(text.slice(i, i + chunkSize))
-      // Embed all chunks
+      // Embed all chunks using fallback chain
       const errs: string[] = []
       const results = await Promise.all(chunks.map(async (chunk, idx) => {
-        const r = await fetch('https://api.openai.com/v1/embeddings', {
-          method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
-          body: JSON.stringify({ model:'text-embedding-3-small', input: chunk }),
-        })
-        if (!r.ok) { errs.push(`embed_${idx}:${r.status}:${await r.text()}`); return null }
-        const d = await r.json() as { data:[{embedding:number[]}] }
-        const embedding = d.data?.[0]?.embedding
-        if (!embedding) { errs.push(`embed_${idx}:no_embedding`); return null }
-        // pgvector via PostgREST requires string format "[n1,n2,...]" not JSON array
+        const embedding = await getEmbedding(chunk, providers)
+        if (!embedding) { errs.push(`embed_${idx}:all_providers_failed`); return null }
+        // pgvector via PostgREST requires string format "[n1,n2,...]"
         const embeddingStr = `[${embedding.join(',')}]`
         const ir = await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks`, {
           method: 'POST',
@@ -2692,16 +2722,8 @@ Return ONLY a valid JSON array, no markdown:
       const { kb_id, query, limit: kLimit } = body
       if (!kb_id || !query) return new Response(JSON.stringify({ error:'kb_id and query required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      const oai = providers.find(p => p.provider === 'openai' && p.active)
-      if (!oai?.api_key) return new Response(JSON.stringify({ error:'OpenAI key required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const r = await fetch('https://api.openai.com/v1/embeddings', {
-        method:'POST', headers:{ Authorization:`Bearer ${oai.api_key}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ model:'text-embedding-3-small', input: String(query).slice(0,500) }),
-      })
-      if (!r.ok) return new Response(JSON.stringify({ error:'Embedding query failed' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
-      const d = await r.json() as { data:[{embedding:number[]}] }
-      const qEmbed = d.data?.[0]?.embedding
-      if (!qEmbed) return new Response(JSON.stringify({ error:'No embedding' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      const qEmbed = await getEmbedding(String(query).slice(0, 500), providers)
+      if (!qEmbed) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       const n = Math.min(Number(kLimit)||5, 20)
       const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
         method:'POST',
