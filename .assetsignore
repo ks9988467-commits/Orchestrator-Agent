@@ -1,4 +1,6 @@
-# Security: serve ONLY dashboard.html. Everything else (secrets, source,
+# Security: serve ONLY the app's own files. Everything else (secrets, source,
 # git history, config) must never be uploaded as a public asset.
 *
 !dashboard.html
+!app.css
+!app.js
