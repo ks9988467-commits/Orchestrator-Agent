@@ -8,8 +8,9 @@ Orchestrator Agent — a multi-agent AI brain running fully on Supabase (no loca
 |-------|------|
 | Frontend | `dashboard.html` — standalone HTML, open in browser |
 | Backend | Supabase Edge Function `orchestrator` (always-on, Deno/TypeScript) |
-| Database | Supabase Postgres (6 tables) |
-| LLM | Anthropic / OpenAI / Google — switchable per-agent |
+| Database | Supabase Postgres (8 tables) |
+| LLM | Anthropic / OpenAI / Google / OpenRouter — switchable per-agent |
+| CDN | Cloudflare Worker (static asset serving) |
 
 ## Agents
 | ID | Name | Role |
@@ -31,8 +32,10 @@ Orchestrator Agent — a multi-agent AI brain running fully on Supabase (no loca
 | conversations | Chat history |
 | user_prefs | Auto-learned user preferences |
 | agent_skills | Skills agents learn over time |
-| provider_config | LLM API keys (Anthropic/OpenAI/Google) |
+| provider_config | LLM API keys (Anthropic/OpenAI/Google/OpenRouter) |
 | api_integrations | WhatsApp / Email / Telegram credentials |
+| documents | 文件审批元数据（标题、状态、上传者、file_url）|
+| document_reviewers | 审批人记录（决定、留言、时间）|
 
 ## Key Files
 | File | Purpose |
@@ -43,9 +46,10 @@ Orchestrator Agent — a multi-agent AI brain running fully on Supabase (no loca
 
 ## Preferences
 - No local server — everything runs on Supabase
-- Same pattern as existing CRM (Supabase-native, bypass login for testing)
 - Chinese UI, English code
 - soul.md kept under 1KB
+- **先讨论确认，再动手实现**（多步骤任务先对齐再写代码）
+- **往深的想，一步到位**（不要浅尝辄止）
 
 ---
 

@@ -437,6 +437,56 @@ const TOOL_DEFS = [
       required: ['query'],
     },
   },
+  {
+    name: 'create_automation',
+    description: '帮用户建立自动化规则。当用户描述重复性痛点、希望自动监控某指标或事件时调用。建立后向用户确认触发条件和动作详情。',
+    parameters: {
+      type: 'object',
+      properties: {
+        name:           { type: 'string', description: '规则名称，简短描述（如：CPL超标告警）' },
+        description:    { type: 'string', description: '规则描述（可选）' },
+        trigger_type:   { type: 'string', enum: ['schedule','threshold','event','anomaly','pattern'], description: 'schedule=定时执行; threshold=指标超标触发; event=事件触发; anomaly=异常检测(今日vs7天均值); pattern=周期规律检测' },
+        trigger_config: { type: 'object', description: '触发配置。schedule: {"interval_hours":24}; threshold: {"metric":"cpl","operator":"gt","value":15,"days":3}; event: {"event":"uncontacted_leads","hours":24,"min_count":1}; anomaly: {"metric":"cpl|spend|leads","deviation_pct":50,"direction":"above|below|either"}; pattern: {"metric":"cpl|spend|leads","day_of_week":1,"threshold_pct":30,"direction":"above|below|either"}' },
+        action_type:    { type: 'string', enum: ['dashboard_alert','chat_message','whatsapp_push'], description: 'dashboard_alert=Dashboard显示预警; chat_message=在对话中推送消息; whatsapp_push=WhatsApp推送' },
+        action_config:  { type: 'object', description: '动作配置。template: 消息模板（支持 {value},{count},{date},{cpl},{days} 占位符）; recipient: WhatsApp号码（whatsapp_push时必填）' },
+      },
+      required: ['name', 'trigger_type', 'trigger_config', 'action_type', 'action_config'],
+    },
+  },
+  {
+    name: 'list_automations',
+    description: '列出当前用户的所有自动化规则，包括启用状态和最后触发时间。',
+    parameters: {
+      type: 'object',
+      properties: {
+        enabled_only: { type: 'boolean', description: '只显示已启用的规则（默认显示全部）' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'toggle_automation',
+    description: '启用或停用一条自动化规则。',
+    parameters: {
+      type: 'object',
+      properties: {
+        rule_id: { type: 'string', description: '规则 ID（UUID）' },
+        enabled: { type: 'boolean', description: 'true = 启用，false = 停用' },
+      },
+      required: ['rule_id', 'enabled'],
+    },
+  },
+  {
+    name: 'respond_directly',
+    description: 'Use ONLY for pure greetings ("你好", "hi"), meta questions about yourself ("你是谁", "你能做什么"), or truly off-topic messages. NEVER use for any business queries — those must always go through delegate_to_agent.',
+    parameters: {
+      type: 'object',
+      properties: {
+        response: { type: 'string', description: '直接回复的文本内容' },
+      },
+      required: ['response'],
+    },
+  },
 ]
 
 // \u2500\u2500 Tool executor \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -629,10 +679,11 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       if (!target) return JSON.stringify({ error: `Agent '${targetId}' not found or inactive. Available: ${_reqAgents.filter(a=>a.active&&a.id!=='chat').map(a=>a.id).join(', ')}` })
       _reqDelegatedId   = target.id
       _reqDelegatedName = target.name || target.id
-      // Load session history + sub-agent skills in parallel
-      const [history, subSkills] = await Promise.all([
+      // Load session history + sub-agent skills + KB context in parallel
+      const [history, subSkills, subKbCtx] = await Promise.all([
         _reqSessionId ? loadHistory(_reqSessionId, 10) : Promise.resolve([]),
         loadAgentSkills(target.id),
+        loadKbContext(),
       ])
       // Build augmented query: if previous delegations have context, pass it along
       const query = _reqDelegationContext
@@ -640,7 +691,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
         : originalQuery
       // Hermes context injected into sub-agent system prompt
       const hermesCtx = `\n\n**[系统上下文]** 你是被 Hermes 调度系统委派的专项 Agent。当前用户问题：${originalQuery}\n请结合对话历史，给出专业回答。`
-      const sys      = (target.system_prompt || 'You are a helpful assistant.') + hermesCtx + '\n\n' + SOUL + subSkills
+      const sys      = (target.system_prompt || 'You are a helpful assistant.') + hermesCtx + '\n\n' + SOUL + subSkills + subKbCtx
       const useTools = DATA_AGENTS.has(target.id) || !!target.uses_tools
       _reqHermesMode = false  // sub-agents get full tool access
       const messages = [...history, { role: 'user', content: query }]
@@ -686,17 +737,24 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       const query = String(args.query || '').slice(0, 500)
       if (!query) return JSON.stringify({ error: 'query required' })
       const limit = Math.min(Number(args.limit) || 3, 8)
-      // Embed using fallback chain: OpenAI → Google → OpenRouter
+      const SIM_THRESHOLD = 0.45   // drop chunks below this cosine similarity (irrelevant)
       const providers = await loadProviders()
       const kbFilters = tenantFilters()
       if (args.kb_id) kbFilters['id'] = `eq.${args.kb_id}`
-      const kbs = await dbGet('knowledge_bases', 'id,name', kbFilters, undefined, 10) as Record<string,string>[]
+      const kbs = await dbGet('knowledge_bases', 'id,name,embed_model', kbFilters, undefined, 10) as Record<string,string>[]
       if (!kbs.length) return JSON.stringify({ results: [], message: '尚未建立知识库，请先在知识库页面录入文档。' })
-      const qEmbed = await getEmbedding(query, providers)
-      if (!qEmbed) return JSON.stringify({ error: '知识库搜索需要 Embedding API。请在 LLM Providers 中配置 OpenAI、Google 或 OpenRouter key。' })
-      // Search across all matching KBs, collect results
+      // Embed the query PER KB using that KB's recorded model family, so query and
+      // chunk vectors are always in the same space. Cache by family to avoid re-embedding.
+      const embedCache: Record<string, number[] | null> = {}
       const allResults: Array<Record<string,unknown>> = []
       for (const kb of kbs.slice(0, 5)) {
+        const fam = kb.embed_model || ''   // '' = let getEmbedding pick default order
+        if (!(fam in embedCache)) {
+          const e = await getEmbedding(query, providers, fam || undefined)
+          embedCache[fam] = e ? e.vector : null
+        }
+        const qEmbed = embedCache[fam]
+        if (!qEmbed) continue
         const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
           method: 'POST',
           headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
@@ -706,10 +764,12 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
           allResults.push({ ...row, kb_name: kb.name })
         }
       }
-      // Sort by similarity desc, return top N
-      allResults.sort((a, b) => ((b.similarity as number) || 0) - ((a.similarity as number) || 0))
-      const top = allResults.slice(0, limit)
-      if (!top.length) return JSON.stringify({ results: [], message: '知识库中未找到相关内容' })
+      if (!Object.values(embedCache).some(Boolean)) return JSON.stringify({ error: '知识库搜索需要 Embedding API。请在 LLM Providers 中配置 OpenAI、Google 或 OpenRouter key。' })
+      // Filter by relevance threshold, then sort + top N
+      const relevant = allResults.filter(r => ((r.similarity as number) || 0) >= SIM_THRESHOLD)
+      relevant.sort((a, b) => ((b.similarity as number) || 0) - ((a.similarity as number) || 0))
+      const top = relevant.slice(0, limit)
+      if (!top.length) return JSON.stringify({ results: [], message: '知识库中未找到与该问题相关的内容（相似度均低于阈值）。' })
       return JSON.stringify({
         results: top.map(r => ({
           kb:         r.kb_name,
@@ -720,10 +780,340 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       })
     }
 
+    if (name === 'create_automation') {
+      const tid = _reqTenantId || 'default'
+      await dbInsert('automation_rules', {
+        tenant_id:      tid,
+        name:           String(args.name || ''),
+        description:    String(args.description || ''),
+        trigger_type:   String(args.trigger_type || 'schedule'),
+        trigger_config: args.trigger_config || {},
+        action_type:    String(args.action_type || 'dashboard_alert'),
+        action_config:  args.action_config || {},
+        created_by:     'agent',
+        enabled:        true,
+      })
+      return JSON.stringify({ ok: true, message: `规则「${args.name}」已建立并启用。触发方式：${args.trigger_type}，动作：${args.action_type}` })
+    }
+
+    if (name === 'list_automations') {
+      const filters = tenantFilters()
+      if (args.enabled_only) filters['enabled'] = 'eq.true'
+      const rules = await dbGet('automation_rules',
+        'id,name,description,trigger_type,trigger_config,action_type,enabled,last_triggered_at,created_at',
+        filters, 'created_at.desc', 20)
+      return JSON.stringify({ count: (rules as unknown[]).length, rules })
+    }
+
+    if (name === 'toggle_automation') {
+      const ruleId = String(args.rule_id || '')
+      if (!ruleId) return JSON.stringify({ error: 'rule_id required' })
+      const tid = _reqTenantId || 'default'
+      await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${ruleId}&tenant_id=eq.${encodeURIComponent(tid)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ enabled: Boolean(args.enabled), updated_at: new Date().toISOString() }),
+      })
+      return JSON.stringify({ ok: true, message: `规则已${args.enabled ? '启用' : '停用'}` })
+    }
+
+    if (name === 'respond_directly') {
+      // Special sentinel: callAnthropic checks for this prefix to break the tool loop early
+      return `__RESPOND_DIRECTLY__${String(args.response || '')}`
+    }
+
     return JSON.stringify({ error: `Unknown tool: ${name}` })
   } catch (e) {
     return JSON.stringify({ error: (e as Error).message })
   }
+}
+
+// ── Automation helpers ────────────────────────────────────────────
+type AutomationRule = Record<string, unknown>
+type TriggerResult  = { trigger: boolean; data: Record<string, unknown> }
+
+async function checkRuleTrigger(rule: AutomationRule): Promise<TriggerResult> {
+  const cfg = (rule.trigger_config || {}) as Record<string, unknown>
+  const tid = String(rule.tenant_id || 'default')
+
+  if (rule.trigger_type === 'schedule') {
+    const intervalHours = Number(cfg.interval_hours) || 24
+    const lastRun = rule.last_run_at ? new Date(String(rule.last_run_at)) : null
+    if (!lastRun) return { trigger: true, data: { reason: 'first_run' } }
+    const elapsedH = (Date.now() - lastRun.getTime()) / 3600000
+    return { trigger: elapsedH >= intervalHours, data: { elapsed_hours: +elapsedH.toFixed(1), interval_hours: intervalHours } }
+  }
+
+  if (rule.trigger_type === 'threshold') {
+    const metric   = String(cfg.metric   || 'cpl')
+    const operator = String(cfg.operator || 'gt')
+    const value    = Number(cfg.value    || 0)
+    const days     = Number(cfg.days     || 3)
+
+    if (metric === 'cpl') {
+      const dateFrom = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+      const rows = await dbGet('ad_reports', 'starts,amount_spent_myr,results',
+        { tenant_id: `eq.${tid}`, starts: `gte.${dateFrom}` }, 'starts.asc', 500) as Record<string, number|string>[]
+      const byDay: Record<string, { spend: number; results: number }> = {}
+      for (const r of rows) {
+        const day = String(r.starts || '').slice(0, 10)
+        if (!byDay[day]) byDay[day] = { spend: 0, results: 0 }
+        byDay[day].spend   += Number(r.amount_spent_myr) || 0
+        byDay[day].results += Number(r.results) || 0
+      }
+      const entries = Object.values(byDay).slice(-days)
+      const exceeded = entries.filter(d => {
+        const cpl = d.results > 0 ? d.spend / d.results : 0
+        return operator === 'gt' ? cpl > value : operator === 'lt' ? cpl < value : cpl === value
+      })
+      const totalCPL = entries.reduce((s, d) => s + (d.results > 0 ? d.spend / d.results : 0), 0)
+      const avgCPL   = entries.length > 0 ? totalCPL / entries.length : 0
+      return {
+        trigger: exceeded.length >= days,
+        data: { metric: 'cpl', avg_cpl: +avgCPL.toFixed(2), days_exceeded: exceeded.length, required_days: days, threshold: value },
+      }
+    }
+
+    if (metric === 'spend') {
+      const dateFrom = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+      const rows = await dbGet('ad_reports', 'amount_spent_myr',
+        { tenant_id: `eq.${tid}`, starts: `gte.${dateFrom}` }, undefined, 500) as Record<string, number>[]
+      const total   = rows.reduce((s, r) => s + (Number(r.amount_spent_myr) || 0), 0)
+      const exceeded = operator === 'gt' ? total > value : operator === 'lt' ? total < value : total === value
+      return { trigger: exceeded, data: { metric: 'spend', total_spend: +total.toFixed(2), threshold: value } }
+    }
+  }
+
+  if (rule.trigger_type === 'event') {
+    const event    = String(cfg.event || '')
+    const hours    = Number(cfg.hours || 24)
+    const minCount = Number(cfg.min_count || 1)
+
+    if (event === 'uncontacted_leads') {
+      const since = new Date(Date.now() - hours * 3600000).toISOString()
+      // Leads created more than N hours ago (not the most recent window)
+      const rows = await dbGet('leads', 'id,name,created_at',
+        { tenant_id: `eq.${tid}`, created_at: `lte.${since}` },
+        'created_at.desc', 50)
+      return {
+        trigger: (rows as unknown[]).length >= minCount,
+        data: { event: 'uncontacted_leads', count: (rows as unknown[]).length, hours_threshold: hours },
+      }
+    }
+
+    if (event === 'new_leads') {
+      const since = String(rule.last_triggered_at || rule.last_run_at || new Date(Date.now() - 3600000).toISOString())
+      const rows  = await dbGet('leads', 'id', { tenant_id: `eq.${tid}`, created_at: `gte.${since}` }, undefined, 100)
+      return { trigger: (rows as unknown[]).length > 0, data: { event: 'new_leads', count: (rows as unknown[]).length } }
+    }
+  }
+
+  // ── Anomaly: today's value vs 7-day average, trigger on % deviation ──
+  if (rule.trigger_type === 'anomaly') {
+    const metric       = String(cfg.metric        || 'cpl')
+    const deviationPct = Number(cfg.deviation_pct || 50)
+    const direction    = String(cfg.direction     || 'above')  // above|below|either
+
+    const todayStr    = new Date().toISOString().slice(0, 10)
+    const sevenAgoStr = new Date(Date.now() - 8 * 86400000).toISOString().slice(0, 10) // 8d back to exclude today
+
+    const cmpFn = (today: number, avg: number): boolean => {
+      if (avg === 0) return false
+      const pct = ((today - avg) / avg) * 100
+      if (direction === 'above')  return pct > deviationPct
+      if (direction === 'below')  return pct < -deviationPct
+      return Math.abs(pct) > deviationPct
+    }
+
+    if (metric === 'cpl') {
+      const rows = await dbGet('ad_reports', 'starts,amount_spent_myr,results',
+        { tenant_id: `eq.${tid}`, starts: `gte.${sevenAgoStr}` }, 'starts.asc', 500) as Record<string, number|string>[]
+      const byDay: Record<string, { spend: number; results: number }> = {}
+      for (const r of rows) {
+        const day = String(r.starts || '').slice(0, 10)
+        if (!byDay[day]) byDay[day] = { spend: 0, results: 0 }
+        byDay[day].spend   += Number(r.amount_spent_myr) || 0
+        byDay[day].results += Number(r.results) || 0
+      }
+      const todayData   = byDay[todayStr] || { spend: 0, results: 0 }
+      const todayCPL    = todayData.results > 0 ? todayData.spend / todayData.results : 0
+      const pastDays    = Object.entries(byDay).filter(([d]) => d < todayStr)
+      const pastCPLs    = pastDays.map(([, d]) => d.results > 0 ? d.spend / d.results : 0).filter(v => v > 0)
+      const avgCPL      = pastCPLs.length > 0 ? pastCPLs.reduce((a, b) => a + b, 0) / pastCPLs.length : 0
+      const devPct      = avgCPL > 0 ? ((todayCPL - avgCPL) / avgCPL) * 100 : 0
+      return {
+        trigger: cmpFn(todayCPL, avgCPL),
+        data: { metric: 'cpl', today_cpl: +todayCPL.toFixed(2), avg_7d_cpl: +avgCPL.toFixed(2), deviation_pct: +devPct.toFixed(1), threshold_pct: deviationPct },
+      }
+    }
+
+    if (metric === 'spend') {
+      const rows = await dbGet('ad_reports', 'starts,amount_spent_myr',
+        { tenant_id: `eq.${tid}`, starts: `gte.${sevenAgoStr}` }, undefined, 500) as Record<string, number|string>[]
+      const byDay: Record<string, number> = {}
+      for (const r of rows) {
+        const day = String(r.starts || '').slice(0, 10)
+        byDay[day] = (byDay[day] || 0) + (Number(r.amount_spent_myr) || 0)
+      }
+      const todaySpend = byDay[todayStr] || 0
+      const pastSpends = Object.entries(byDay).filter(([d]) => d < todayStr).map(([, v]) => v)
+      const avgSpend   = pastSpends.length > 0 ? pastSpends.reduce((a, b) => a + b, 0) / pastSpends.length : 0
+      const devPct     = avgSpend > 0 ? ((todaySpend - avgSpend) / avgSpend) * 100 : 0
+      return {
+        trigger: cmpFn(todaySpend, avgSpend),
+        data: { metric: 'spend', today_spend: +todaySpend.toFixed(2), avg_7d_spend: +avgSpend.toFixed(2), deviation_pct: +devPct.toFixed(1), threshold_pct: deviationPct },
+      }
+    }
+
+    if (metric === 'leads') {
+      const todayStart  = `${todayStr}T00:00:00.000Z`
+      const todayEnd    = `${todayStr}T23:59:59.999Z`
+      const weekAgoStr  = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+      const [todayRows, pastRows] = await Promise.all([
+        dbGet('leads', 'id', { tenant_id: `eq.${tid}`, created_at: `gte.${todayStart}`, created_at2: `lte.${todayEnd}` }, undefined, 1000),
+        dbGet('leads', 'id,created_at', { tenant_id: `eq.${tid}`, created_at: `gte.${weekAgoStr}T00:00:00.000Z`, created_at2: `lte.${todayStr}T00:00:00.000Z` }, undefined, 5000),
+      ])
+      const todayCount  = (todayRows as unknown[]).length
+      const byDay: Record<string, number> = {}
+      for (const r of pastRows as Record<string, string>[]) {
+        const day = String(r.created_at || '').slice(0, 10)
+        byDay[day] = (byDay[day] || 0) + 1
+      }
+      const pastCounts = Object.values(byDay)
+      const avgCount   = pastCounts.length > 0 ? pastCounts.reduce((a, b) => a + b, 0) / pastCounts.length : 0
+      const devPct     = avgCount > 0 ? ((todayCount - avgCount) / avgCount) * 100 : 0
+      return {
+        trigger: cmpFn(todayCount, avgCount),
+        data: { metric: 'leads', today_count: todayCount, avg_7d_count: +avgCount.toFixed(1), deviation_pct: +devPct.toFixed(1), threshold_pct: deviationPct },
+      }
+    }
+  }
+
+  // ── Pattern: specific day_of_week vs 4-week baseline, trigger on that day ──
+  if (rule.trigger_type === 'pattern') {
+    const metric       = String(cfg.metric        || 'cpl')
+    const dayOfWeek    = Number(cfg.day_of_week   ?? -1)  // 0=Sun … 6=Sat, -1=any
+    const thresholdPct = Number(cfg.threshold_pct || 30)
+    const direction    = String(cfg.direction     || 'above')
+
+    const todayDOW = new Date().getDay()  // 0=Sun … 6=Sat
+    // Only trigger on the specified day (if day_of_week is set)
+    if (dayOfWeek >= 0 && todayDOW !== dayOfWeek) {
+      return { trigger: false, data: { reason: 'not_target_day', today_dow: todayDOW, target_dow: dayOfWeek } }
+    }
+
+    const days28Ago = new Date(Date.now() - 28 * 86400000).toISOString().slice(0, 10)
+    const todayStr  = new Date().toISOString().slice(0, 10)
+
+    if (metric === 'cpl' || metric === 'spend') {
+      const col  = metric === 'cpl' ? 'starts,amount_spent_myr,results' : 'starts,amount_spent_myr'
+      const rows = await dbGet('ad_reports', col,
+        { tenant_id: `eq.${tid}`, starts: `gte.${days28Ago}` }, 'starts.asc', 2000) as Record<string, number|string>[]
+      const byDay: Record<string, { spend: number; results: number }> = {}
+      for (const r of rows) {
+        const day = String(r.starts || '').slice(0, 10)
+        if (!byDay[day]) byDay[day] = { spend: 0, results: 0 }
+        byDay[day].spend   += Number(r.amount_spent_myr) || 0
+        byDay[day].results += Number(r.results)          || 0
+      }
+      const getVal = (d: { spend: number; results: number }) =>
+        metric === 'spend' ? d.spend : (d.results > 0 ? d.spend / d.results : 0)
+
+      const targetDayVals: number[] = []
+      const allVals: number[] = []
+      for (const [day, d] of Object.entries(byDay)) {
+        if (day >= todayStr) continue
+        const v = getVal(d); if (v === 0) continue
+        allVals.push(v)
+        const dow = new Date(day).getDay()
+        if (dayOfWeek < 0 || dow === dayOfWeek) targetDayVals.push(v)
+      }
+      const targetAvg = targetDayVals.length > 0 ? targetDayVals.reduce((a, b) => a + b, 0) / targetDayVals.length : 0
+      const overallAvg = allVals.length > 0 ? allVals.reduce((a, b) => a + b, 0) / allVals.length : 0
+      const devPct     = overallAvg > 0 ? ((targetAvg - overallAvg) / overallAvg) * 100 : 0
+      const triggered  = overallAvg > 0 && (
+        direction === 'above'  ? devPct > thresholdPct  :
+        direction === 'below'  ? devPct < -thresholdPct :
+        Math.abs(devPct) > thresholdPct
+      )
+      return {
+        trigger: triggered,
+        data: { metric, day_of_week: dayOfWeek, target_day_avg: +targetAvg.toFixed(2), overall_avg: +overallAvg.toFixed(2), deviation_pct: +devPct.toFixed(1), threshold_pct: thresholdPct, samples: targetDayVals.length },
+      }
+    }
+
+    if (metric === 'leads') {
+      const rows = await dbGet('leads', 'created_at',
+        { tenant_id: `eq.${tid}`, created_at: `gte.${days28Ago}T00:00:00.000Z` }, undefined, 5000) as Record<string, string>[]
+      const byDay: Record<string, number> = {}
+      for (const r of rows) {
+        const day = String(r.created_at || '').slice(0, 10)
+        byDay[day] = (byDay[day] || 0) + 1
+      }
+      const targetDayVals: number[] = []
+      const allVals: number[] = []
+      for (const [day, count] of Object.entries(byDay)) {
+        if (day >= todayStr) continue
+        allVals.push(count)
+        const dow = new Date(day).getDay()
+        if (dayOfWeek < 0 || dow === dayOfWeek) targetDayVals.push(count)
+      }
+      const targetAvg  = targetDayVals.length > 0 ? targetDayVals.reduce((a, b) => a + b, 0) / targetDayVals.length : 0
+      const overallAvg = allVals.length > 0 ? allVals.reduce((a, b) => a + b, 0) / allVals.length : 0
+      const devPct     = overallAvg > 0 ? ((targetAvg - overallAvg) / overallAvg) * 100 : 0
+      const triggered  = overallAvg > 0 && (
+        direction === 'above'  ? devPct > thresholdPct  :
+        direction === 'below'  ? devPct < -thresholdPct :
+        Math.abs(devPct) > thresholdPct
+      )
+      return {
+        trigger: triggered,
+        data: { metric: 'leads', day_of_week: dayOfWeek, target_day_avg: +targetAvg.toFixed(1), overall_avg: +overallAvg.toFixed(1), deviation_pct: +devPct.toFixed(1), threshold_pct: thresholdPct, samples: targetDayVals.length },
+      }
+    }
+  }
+
+  return { trigger: false, data: {} }
+}
+
+function buildActionMessage(rule: AutomationRule, data: Record<string, unknown>): string {
+  const cfg      = (rule.action_config || {}) as Record<string, unknown>
+  const template = String(cfg.template || '')
+  if (template) {
+    return template
+      .replace(/{date}/g,  new Date().toLocaleDateString('zh-CN'))
+      .replace(/{cpl}/g,   String(data.avg_cpl   || ''))
+      .replace(/{count}/g, String(data.count      || ''))
+      .replace(/{value}/g, String(data.threshold  || cfg.value || ''))
+      .replace(/{days}/g,  String(data.days_exceeded || data.days || ''))
+      .replace(/{spend}/g, String(data.total_spend || ''))
+  }
+  // Default messages
+  if (rule.trigger_type === 'threshold' && data.metric === 'cpl') {
+    return `⚠️ CPL告警 — ${rule.name}\n\n过去 ${data.required_days || ''} 天 CPL 平均：MYR ${data.avg_cpl}\n已连续 ${data.days_exceeded || ''} 天超过目标 MYR ${data.threshold}。\n\n建议检查广告创意和受众设置。`
+  }
+  if (rule.trigger_type === 'event' && data.event === 'uncontacted_leads') {
+    return `📋 跟进提醒 — ${rule.name}\n\n有 ${data.count} 条线索超过 ${data.hours_threshold} 小时未跟进。\n请尽快安排跟进，避免客户流失。`
+  }
+  if (rule.trigger_type === 'schedule') {
+    return `📊 定时报告 — ${rule.name}\n已于 ${new Date().toLocaleString('zh-CN')} 触发执行。`
+  }
+  if (rule.trigger_type === 'anomaly') {
+    const metric = String(data.metric || '')
+    if (metric === 'cpl')   return `🚨 CPL 异常 — ${rule.name}\n今日 CPL：MYR ${data.today_cpl}，较过去7天均值 MYR ${data.avg_7d_cpl} 偏差 ${data.deviation_pct}%。\n建议立即检查广告成效。`
+    if (metric === 'spend') return `🚨 花费异常 — ${rule.name}\n今日花费：MYR ${data.today_spend}，较过去7天均值 MYR ${data.avg_7d_spend} 偏差 ${data.deviation_pct}%。\n建议检查预算设置。`
+    if (metric === 'leads') return `🚨 线索量异常 — ${rule.name}\n今日线索：${data.today_count} 条，较过去7天均值 ${data.avg_7d_count} 偏差 ${data.deviation_pct}%。\n建议检查广告投放状态。`
+  }
+  if (rule.trigger_type === 'pattern') {
+    const DOW_ZH = ['周日','周一','周二','周三','周四','周五','周六']
+    const dow    = Number(data.day_of_week ?? -1)
+    const dowStr = dow >= 0 ? DOW_ZH[dow] : '今天'
+    const metric = String(data.metric || '')
+    if (metric === 'cpl')   return `📈 CPL 周期规律 — ${rule.name}\n${dowStr} CPL 均值 MYR ${data.target_day_avg}，较整体均值 MYR ${data.overall_avg} 偏高 ${data.deviation_pct}%（基于 ${data.samples} 周数据）。`
+    if (metric === 'spend') return `📈 花费周期规律 — ${rule.name}\n${dowStr} 花费均值 MYR ${data.target_day_avg}，较整体均值 MYR ${data.overall_avg} 偏差 ${data.deviation_pct}%（基于 ${data.samples} 周数据）。`
+    if (metric === 'leads') return `📈 线索量周期规律 — ${rule.name}\n${dowStr} 平均 ${data.target_day_avg} 条，较整体均值 ${data.overall_avg} 偏差 ${data.deviation_pct}%（基于 ${data.samples} 周数据）。`
+  }
+  return `🔔 ${rule.name} 已触发（${rule.trigger_type}）`
 }
 
 // ── Notification helper ───────────────────────────────────────────
@@ -836,56 +1226,72 @@ interface AgentRow    { id: string; name: string; system_prompt: string; provide
 //   OpenAI  text-embedding-3-small  (dimensions=768 param)
 //   Google  text-embedding-004      (native 768)
 //   OpenRouter  openai/text-embedding-3-small  (dimensions=768)
-async function getEmbedding(text: string, providers: ProviderRow[]): Promise<number[] | null> {
+// Embedding result carries the model FAMILY so a KB's chunks and its queries
+// always use the same vector space. Families: 'oai768' (OpenAI + OpenRouter, same
+// underlying text-embedding-3-small@768) and 'goo768' (Google text-embedding-004).
+// preferModel pins the family (used when querying a KB that was ingested with a
+// specific model) so cross-model fallback can't silently corrupt similarity.
+interface EmbedResult { vector: number[]; model: string }
+async function getEmbedding(text: string, providers: ProviderRow[], preferModel?: string): Promise<EmbedResult | null> {
   const input = String(text).slice(0, 8000)
+  const want = (fam: string) => !preferModel || preferModel === fam
 
-  // 1. OpenAI
-  const oai = providers.find(p => p.provider === 'openai' && p.active && p.api_key?.trim())
-  if (oai?.api_key) {
-    const r = await fetch('https://api.openai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${oai.api_key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'text-embedding-3-small', input, dimensions: 768 }),
-    })
-    if (r.ok) {
-      const d = await r.json() as { data: [{ embedding: number[] }] }
-      if (d.data?.[0]?.embedding) return d.data[0].embedding
-    }
-    // non-ok (quota etc.) — fall through to next provider
-  }
-
-  // 2. Google text-embedding-004 (native 768 dims)
-  const goo = providers.find(p => p.provider === 'google' && p.active && p.api_key?.trim())
-  if (goo?.api_key) {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${goo.api_key}`,
-      {
+  // oai768 family — OpenAI first, then OpenRouter (identical model). Exhaust this
+  // family before Google so a fallback stays within the same vector space.
+  if (want('oai768')) {
+    const oai = providers.find(p => p.provider === 'openai' && p.active && p.api_key?.trim())
+    if (oai?.api_key) {
+      const r = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT' }),
-      }
-    )
-    if (r.ok) {
-      const d = await r.json() as { embedding?: { values: number[] } }
-      if (d.embedding?.values) return d.embedding.values
+        headers: { Authorization: `Bearer ${oai.api_key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'text-embedding-3-small', input, dimensions: 768 }),
+      })
+      if (r.ok) { const d = await r.json() as { data: [{ embedding: number[] }] }; if (d.data?.[0]?.embedding) return { vector: d.data[0].embedding, model: 'oai768' } }
+    }
+    const or_ = providers.find(p => p.provider === 'openrouter' && p.active && p.api_key?.trim())
+    if (or_?.api_key) {
+      const r = await fetch('https://openrouter.ai/api/v1/embeddings', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${or_.api_key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'openai/text-embedding-3-small', input, dimensions: 768 }),
+      })
+      if (r.ok) { const d = await r.json() as { data: [{ embedding: number[] }] }; if (d.data?.[0]?.embedding) return { vector: d.data[0].embedding, model: 'oai768' } }
     }
   }
 
-  // 3. OpenRouter (proxies OpenAI embedding)
-  const or_ = providers.find(p => p.provider === 'openrouter' && p.active && p.api_key?.trim())
-  if (or_?.api_key) {
-    const r = await fetch('https://openrouter.ai/api/v1/embeddings', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${or_.api_key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'openai/text-embedding-3-small', input, dimensions: 768 }),
-    })
-    if (r.ok) {
-      const d = await r.json() as { data: [{ embedding: number[] }] }
-      if (d.data?.[0]?.embedding) return d.data[0].embedding
+  // goo768 family — Google text-embedding-004 (different vector space)
+  if (want('goo768')) {
+    const goo = providers.find(p => p.provider === 'google' && p.active && p.api_key?.trim())
+    if (goo?.api_key) {
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${goo.api_key}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT' }) }
+      )
+      if (r.ok) { const d = await r.json() as { embedding?: { values: number[] } }; if (d.embedding?.values) return { vector: d.embedding.values, model: 'goo768' } }
     }
   }
 
-  return null  // all providers exhausted / unconfigured
+  return null  // requested family unavailable / all providers exhausted
+}
+
+// Sentence-aware chunker: splits on sentence boundaries (CJK 。！？ + ASCII .!? + newline),
+// then greedily packs sentences into ~size-char chunks with a tail `overlap` carried into
+// the next chunk for context continuity. A single oversized sentence is hard-split.
+function chunkText(text: string, size = 500, overlap = 50): string[] {
+  const sentences = String(text).split(/(?<=[。！？!?\n])/).map(s => s.trim()).filter(Boolean)
+  const out: string[] = []
+  let cur = ''
+  for (const s of sentences) {
+    if (cur && (cur.length + s.length) > size) {
+      out.push(cur)
+      cur = (overlap > 0 ? cur.slice(-overlap) : '') + s
+    } else {
+      cur += (cur ? '' : '') + s
+    }
+    while (cur.length > size * 1.6) { out.push(cur.slice(0, size)); cur = cur.slice(size - overlap) }
+  }
+  if (cur.trim()) out.push(cur)
+  return out.length ? out : [String(text)]
 }
 
 async function loadProviders(): Promise<ProviderRow[]> {
@@ -913,6 +1319,15 @@ async function loadAgentSkills(agentId: string): Promise<string> {
   if (!rows.length) return ''
   return '\n\nLearned skills:\n' + (rows as {skill:string}[]).map(r => `- ${r.skill}`).join('\n')
 }
+async function loadKbContext(): Promise<string> {
+  try {
+    const filters = tenantFilters()
+    const kbs = await dbGet('knowledge_bases', 'id,name,description', filters, undefined, 10) as {id:string; name:string; description?:string}[]
+    if (!kbs.length) return ''
+    const list = kbs.map(kb => `  • ${kb.name}${kb.description ? '（' + kb.description + '）' : ''} [id:${kb.id}]`).join('\n')
+    return `\n\n**知识库（已启用）：**\n${list}\n当用户询问公司产品、服务、政策、SOP、FAQ 或任何专业知识时，请立即调用 search_knowledge_base 工具查询，不要凭记忆作答。`
+  } catch { return '' }
+}
 // \u2500\u2500 Multi-turn history loader \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 async function loadHistory(sessionId: string, limit = 10): Promise<{role:string; content:string}[]> {
   if (!sessionId) return []
@@ -927,7 +1342,8 @@ async function loadHistory(sessionId: string, limit = 10): Promise<{role:string;
 
 // \u2500\u2500 LLM callers with Tool Use \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // Tools available to Hermes (router-only): cannot use sub-agent tools directly
-const HERMES_TOOL_NAMES = new Set(['delegate_to_agent', 'remember', 'learn_gaps', 'learn'])
+const HERMES_TOOL_NAMES = new Set(['delegate_to_agent', 'remember', 'learn_gaps', 'learn',
+  'create_automation', 'list_automations', 'toggle_automation', 'respond_directly'])
 function getActiveTools() {
   const all = TOOL_DEFS
   return _reqHermesMode ? all.filter(t => HERMES_TOOL_NAMES.has(t.name)) : all
@@ -942,6 +1358,8 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
   }
   if (useTools) {
     body.tools = getActiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+    // Force Hermes to always use a tool — prevents fallback to direct text answer without routing
+    if (_reqHermesMode) body.tool_choice = { type: 'any' }
   }
 
   const msgs = [...messages] as Record<string,unknown>[]
@@ -960,11 +1378,15 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
     if (resp.stop_reason === 'tool_use') {
       const toolUseBlocks = (resp.content as Record<string,unknown>[]).filter(b => b.type === 'tool_use')
       msgs.push({ role: 'assistant', content: resp.content })
-      const toolResults = await Promise.all(toolUseBlocks.map(async (b) => ({
-        type: 'tool_result',
-        tool_use_id: b.id,
-        content: await executeTool(String(b.name), (b.input as Record<string,unknown>) || {}),
-      })))
+      const toolResults: { type: string; tool_use_id: unknown; content: string }[] = []
+      for (const b of toolUseBlocks) {
+        const result = await executeTool(String(b.name), (b.input as Record<string,unknown>) || {})
+        // respond_directly: return the response text immediately, skip the rest of the loop
+        if (result.startsWith('__RESPOND_DIRECTLY__')) {
+          return result.slice('__RESPOND_DIRECTLY__'.length)
+        }
+        toolResults.push({ type: 'tool_result', tool_use_id: b.id, content: result })
+      }
       msgs.push({ role: 'user', content: toolResults })
     } else {
       const text = (resp.content as Record<string,unknown>[]).find(b => b.type === 'text')
@@ -2236,7 +2658,11 @@ Return ONLY a valid JSON array, no markdown:
       }
 
       try {
-        const { text } = await callLLM(providers, ugcAgent.provider || defaultProvider, ugcAgent.model || undefined,
+        // Prefer OpenRouter cheap model for UGC (cost ~10x lower than Anthropic)
+        const orProvider = providers.find(p => p.provider === 'openrouter' && p.active && p.api_key?.trim())
+        const ugcProvider = orProvider ? 'openrouter' : (ugcAgent.provider || defaultProvider)
+        const ugcModel = orProvider ? 'google/gemini-flash-1.5' : (ugcAgent.model || undefined)
+        const { text } = await callLLM(providers, ugcProvider, ugcModel,
           sysPrompt, [{ role: 'user', content: userMsg }], false)
         // Strip markdown fences
         const cleaned = text.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim()
@@ -2246,6 +2672,293 @@ Return ONLY a valid JSON array, no markdown:
       } catch(e) {
         return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
+    }
+
+    // ── Automation: run all due rules (called by pg_cron every 15 min) ──
+    if (body.action === 'automation_run') {
+      const tenantFilter: Record<string,string> = { enabled: 'eq.true' }
+      if (body.tenant_id) tenantFilter['tenant_id'] = `eq.${String(body.tenant_id)}`
+      const rules = await dbGet('automation_rules', '*', tenantFilter, undefined, 100) as AutomationRule[]
+      const triggered: string[] = []
+      const errors:    string[] = []
+      const now = new Date().toISOString()
+
+      for (const rule of rules) {
+        try {
+          const { trigger, data } = await checkRuleTrigger(rule)
+          // Always update last_run_at
+          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
+            method: 'PATCH',
+            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ last_run_at: now }),
+          })
+          if (!trigger) continue
+
+          const msg = buildActionMessage(rule, data)
+          const tid = String(rule.tenant_id || 'default')
+
+          // Execute action
+          if (rule.action_type === 'whatsapp_push') {
+            const cfg       = (rule.action_config || {}) as Record<string, string>
+            const recipient = cfg.recipient
+            await sendNotification('whatsapp', msg, recipient)
+          }
+          // Always log (dashboard_alert, chat_message, whatsapp_push all get a log entry)
+          await dbInsert('automation_logs', {
+            rule_id:      rule.id,
+            tenant_id:    tid,
+            trigger_data: data,
+            action_taken: String(rule.action_type || ''),
+            message:      msg,
+            status:       'ok',
+            read:         false,
+          })
+          // Update last_triggered_at
+          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
+            method: 'PATCH',
+            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ last_triggered_at: now }),
+          })
+          triggered.push(String(rule.name || rule.id))
+        } catch(e) {
+          errors.push(`${rule.name}: ${(e as Error).message}`)
+        }
+      }
+      return new Response(
+        JSON.stringify({ ok: true, checked: rules.length, triggered: triggered.length, triggered_names: triggered, errors }),
+        { headers: { ...CORS, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // ── Proactive AI: daily report (called by pg_cron once daily) ──────
+    // Generates an LLM-written daily ops summary per tenant, logs it to
+    // automation_logs (shown in dashboard alert panel), and optionally
+    // pushes via WhatsApp/Email/Telegram if a channel is configured.
+    if (body.action === 'daily_report') {
+      const providers       = await loadProviders()
+      const defaultProvider = await getDefaultProvider()
+      const tenants = body.tenant_id
+        ? [{ id: String(body.tenant_id), name: String(body.tenant_name || '') }]
+        : (await dbGet('tenants', 'id,name', { active: 'eq.true' }) as {id:string;name:string}[])
+      const results: object[] = []
+
+      for (const t of tenants) {
+        const tid = t.id
+        try {
+          // Source: analytics_daily (pre-aggregated by day+campaign, refreshed
+          // daily by pg_cron). Same source as the dashboard analytics tab — no
+          // row-cap issues, and ad spend + lead_count are aligned by date.
+          const rows = await dbGet('analytics_daily', 'date,campaign_name,spend_myr,results,lead_count',
+            { tenant_id: `eq.${tid}` }, 'date.desc', 3000) as Record<string,string|number>[]
+          if (!rows.length) { results.push({ tenant: tid, ok: true, skipped: 'no analytics data' }); continue }
+
+          // Anchor on the latest available date (= today in production).
+          const anchorStr = String(rows[0].date).slice(0,10)
+          const anchor    = new Date(anchorStr + 'T00:00:00Z')
+
+          // Bucket by day; aggregate per-campaign for the anchor day only
+          const byDay: Record<string,{spend:number;results:number;leads:number}> = {}
+          const campAgg: Record<string,{spend:number;results:number}> = {}
+          for (const r of rows) {
+            const day = String(r.date || '').slice(0,10)
+            if (!byDay[day]) byDay[day] = { spend:0, results:0, leads:0 }
+            byDay[day].spend   += Number(r.spend_myr)   || 0
+            byDay[day].results += Number(r.results)     || 0
+            byDay[day].leads   += Number(r.lead_count)  || 0
+            if (day === anchorStr) {
+              const c = String(r.campaign_name || '未知')
+              if (!campAgg[c]) campAgg[c] = { spend:0, results:0 }
+              campAgg[c].spend   += Number(r.spend_myr) || 0
+              campAgg[c].results += Number(r.results)   || 0
+            }
+          }
+
+          const avg = (arr:number[]) => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0
+          const priorDays = Array.from({length:7}, (_,i)=> new Date(anchor.getTime()-(i+1)*86400000).toISOString().slice(0,10))
+          const todaySpend   = byDay[anchorStr]?.spend   || 0
+          const todayResults = byDay[anchorStr]?.results || 0
+          const todayLeads   = byDay[anchorStr]?.leads   || 0
+          const todayCpl     = todayResults > 0 ? todaySpend / todayResults : 0
+          const avgSpend     = avg(priorDays.map(d => byDay[d]?.spend || 0))
+          const avgLeads     = avg(priorDays.map(d => byDay[d]?.leads || 0))
+          const avgCpl       = avg(priorDays.map(d => { const a = byDay[d]; return a && a.results > 0 ? a.spend/a.results : 0 }).filter(v => v > 0))
+
+          const campList = Object.entries(campAgg)
+            .map(([name,v]) => ({ name, spend:+v.spend.toFixed(0), results:v.results, cpl: v.results > 0 ? +(v.spend/v.results).toFixed(2) : 0 }))
+            .filter(c => c.results > 0).sort((a,b) => a.cpl - b.cpl)
+
+          const pct = (today:number, a:number) => a > 0 ? +(((today-a)/a)*100).toFixed(0) : 0
+          const digest = {
+            报告日期: anchorStr,
+            今日: { 新线索: todayLeads, 花费MYR: +todaySpend.toFixed(0), 结果数: todayResults, CPL_MYR: +todayCpl.toFixed(2) },
+            过去7天均值: { 新线索: +avgLeads.toFixed(1), 花费MYR: +avgSpend.toFixed(0), CPL_MYR: +avgCpl.toFixed(2) },
+            环比: { 线索: `${pct(todayLeads,avgLeads)}%`, 花费: `${pct(todaySpend,avgSpend)}%`, CPL: `${pct(todayCpl,avgCpl)}%` },
+            最佳campaign: campList[0] || null,
+            最差campaign: campList.length > 1 ? campList[campList.length-1] : null,
+          }
+
+          const system = `你是资深运营分析助理。根据提供的数据生成「每日运营摘要」，用中文，简洁专业。严格按以下四部分输出（每部分用 emoji 标题开头）：\n📊 Leads 动态\n💰 广告成效\n🚨 异常提醒（仅在确有异常时列出，否则写"无明显异常"）\n✅ 行动建议（2-3 条具体可执行）\n要求：只使用提供的数字，绝不编造；每条一句话；CPL/花费带 MYR 单位。`
+          const { text } = await callLLM(providers, defaultProvider, null, system,
+            [{ role:'user', content: `数据（JSON）：\n${JSON.stringify(digest, null, 2)}` }])
+
+          const message = `📋 每日运营摘要（${anchorStr}）\n\n${text}`
+          await dbInsert('automation_logs', {
+            rule_id: null, tenant_id: tid, trigger_data: digest,
+            action_taken: 'daily_report', message, status: 'ok', read: false,
+          })
+
+          // Channel-ready delivery — silent no-op if credentials are missing
+          const channel = String(body.channel || '')
+          if (channel === 'whatsapp' || channel === 'email' || channel === 'telegram') {
+            await sendNotification(channel, message, body.recipient ? String(body.recipient) : undefined)
+          }
+          results.push({ tenant: tid, ok: true, date: anchorStr })
+        } catch(e) {
+          results.push({ tenant: tid, error: (e as Error).message })
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, reports: results }),
+        { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Bookings CRUD (成交/营收记录) ───────────────────────────────────
+    if (body.action === 'booking_crud') {
+      const tid = _reqTenantId || (body.tenant_id ? String(body.tenant_id) : null)
+      const m = String(body.method || 'list')
+
+      if (m === 'create') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const row = await dbInsertReturning('bookings', {
+          tenant_id:       tid,
+          lead_id:         d.lead_id || null,
+          campaign_source: d.campaign_source || null,
+          customer_name:   d.customer_name || null,
+          amount_myr:      Number(d.amount_myr) || 0,
+          service_type:    d.service_type || null,
+          status:          d.status || 'won',
+          booked_at:       d.booked_at || new Date().toISOString(),
+          notes:           d.notes || null,
+        })
+        return new Response(JSON.stringify({ ok: true, booking: row }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'list') {
+        const filt: Record<string,string> = {}
+        if (tid) filt['tenant_id'] = `eq.${tid}`
+        const rows = await dbGet('bookings', '*', filt, 'booked_at.desc', 200)
+        return new Response(JSON.stringify({ ok: true, bookings: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const bid = String(body.booking_id || '')
+        const tFilter = tid ? `&tenant_id=eq.${encodeURIComponent(tid)}` : ''
+        if (bid) await fetch(`${SUPABASE_URL}/rest/v1/bookings?id=eq.${bid}${tFilter}`, {
+          method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
+        })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Channel funnel metrics (CAC / 转化率 / ROAS / LTV:CAC) ──────────
+    // Combines real Leads (by campaign_source) + real Customers/Value
+    // (from bookings) via the channel_funnel RPC, then layers optional Spend
+    // and a gross-margin factor to derive the marketing economics.
+    if (body.action === 'channel_metrics') {
+      // tenant optional — null aggregates across all data (matches leads/analytics views)
+      const tid = _reqTenantId || (body.tenant_id ? String(body.tenant_id) : null)
+      const p_from = body.from ? String(body.from) : '-infinity'
+      const p_to   = body.to   ? String(body.to)   : 'infinity'
+
+      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/channel_funnel`, {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_tenant: tid, p_from, p_to }),
+      }).then(r => r.ok ? r.json() : []).catch(() => []) as {source:string;leads:number;customers:number;value:number}[]
+
+      const spendBy   = (body.spend_by_source || {}) as Record<string, number>
+      const marginPct = Number(body.margin_pct ?? 100) / 100   // 默认 100% = 营收口径
+      const ltvPer    = body.ltv_per_customer != null ? Number(body.ltv_per_customer) : null
+
+      const channels = rows.map(r => {
+        const leads     = Number(r.leads) || 0
+        const customers = Number(r.customers) || 0
+        const value     = Number(r.value) || 0
+        const spend     = Number(spendBy[r.source] || 0)
+        const conv      = leads > 0 ? +(customers / leads * 100).toFixed(1) : 0
+        const cac       = customers > 0 && spend > 0 ? +(spend / customers).toFixed(2) : null
+        const roas      = spend > 0 ? +(value / spend).toFixed(2) : null
+        const avgOrder  = customers > 0 ? +(value / customers).toFixed(2) : 0
+        // LTV:CAC — only when an LTV-per-customer estimate is supplied; apply margin
+        const ltvCac    = (ltvPer != null && cac != null && cac > 0) ? +((ltvPer * marginPct) / cac).toFixed(2) : null
+        return { source: r.source, leads, customers, value, spend, conversion_pct: conv, cac, roas, avg_order: avgOrder, ltv_cac: ltvCac }
+      })
+
+      const tot = channels.reduce((a, c) => ({
+        leads: a.leads + c.leads, customers: a.customers + c.customers,
+        value: a.value + c.value, spend: a.spend + c.spend,
+      }), { leads: 0, customers: 0, value: 0, spend: 0 })
+      const totals = {
+        ...tot,
+        conversion_pct: tot.leads > 0 ? +(tot.customers / tot.leads * 100).toFixed(1) : 0,
+        cac:  tot.customers > 0 && tot.spend > 0 ? +(tot.spend / tot.customers).toFixed(2) : null,
+        roas: tot.spend > 0 ? +(tot.value / tot.spend).toFixed(2) : null,
+        avg_order: tot.customers > 0 ? +(tot.value / tot.customers).toFixed(2) : 0,
+        ltv_cac: (ltvPer != null && tot.customers > 0 && tot.spend > 0)
+          ? +((ltvPer * marginPct) / (tot.spend / tot.customers)).toFixed(2) : null,
+      }
+      return new Response(JSON.stringify({ ok: true, channels, totals, margin_pct: marginPct * 100, ltv_per_customer: ltvPer }),
+        { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Automation CRUD (dashboard API) ───────────────────────────────
+    if (body.action === 'automation_crud') {
+      const { method: crudMethod, rule_id, data: crudData } = body
+      const tid = _reqTenantId || String(body.tenant_id || 'default')
+
+      if (crudMethod === 'list') {
+        const rules = await dbGet('automation_rules',
+          'id,name,description,trigger_type,trigger_config,action_type,action_config,enabled,last_run_at,last_triggered_at,created_by,created_at',
+          { tenant_id: `eq.${tid}` }, 'created_at.desc', 50)
+        return new Response(JSON.stringify({ ok: true, rules }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'create') {
+        await dbInsert('automation_rules', { ...(crudData as object || {}), tenant_id: tid })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'update') {
+        if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
+          method: 'PATCH',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ ...(crudData as object || {}), updated_at: new Date().toISOString() }),
+        })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'delete') {
+        if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
+          method: 'DELETE',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+        })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'get_logs') {
+        const logFilters: Record<string,string> = { tenant_id: `eq.${tid}` }
+        if (rule_id) logFilters['rule_id'] = `eq.${String(rule_id)}`
+        const logs = await dbGet('automation_logs',
+          'id,rule_id,triggered_at,action_taken,message,status,read',
+          logFilters, 'triggered_at.desc', 50)
+        return new Response(JSON.stringify({ ok: true, logs }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'mark_read') {
+        if (!rule_id) return new Response(JSON.stringify({ error: 'log_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await fetch(`${SUPABASE_URL}/rest/v1/automation_logs?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
+          method: 'PATCH',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ read: true }),
+        })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'invalid method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     if (body.action === 'learn') {
@@ -2683,9 +3396,9 @@ Return ONLY a valid JSON array, no markdown:
       const { text: embedText } = body
       if (!embedText) return new Response(JSON.stringify({ error: 'text required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      const embedding = await getEmbedding(String(embedText), providers)
-      if (!embedding) return new Response(JSON.stringify({ error: 'Embedding failed: no provider available (OpenAI/Google/OpenRouter)' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
-      return new Response(JSON.stringify({ embedding }), { headers:{...CORS,'Content-Type':'application/json'} })
+      const er = await getEmbedding(String(embedText), providers)
+      if (!er) return new Response(JSON.stringify({ error: 'Embedding failed: no provider available (OpenAI/Google/OpenRouter)' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      return new Response(JSON.stringify({ embedding: er.vector, model: er.model }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── RAG: ingest document chunks ─────────────────────────────────
@@ -2693,28 +3406,54 @@ Return ONLY a valid JSON array, no markdown:
       const { kb_id, source_name, content: rawContent } = body
       if (!kb_id || !rawContent) return new Response(JSON.stringify({ error:'kb_id and content required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      // Split into ~500-char chunks
+      const src = String(source_name || 'upload')
+
+      // Dedup: replace any existing chunks for this (kb_id, source) so re-ingesting
+      // the same document updates rather than duplicates.
+      await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks?kb_id=eq.${kb_id}&source_name=eq.${encodeURIComponent(src)}`, {
+        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
+      })
+
+      // Sentence-aware chunking: pack sentences into ~500-char chunks (50 overlap)
+      // so chunks break on natural boundaries (。！？.!?\n) instead of mid-word.
       const text = String(rawContent)
-      const chunks: string[] = []
-      const chunkSize = 500, overlap = 50
-      for (let i = 0; i < text.length; i += chunkSize - overlap) chunks.push(text.slice(i, i + chunkSize))
-      // Embed all chunks using fallback chain
+      const chunks: string[] = chunkText(text, 500, 50)
+      if (!chunks.length) return new Response(JSON.stringify({ ok:true, chunks:0, saved:0, errors:[] }), { headers:{...CORS,'Content-Type':'application/json'} })
+
+      // Lock a single embedding model for the whole KB. Use the KB's existing model
+      // if set; otherwise embed chunk 0 to determine it, then pin every chunk to it —
+      // this guarantees all chunks (and later queries) share one vector space.
+      const kbRows = await dbGet('knowledge_bases', 'embed_model', { id: `eq.${kb_id}` }) as {embed_model?:string}[]
+      let kbModel = kbRows[0]?.embed_model || ''
+      let firstVec: number[] | null = null
+      if (!kbModel) {
+        const f = await getEmbedding(chunks[0], providers)
+        if (!f) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+        kbModel = f.model; firstVec = f.vector
+      }
+
       const errs: string[] = []
       const results = await Promise.all(chunks.map(async (chunk, idx) => {
-        const embedding = await getEmbedding(chunk, providers)
-        if (!embedding) { errs.push(`embed_${idx}:all_providers_failed`); return null }
-        // pgvector via PostgREST requires string format "[n1,n2,...]"
-        const embeddingStr = `[${embedding.join(',')}]`
+        let vec: number[]
+        if (idx === 0 && firstVec) { vec = firstVec }
+        else {
+          const er = await getEmbedding(chunk, providers, kbModel)   // pinned model
+          if (!er) { errs.push(`embed_${idx}:failed`); return null }
+          vec = er.vector
+        }
+        const embeddingStr = `[${vec.join(',')}]`
         const ir = await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks`, {
           method: 'POST',
           headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ kb_id, source_name: source_name||'upload', chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId }),
+          body: JSON.stringify({ kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId }),
         })
         if (!ir.ok) { errs.push(`insert_${idx}:${ir.status}:${await ir.text()}`); return null }
         return true
       }))
       const saved = results.filter(r => r === true).length
-      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved, errors: errs }), { headers:{...CORS,'Content-Type':'application/json'} })
+      // Record the locked model on the KB (first ingest)
+      if (!kbRows[0]?.embed_model && kbModel) await dbPatch('knowledge_bases', String(kb_id), { embed_model: kbModel })
+      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved, model: kbModel, errors: errs }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── RAG: semantic search ─────────────────────────────────────────
@@ -2722,13 +3461,15 @@ Return ONLY a valid JSON array, no markdown:
       const { kb_id, query, limit: kLimit } = body
       if (!kb_id || !query) return new Response(JSON.stringify({ error:'kb_id and query required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const providers = await loadProviders()
-      const qEmbed = await getEmbedding(String(query).slice(0, 500), providers)
-      if (!qEmbed) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      // Pin query embedding to the KB's model so vectors are comparable
+      const kbRows = await dbGet('knowledge_bases', 'embed_model', { id: `eq.${kb_id}` }) as {embed_model?:string}[]
+      const er = await getEmbedding(String(query).slice(0, 500), providers, kbRows[0]?.embed_model || undefined)
+      if (!er) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       const n = Math.min(Number(kLimit)||5, 20)
       const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
         method:'POST',
         headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ query_embedding: qEmbed, match_kb_id: kb_id, match_count: n }),
+        body: JSON.stringify({ query_embedding: er.vector, match_kb_id: kb_id, match_count: n }),
       }).then(res => res.ok ? res.json() : [])
       return new Response(JSON.stringify({ results: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
@@ -3126,14 +3867,29 @@ Return ONLY a valid JSON array, no markdown:
       let sagent: AgentRow
       if (sta) sagent = sagents.find((a:AgentRow) => a.id === sta) ?? sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
       else     sagent = sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
-      const [shistory, sskillText] = await Promise.all([loadHistory(sid2, 10), loadAgentSkills(sagent.id)])
+
+      // ── Smart pre-routing (same logic as non-streaming path) ──────────
+      let sroutedDirectly = false
+      if (sagent.id === 'chat' && !sPromptOverride) {
+        const skwAgent = keywordRoute(smsg || '', sagents)
+        if (skwAgent) {
+          sagent = skwAgent
+          sroutedDirectly = true
+          _reqDelegatedId = skwAgent.id
+          _reqDelegatedName = skwAgent.name || skwAgent.id
+        }
+      }
+
+      const [shistory, sskillText, skbCtx] = await Promise.all([loadHistory(sid2, 10), loadAgentSkills(sagent.id), loadKbContext()])
       const sSubAgents = sagents.filter((a:AgentRow) => a.active && a.id !== 'chat')
       const sAgentList = sSubAgents.map((a:AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
       const sHermesInject = sagent.id === 'chat'
-        ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${sAgentList}\n\n委托规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n4. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n5. 每次委托后阅读结果，再决定是否需要下一步委托。\n6. 综合完毕后用中文给出清晰结论，不让用户二次追问。`
-        : ''
+        ? `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${sAgentList}\n\n**关键词路由表（见到这些词 → 立即委托，不思考）：**\n- 线索/leads/新客/潜在客/跟进/转化/CRM/客户数量 → crm\n- 广告/花费/CPL/CPR/投放/成效/预算/ROAS/campaign/ad_report → account\n- 代码/bug/报错/debug/程序/开发/API/函数 → code\n\n委托规则：\n1. 只要用户问题含上述关键词，必须立刻委托对应 Agent，不得自行作答。\n2. 即使问题只有几个字（如"最近新线索？"），只要包含关键词，也必须委托。\n3. 只有纯粹的闲聊（"你好"、"谢谢"）或系统问题（"你是谁"）才自己回答。\n4. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n5. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n6. 每次委托后阅读结果，再决定是否需要下一步委托。\n7. 综合完毕后用中文给出清晰结论，不让用户二次追问。`
+        : sroutedDirectly
+          ? `\n\n**[系统上下文]** 你是被调度系统直接分配的专项 Agent。用户原始问题：${smsg}\n请基于对话历史给出专业回答。`
+          : ''
       const sTodayStr = new Date().toISOString().slice(0, 10)
-      const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + `\n\n**今天日期：${sTodayStr}**（所有查询默认以此为基准）` + (SOUL ? '\n\n' + SOUL : '') + sskillText
+      const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + `\n\n**今天日期：${sTodayStr}**（所有查询默认以此为基准）` + (SOUL ? '\n\n' + SOUL : '') + sskillText + skbCtx
       const suseTools = DATA_AGENTS.has(sagent.id) || !!sagent.uses_tools
       _reqHermesMode = (sagent.id === 'chat')   // restrict Hermes to delegate_to_agent only
       const smessages: {role:string;content:string}[] = [...shistory, { role:'user', content:smsg }]
@@ -3242,8 +3998,10 @@ Return ONLY a valid JSON array, no markdown:
     // keywordRoute() matches Chinese/English keywords deterministically.
     // Reliable, instant, no rate-limit risk. Falls back to Hermes only for
     // pure chat, meta questions, or truly ambiguous requests.
+    // Also applies when user explicitly targets 'chat' — that means they want
+    // Hermes to coordinate, so keyword routing should still fire.
     let routedDirectly = false
-    if (!target_agent && agent.id === 'chat' && !promptOverride) {
+    if (agent.id === 'chat' && !promptOverride) {
       const kwAgent = keywordRoute(message, agents)
       if (kwAgent) {
         agent = kwAgent
@@ -3253,10 +4011,11 @@ Return ONLY a valid JSON array, no markdown:
       }
     }
 
-    // A: load history + skills in parallel
-    const [history, skillText] = await Promise.all([
+    // A: load history + skills + KB context in parallel
+    const [history, skillText, kbCtx] = await Promise.all([
       loadHistory(sid, 10),
       loadAgentSkills(agent.id),
+      loadKbContext(),
     ])
 
     // Build dynamic agent list for Hermes system prompt (only when Hermes handles directly)
@@ -3266,14 +4025,15 @@ Return ONLY a valid JSON array, no markdown:
     if (agent.id === 'chat') {
       const subAgents = agents.filter((a: AgentRow) => a.active && a.id !== 'chat')
       const agentList = subAgents.map((a: AgentRow) => `- ${a.id}：${a.name}${(a as AgentRow & {description?:string}).description ? '（' + (a as AgentRow & {description?:string}).description + '）' : ''}`).join('\n')
-      const hermesInject = `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${agentList}\n\n委托规则：\n1. 凡是上述 Agent 职责范围内的请求，必须委托，不得自己回答。\n2. 只有纯粹的闲聊、系统问题、无法判断归属时才自己回答。\n3. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n4. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n5. 每次委托后阅读结果，再决定是否需要下一步委托。\n6. 综合完毕后用中文给出清晰结论，不让用户二次追问。`
+      const hermesInject = `\n\n**专项 Agent 列表（必须通过 delegate_to_agent 工具调用）：**\n${agentList}\n\n**关键词路由表（见到这些词 → 立即委托，不思考）：**\n- 线索/leads/新客/潜在客/跟进/转化/CRM/客户数量 → crm\n- 广告/花费/CPL/CPR/投放/成效/预算/ROAS/campaign/ad_report → account\n- 代码/bug/报错/debug/程序/开发/API/函数 → code\n\n委托规则：\n1. 只要用户问题含上述关键词，必须立刻委托对应 Agent，不得自行作答。\n2. 即使问题只有几个字（如"最近新线索？"），只要包含关键词，也必须委托。\n3. 只有纯粹的闲聊（"你好"、"谢谢"）或系统问题（"你是谁"）才自己回答。\n4. 宁可委托错了再说，也不要自己尝试完成专项任务。\n\n跨域分析规则：\n5. 如果问题同时涉及 leads/客户数据 AND 广告花费/CPL/成效，先委托 crm agent，再委托 account agent，最后自己综合输出结论。\n6. 每次委托后阅读结果，再决定是否需要下一步委托。\n7. 综合完毕后用中文给出清晰结论，不让用户二次追问。\n\n**自动化助手能力（直接使用，无需委托）：**\n- 当用户描述重复性痛点、说"每次都..."、"经常..."、"老是..."、"烦死了"等，主动问：「要不要我帮你设一个自动规则？」\n- 用 create_automation 工具建立规则，不需要跳转页面，对话里直接完成\n- 建规则前先确认：触发条件（什么情况触发）、动作（做什么）、频率\n- 建好后向用户回报规则摘要，包含触发条件和动作类型\n- 用 list_automations 查看所有规则；用 toggle_automation 启用/停用\n- 支持触发类型：schedule（定时）、threshold（指标超标，如 CPL > 15）、event（事件，如线索超 24h 未跟进）\n- 支持动作：dashboard_alert（Dashboard 预警）、chat_message（对话中推送）、whatsapp_push（WhatsApp 通知，需先配置凭证）`
       system = (agent.system_prompt || 'You are a helpful assistant.') + hermesInject + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText
+      // Hermes itself doesn't search KB directly — it delegates to sub-agents who will
     } else {
-      // Sub-agent: inject today's date + soul, no Hermes routing instructions
+      // Sub-agent: inject today's date + soul + KB context
       const hermesCtx = routedDirectly
         ? `\n\n**[系统上下文]** 你是被调度系统直接分配的专项 Agent。用户原始问题：${message}\n请基于对话历史给出专业回答。`
         : ''
-      system = (promptOverride || agent.system_prompt || 'You are a helpful assistant.') + hermesCtx + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText
+      system = (promptOverride || agent.system_prompt || 'You are a helpful assistant.') + hermesCtx + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText + kbCtx
     }
     const useTools = DATA_AGENTS.has(agent.id) || !!agent.uses_tools
     _reqHermesMode = (agent.id === 'chat')   // restrict Hermes to delegate_to_agent only
