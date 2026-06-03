@@ -475,8 +475,7 @@ async function createTenant() {
   const errEl = document.getElementById('createTenantErr')
   if (!name) { errEl.textContent = '客户名称必填'; return }
   errEl.textContent = '创建中…'
-  const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(orchBody({ action:'create_tenant', name, contact_name, contact_email })) })
+  const r = await apiRaw({ action:'create_tenant', name, contact_name, contact_email })
   const d = await r.json()
   if (d.ok) {
     document.getElementById('createTenantModal').style.display = 'none'
@@ -485,8 +484,7 @@ async function createTenant() {
   } else { errEl.textContent = d.error || '创建失败' }
 }
 async function toggleTenant(id, active) {
-  const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(orchBody({ action:'update_tenant', tenant_id: id, active })) })
+  const r = await apiRaw({ action:'update_tenant', tenant_id: id, active })
   const d = await r.json()
   if (d.ok) { toast(active?'已启用':'已停用', 'success'); loadTenantsPage() }
   else toast(d.error||'操作失败', 'error')
@@ -680,16 +678,13 @@ async function submitDocUpload() {
     pageLoaded['review'] = false
     loadDocs()
     // 异步推送通知（不阻塞主流程）
-    fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({
+    apiRaw({
         action:'notify_doc_reviewers',
         doc_id: doc.id,
         doc_title: title,
         uploaded_by: _session.email || null,
         reviewers: _docReviewers
-      }))
-    }).then(r=>r.json()).then(d=>{
+      }).then(r=>r.json()).then(d=>{
       if (d.sent > 0) toast(`已通知 ${d.sent} 位审批人`, 'info')
     }).catch(()=>{})
   } catch(e) {
@@ -802,16 +797,13 @@ async function makeDocDecision(reviewerId, decision) {
   if (_currentDoc?.uploaded_by && _currentDoc.uploaded_by !== _session.email) {
     const revRow = document.querySelector(`[id^="cmt_${reviewerId}"]`)
     const revName = revRow?.closest('[style*="border:1px solid #e5e5e5"]')?.querySelector('[style*="font-weight:600"]')?.textContent || _session.email || '审批人'
-    fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({
+    apiRaw({
         action:'notify_doc_decision',
         doc_title: _currentDoc.title,
         decision,
         reviewer_name: revName,
         uploaded_by: _currentDoc.uploaded_by
-      }))
-    }).catch(()=>{})
+      }).catch(()=>{})
   }
 }
 
@@ -855,8 +847,7 @@ async function deleteDoc() {
 
 // ── Agent Version History ─────────────────────────────────────────────
 async function showAgentVersions(agentId) {
-  const res = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ action:'list_agent_versions', agent_id: agentId }) }).then(r=>r.json())
+  const res = await apiRaw({ action:'list_agent_versions', agent_id: agentId }).then(r=>r.json())
   const versions = res.versions || []
   if (!versions.length) { toast('暂无版本历史', 'info'); return }
   const html = `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:300;display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)this.remove()">
@@ -877,8 +868,7 @@ async function showAgentVersions(agentId) {
 }
 async function restoreAgentVersion(agentId, version, overlay) {
   if (!confirm(`确定恢复 v${version}？当前 Prompt 将被覆盖。`)) return
-  const res = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ action:'restore_agent_version', agent_id: agentId, version }) }).then(r=>r.json())
+  const res = await apiRaw({ action:'restore_agent_version', agent_id: agentId, version }).then(r=>r.json())
   if (res.ok) { toast('已恢复 v'+version,'success'); overlay?.remove(); await loadAgents() }
   else toast(res.error||'恢复失败','error')
 }
@@ -1472,10 +1462,7 @@ async function ingestDoc(kbId) {
   if (!content) { if (msg) { msg.style.color='#ef4444'; msg.textContent='请填写文档内容' }; return }
   if (msg) { msg.style.color='#aaa'; msg.textContent='处理中…' }
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'kb_ingest', kb_id:kbId, source_name:title, content }))
-    })
+    const r = await apiRaw({ action:'kb_ingest', kb_id:kbId, source_name:title, content })
     const d = await r.json()
     if (!d.ok) throw new Error(d.error || '录入失败')
     if (msg) { msg.style.color='#22c55e'; msg.textContent=`&#x2713; 已拆分 ${d.chunks||''} 块并向量化` }
@@ -1493,10 +1480,7 @@ async function searchKb(kbId) {
   if (!query || !result) return
   result.innerHTML = '<p style="color:var(--ink-5);font-size:12px">搜索中…</p>'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'kb_search', kb_id:kbId, query, limit:5 }))
-    })
+    const r = await apiRaw({ action:'kb_search', kb_id:kbId, query, limit:5 })
     const d = await r.json()
     if (d.error) throw new Error(d.error)
     const items = d.results || []
@@ -1570,9 +1554,7 @@ async function loadAlertRules() {
   if (!el) return
   el.innerHTML = '<p style="color:var(--ink-5);font-size:12px;padding:8px">加载中…</p>'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'automation_crud', method:'list' })) })
+    const r = await apiRaw({ action:'automation_crud', method:'list' })
     const d = await r.json()
     const rules = d.rules || []
     el.innerHTML = rules.length
@@ -1594,9 +1576,7 @@ async function loadAlertRules() {
 }
 
 async function toggleAutoRule(ruleId, enabled) {
-  const r = await fetch(EDGE_URL, { method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-    body: JSON.stringify(orchBody({ action:'automation_crud', method:'update', rule_id: ruleId, data:{ enabled } })) })
+  const r = await apiRaw({ action:'automation_crud', method:'update', rule_id: ruleId, data:{ enabled } })
   const d = await r.json()
   if (d.ok) { toast(enabled ? '规则已启用' : '规则已停用', 'success'); loadAlertRules() }
   else toast(d.error||'操作失败', 'error')
@@ -1604,9 +1584,7 @@ async function toggleAutoRule(ruleId, enabled) {
 
 async function deleteAutoRule(ruleId) {
   if (!confirm('确定删除此自动化规则？')) return
-  const r = await fetch(EDGE_URL, { method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-    body: JSON.stringify(orchBody({ action:'automation_crud', method:'delete', rule_id: ruleId })) })
+  const r = await apiRaw({ action:'automation_crud', method:'delete', rule_id: ruleId })
   const d = await r.json()
   if (d.ok) { toast('规则已删除', 'success'); loadAlertRules() }
   else toast(d.error||'删除失败', 'error')
@@ -1635,9 +1613,7 @@ async function loadAlertHistory() {
 }
 
 async function markLogRead(logId) {
-  await fetch(EDGE_URL, { method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-    body: JSON.stringify(orchBody({ action:'automation_crud', method:'mark_read', rule_id: logId })) })
+  await apiRaw({ action:'automation_crud', method:'mark_read', rule_id: logId })
   loadAlertHistory()
 }
 
@@ -1682,13 +1658,10 @@ async function saveAlertRule() {
   }
   if (msg) { msg.className = 'status-txt'; msg.textContent = '保存中…' }
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'automation_crud', method:'create', data:{
+    const r = await apiRaw({ action:'automation_crud', method:'create', data:{
         name, trigger_type: triggerType, trigger_config,
         action_type: actionType, action_config: {}, enabled: true, created_by: 'user',
-      }}))
-    })
+      }})
     const d = await r.json()
     if (!d.ok) throw new Error(d.error||'保存失败')
     if (msg) { msg.className = 'status-txt ok'; msg.textContent = '✓ 规则已添加' }
@@ -1705,10 +1678,7 @@ async function saveAlertRule() {
 async function checkAlertsNow() {
   toast('触发检测中…', 'info')
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'automation_run', tenant_id: _session?.tenant_id || undefined }))
-    })
+    const r = await apiRaw({ action:'automation_run', tenant_id: _session?.tenant_id || undefined })
     const d = await r.json()
     toast(d.ok ? `检测完成，触发 ${d.triggered||0} 条规则` : (d.error||'检测失败'), d.ok ? 'success' : 'error')
     if (d.ok) loadAlertHistory()

@@ -144,8 +144,7 @@ async function aeProviderChanged(preselect) {
   if (!provider) { modelSel.innerHTML = '<option value="">（Provider 默认）</option>'; return }
   modelSel.innerHTML = '<option value="" disabled selected>获取中…</option>'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ action:'list_models', provider }) })
+    const r = await apiRaw({ action:'list_models', provider })
     const { models } = await r.json()
     modelSel.innerHTML = '<option value="">（Provider 默认）</option>' +
       (models||[]).map(m => `<option value="${esc(m)}"${m===preselect?' selected':''}>${esc(m)}</option>`).join('')
@@ -176,8 +175,7 @@ async function aeTestSend() {
   msgs.appendChild(bubble)
   msgs.scrollTop = msgs.scrollHeight
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ message: msg, session_id: _aeTestConvId, target_agent: agentId, system_prompt_override: document.getElementById('aePrompt')?.value || undefined, stream: true })) })
+    const r = await apiRaw({ message: msg, session_id: _aeTestConvId, target_agent: agentId, system_prompt_override: document.getElementById('aePrompt')?.value || undefined, stream: true })
     if (!r.ok || !r.body) {
       const data = await r.json().catch(() => ({}))
       _aeTestConvId = data.session_id || _aeTestConvId
@@ -244,9 +242,7 @@ async function saveAgent() {
   const {error} = await db.from('agents').update(data).eq('id', id)
   if (error) { msg.className = 'ae-save-msg err'; msg.textContent = error.message; return }
   // Auto-save version history
-  fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ action:'save_agent_version', agent_id:id, system_prompt:data.system_prompt, provider:data.provider, model:data.model, note:'Auto-saved on edit' })
-  }).catch(()=>{})
+  apiRaw({ action:'save_agent_version', agent_id:id, system_prompt:data.system_prompt, provider:data.provider, model:data.model, note:'Auto-saved on edit' }).catch(()=>{})
   msg.className = 'ae-save-msg ok'; msg.textContent = '✓ 已保存'
   delete _pageCache['agents']
   const li = document.getElementById('ali-'+id)

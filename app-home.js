@@ -14,9 +14,7 @@ async function loadChannelMetrics() {
   const ltv    = +(document.getElementById('cacLtv')?.value)    || 0
   body.innerHTML = '<tr><td style="padding:30px;text-align:center;color:var(--ink-4)">计算中…</td></tr>'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'channel_metrics', margin_pct:margin, ltv_per_customer:ltv, spend_by_source:_cacSpend })) })
+    const r = await apiRaw({ action:'channel_metrics', margin_pct:margin, ltv_per_customer:ltv, spend_by_source:_cacSpend })
     const d = await r.json()
     if (!d.ok) throw new Error(d.error || '计算失败')
     const cols = ['渠道','Leads','成交','营收(RM)','花费(RM)','转化率','CAC','ROAS','LTV:CAC']
@@ -57,14 +55,12 @@ async function addBooking() {
   if (!amount || amount <= 0) { msg.textContent = '请填写有效成交金额'; msg.style.color = 'var(--rose)'; return }
   msg.textContent = '提交中…'; msg.style.color = 'var(--ink-3)'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'booking_crud', method:'create', data:{
+    const r = await apiRaw({ action:'booking_crud', method:'create', data:{
         campaign_source: source,
         customer_name: document.getElementById('bkName')?.value.trim() || null,
         amount_myr: amount,
         service_type: document.getElementById('bkService')?.value.trim() || null,
-      } })) })
+      } })
     const d = await r.json()
     if (!d.ok) throw new Error(d.error || '添加失败')
     msg.textContent = '✅ 已添加'; msg.style.color = '#059669'
@@ -80,9 +76,7 @@ async function loadCacBookings() {
   const el = document.getElementById('cacBookings')
   if (!el) return
   try {
-    const r = await fetch(EDGE_URL, { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'booking_crud', method:'list' })) })
+    const r = await apiRaw({ action:'booking_crud', method:'list' })
     const d = await r.json()
     const rows = d.bookings || []
     if (!rows.length) { el.innerHTML = '<p style="color:var(--ink-4);font-size:12px;padding:12px">暂无成交记录</p>'; return }
@@ -100,9 +94,7 @@ async function loadCacBookings() {
 
 async function deleteBooking(id) {
   if (!confirm('确认删除这条成交记录？')) return
-  await fetch(EDGE_URL, { method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-    body: JSON.stringify(orchBody({ action:'booking_crud', method:'delete', booking_id:id })) })
+  await apiRaw({ action:'booking_crud', method:'delete', booking_id:id })
   loadCacBookings(); loadChannelMetrics()
 }
 
@@ -115,8 +107,7 @@ async function renderHome() {
   if (_session.role === 'master') {
     el.innerHTML = '<div style="color:#4e6285;font-size:13px;padding:10px 0">加载客户汇总…</div>'
     try {
-      const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(orchBody({ action: 'get_master_summary' })) })
+      const r = await apiRaw({ action: 'get_master_summary' })
       const d = await r.json()
       const summary = d.summary || []
       el.innerHTML = `
@@ -295,8 +286,7 @@ async function loadTenantsPage() {
   if (!el) return
   el.innerHTML = '<div style="color:#4e6285;font-size:13px;padding:20px 0">加载中…</div>'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(orchBody({ action: 'list_tenants' })) })
+    const r = await apiRaw({ action: 'list_tenants' })
     const d = await r.json()
     if (!d.ok) throw new Error(d.error || 'failed')
     const tenants = d.tenants || []
@@ -447,16 +437,12 @@ async function createAgentFromGap(message, gapId) {
 缺口问题：${message}`
 
   try {
-    const res = await fetch(EDGE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
-      body: JSON.stringify(orchBody({
+    const res = await apiRaw({
         message: `请为以下缺口问题设计一个新 Agent，输出 JSON 配置：\n\n${message}`,
         stream: true,
         system_prompt_override: systemPrompt,
         target_agent: 'hermes'
-      }))
-    })
+      })
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
@@ -543,11 +529,7 @@ async function triggerLearnGaps(btn) {
   const orig = btn.textContent
   btn.textContent = '分析中…'
   try {
-    const res = await fetch(EDGE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
-      body: JSON.stringify(orchBody({ action: 'learn_gaps' }))
-    })
+    const res = await apiRaw({ action: 'learn_gaps' })
     const data = await res.json()
     if (data.error) throw new Error(data.error)
     toast(`处理 ${data.processed} 个问题，生成 ${data.skills_added} 条路由规则`, 'success')

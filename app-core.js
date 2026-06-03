@@ -127,6 +127,17 @@ async function apiCall(action, payload = {}, options = {}) {
   }
 }
 
+// Drop-in for the raw `fetch(EDGE_URL, {...})` pattern: returns the Response
+// (so downstream .json()/.ok/.body keep working, streaming-safe) but centralizes
+// endpoint + auth header + orchBody wrapping in one place.
+function apiRaw(payload) {
+  return fetch(EDGE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
+    body: JSON.stringify(orchBody(payload)),
+  })
+}
+
 function newSession() {
   sessionId = crypto.randomUUID()
   document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)

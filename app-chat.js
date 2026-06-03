@@ -210,11 +210,7 @@ async function sendMsg() {
                      : ''
     const finalMsg = (msg || defaultMsg) + extractedContext
     const payload = orchBody(Object.assign({ message: finalMsg, session_id: sessionId, stream: true }, filePayload))
-    const res = await fetch(EDGE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
-      body: JSON.stringify(payload)
-    })
+    const res = await apiRaw(payload)
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
     const reader  = res.body.getReader()
     const decoder = new TextDecoder()

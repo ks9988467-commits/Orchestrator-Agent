@@ -82,11 +82,7 @@ async function submitFeedback(id, val, btn) {
   if (current) {
     btn.classList.add('active')
     // 触发学习（静默后台，不阻塞 UI）
-    fetch(EDGE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
-      body: JSON.stringify(orchBody({ action: 'learn', conversation_id: id, feedback: current }))
-    }).catch(() => {})
+    apiRaw({ action: 'learn', conversation_id: id, feedback: current }).catch(() => {})
   }
 }
 
@@ -155,7 +151,7 @@ async function fetchModels(p) {
   listEl.innerHTML = '<option value="" disabled selected>获取中…</option>'
   listEl.style.display = 'block'
   try {
-    const res  = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'list_models', provider:p, api_key:key})})
+    const res  = await apiRaw({action:'list_models', provider:p, api_key:key})
     const data = await res.json()
     if (data.error) { listEl.innerHTML = `<option value="" disabled selected>加载失败</option>`; return }
     const current = document.getElementById('model-'+p).value.trim()
@@ -204,8 +200,7 @@ async function testLlm(p) {
   msgEl.className = 'status-txt'; msgEl.textContent = '测试中…'
   let rawText = ''
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body: JSON.stringify(orchBody({ action:'test_llm', provider:p })) })
+    const r = await apiRaw({ action:'test_llm', provider:p })
     rawText = await r.text()
     let d
     try { d = JSON.parse(rawText) } catch { d = null }
@@ -320,8 +315,7 @@ async function testEmailSmtp() {
   const msg = document.getElementById('imsg-email_smtp')
   msg.className = 'status-txt'; msg.textContent = '发送测试邮件中…'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(orchBody({ action:'test_email_smtp' })) })
+    const r = await apiRaw({ action:'test_email_smtp' })
     const d = await r.json()
     if (d.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试邮件已发送（发往 From Address）'; toast('SMTP 测试邮件已发送', 'success') }
     else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'SMTP 测试失败', 'error') }
@@ -331,8 +325,7 @@ async function testWhatsApp() {
   const msg = document.getElementById('imsg-whatsapp')
   msg.className = 'status-txt'; msg.textContent = '发送测试消息中…'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(orchBody({ action:'test_whatsapp' })) })
+    const r = await apiRaw({ action:'test_whatsapp' })
     const d = await r.json()
     if (d.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试消息已发送，请检查手机 WhatsApp'; toast('WhatsApp 测试消息已发送', 'success') }
     else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'WhatsApp 测试失败', 'error') }
@@ -342,8 +335,7 @@ async function testSendGrid() {
   const msg = document.getElementById('imsg-sendgrid')
   msg.className = 'status-txt'; msg.textContent = '发送测试邮件中…'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(orchBody({ action:'test_sendgrid' })) })
+    const r = await apiRaw({ action:'test_sendgrid' })
     const d = await r.json()
     if (d.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试邮件已发送（发往 From Address）'; toast('SendGrid 测试邮件已发送', 'success') }
     else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'SendGrid 测试失败', 'error') }
@@ -353,8 +345,7 @@ async function testTelegram() {
   const msg = document.getElementById('imsg-telegram')
   msg.className = 'status-txt'; msg.textContent = '发送测试消息中…'
   try {
-    const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(orchBody({ action:'test_telegram' })) })
+    const r = await apiRaw({ action:'test_telegram' })
     const d = await r.json()
     if (d.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试消息已发送，请检查 Telegram'; toast('Telegram 测试消息已发送', 'success') }
     else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'Telegram 测试失败', 'error') }
@@ -365,8 +356,7 @@ async function testLarkWebhook() {
   const msg = document.getElementById('imsg-lark')
   if (!url) { toast('请先填写 Webhook URL', 'error'); return }
   msg.className = 'status-txt'; msg.textContent = '测试中…'
-  const r = await fetch(EDGE_URL, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(orchBody({ action:'test_lark', webhook_url: url })) })
+  const r = await apiRaw({ action:'test_lark', webhook_url: url })
   const d = await r.json()
   if (d.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试成功，请检查 Lark 群'; toast('Lark 测试消息已发送', 'success') }
   else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'Lark 测试失败', 'error') }
@@ -438,7 +428,7 @@ async function initUGCPage() {
   if (!el) return
   if (_ugcRules === null) {
     try {
-      var r = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON}, body:JSON.stringify(orchBody({action:'ugc_get_rules'}))})
+      var r = await apiRaw({action:'ugc_get_rules'})
       var d = await r.json()
       _ugcRules = d.rules || UGC_DEFAULT_RULES
     } catch(e) { _ugcRules = UGC_DEFAULT_RULES }
@@ -508,8 +498,7 @@ async function ugcSaveRule(v) {
   var rule = {maxWords:w.value, style:s?s.value:'', special:sp?sp.value:''}
   if (_ugcRules) _ugcRules[v] = rule
   try {
-    await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body:JSON.stringify(orchBody({action:'ugc_save_rule', platform:v, max_words:rule.maxWords, style:rule.style, special:rule.special}))})
+    await apiRaw({action:'ugc_save_rule', platform:v, max_words:rule.maxWords, style:rule.style, special:rule.special})
     var ok = document.getElementById('ugcok-'+v)
     if (ok) { ok.style.display='inline'; setTimeout(function(){ ok.style.display='none' }, 1500) }
     toast('规则已保存', 'success')
@@ -520,8 +509,7 @@ async function ugcResetRule(v) {
   var def = UGC_DEFAULT_RULES[v] || {}
   if (_ugcRules) _ugcRules[v] = def
   try {
-    await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body:JSON.stringify(orchBody({action:'ugc_reset_rule', platform:v}))})
+    await apiRaw({action:'ugc_reset_rule', platform:v})
     toast('已恢复默认', 'success')
   } catch(e) {}
   // Rebuild settings UI with updated defaults
@@ -575,10 +563,9 @@ async function ugcGenScript(btn) {
   btn.disabled = true; btn.textContent = '生成中…'
   ugcHideErr('ugcsErr')
   try {
-    var r = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body:JSON.stringify(orchBody({action:'ugc_generate', type:'script',
+    var r = await apiRaw({action:'ugc_generate', type:'script',
         product:prod?prod.value:'ultra_cleaning', audience:aud?aud.value:'general',
-        duration:dur?dur.value:'30', content:ta.value.trim()}))})
+        duration:dur?dur.value:'30', content:ta.value.trim()})
     var d = await r.json()
     if (!d.ok) throw new Error(d.error||'生成失败')
     var parsed = ugcParseJSON(d.result)
@@ -642,10 +629,9 @@ async function ugcGenCover(btn) {
   btn.disabled = true; btn.textContent = '生成中…'
   ugcHideErr('ugccErr')
   try {
-    var r = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body:JSON.stringify(orchBody({action:'ugc_generate', type:'cover',
+    var r = await apiRaw({action:'ugc_generate', type:'cover',
         product:prod?prod.value:'ultra_cleaning', audience:aud?aud.value:'general',
-        content:ta.value.trim()}))})
+        content:ta.value.trim()})
     var d = await r.json()
     if (!d.ok) throw new Error(d.error||'生成失败')
     _ugcState.covers = ugcParseJSON(d.result)
@@ -741,10 +727,9 @@ async function ugcGenPost(btn) {
   btn.disabled = true; btn.textContent = '生成中…'
   ugcHideErr('ugcpErr')
   try {
-    var r = await fetch(EDGE_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON},
-      body:JSON.stringify(orchBody({action:'ugc_generate', type:'post',
+    var r = await apiRaw({action:'ugc_generate', type:'post',
         product:prod?prod.value:'ultra_cleaning', audience:aud?aud.value:'general',
-        content:ta.value.trim(), platforms:_ugcState.selPlatforms}))})
+        content:ta.value.trim(), platforms:_ugcState.selPlatforms})
     var d = await r.json()
     if (!d.ok) throw new Error(d.error||'生成失败')
     _ugcState.posts = {data:ugcParseJSON(d.result), platforms:_ugcState.selPlatforms.slice()}
