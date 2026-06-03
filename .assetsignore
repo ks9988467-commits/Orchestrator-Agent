@@ -3,4 +3,9 @@
 *
 !dashboard.html
 !app.css
-!app.js
+!app-core.js
+!app-home.js
+!app-chat.js
+!app-data.js
+!app-config.js
+!app-ops.js
