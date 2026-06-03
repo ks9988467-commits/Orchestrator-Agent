@@ -1,0 +1,4 @@
+# Security: serve ONLY dashboard.html. Everything else (secrets, source,
+# git history, config) must never be uploaded as a public asset.
+*
+!dashboard.html
