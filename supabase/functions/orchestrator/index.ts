@@ -3196,6 +3196,46 @@ Return ONLY a valid JSON array, no markdown:
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // ── Direct messages (消息) ────────────────────────────────────────────
+    // The dashboard polls `poll` instead of subscribing to Supabase Realtime.
+    if (body.action === 'direct_message_crud') {
+      type DmRow = { id: string; from_id: string; to_id: string; content: string; read_at: string | null; created_at: string }
+      const m = String(body.method || 'list')
+      const isId = (v: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+      const me = String(body.me || ''), peer = String(body.peer || '')
+      const DM_COLS = 'id,from_id,to_id,content,read_at,created_at'
+      // Marks only these rows read, so a message arriving mid-request stays unread for the next poll
+      const markRead = async (rows: DmRow[]) => {
+        const ids = rows.filter(r => r.to_id === me && !r.read_at).map(r => r.id)
+        if (ids.length) await dbPatchWhere('direct_messages', { id: `in.(${ids.join(',')})` }, { read_at: new Date().toISOString() })
+      }
+
+      if (m === 'list') {
+        if (!isId(me) || !isId(peer)) return new Response(JSON.stringify({ error: 'me and peer (staff ids) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const rows = await dbGet('direct_messages', DM_COLS,
+          tenantFilters({ or: `(and(from_id.eq.${me},to_id.eq.${peer}),and(from_id.eq.${peer},to_id.eq.${me}))` }), 'created_at.desc', 100) as DmRow[]
+        rows.reverse()   // the newest 100, oldest first
+        await markRead(rows)
+        return new Response(JSON.stringify({ ok: true, messages: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'send') {
+        const content = String(body.content ?? '').trim()
+        if (!isId(me) || !isId(peer) || !content) return new Response(JSON.stringify({ error: 'me, peer and content required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const message = await dbInsertReturning('direct_messages', { from_id: me, to_id: peer, content, tenant_id: _reqTenantId || 'default' })
+        return new Response(JSON.stringify({ ok: true, message }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'poll') {
+        // messages: unread from the open thread's peer (now marked read); unread_from: other senders with unread messages
+        if (!isId(me)) return new Response(JSON.stringify({ error: 'me (staff id) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const unread = await dbGet('direct_messages', DM_COLS, tenantFilters({ to_id: `eq.${me}`, read_at: 'is.null' }), 'created_at.asc', 200) as DmRow[]
+        const messages = isId(peer) ? unread.filter(r => r.from_id === peer) : []
+        await markRead(messages)
+        const unread_from = [...new Set(unread.filter(r => r.from_id !== peer).map(r => r.from_id))]
+        return new Response(JSON.stringify({ ok: true, messages, unread_from }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // ── API integrations (API 集成) ─────────────────────────────────────
     // Secret credential values are masked in `list`; on `save`, a value that is
     // still masked keeps the stored secret. webhook_url stays visible because the

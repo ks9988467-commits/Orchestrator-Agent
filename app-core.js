@@ -173,6 +173,8 @@ function showPage(id, btn) {
   // Auto-refresh logs every 30s; stop when leaving
   if (_logsRefreshTimer) { clearInterval(_logsRefreshTimer); _logsRefreshTimer = null }
   if (id === 'logs') _logsRefreshTimer = setInterval(loadLogs, 30000)
+  // Direct messages are polled only while the messaging page is open
+  if (id === 'msg') startDmPolling(); else stopDmPolling()
 }
 function loadPage(id) {
   if (id === 'home')      renderHome()

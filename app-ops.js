@@ -193,7 +193,8 @@ async function toggleStaffActive(id, active) {
 let _msgStaff = []
 let _msgMyId  = null
 let _msgPeerId = null
-let _dmChannel = null
+let _dmPollTimer = null
+let _dmPollBusy = false
 
 async function loadMsgPage() {
   const { staff } = await apiCall('staff_crud', { method: 'list', active_only: true }).catch(() => ({ staff: [] }))
@@ -202,7 +203,7 @@ async function loadMsgPage() {
   sel.innerHTML = _msgStaff.map(s => `<option value="${s.id}">${s.avatar||'👤'} ${esc(s.name)}</option>`).join('')
   _msgMyId = _msgStaff[0]?.id || null
   renderMsgContacts()
-  subscribeRealtime()
+  startDmPolling()
 }
 
 function switchMsgIdentity() {
@@ -210,7 +211,7 @@ function switchMsgIdentity() {
   _msgPeerId = null
   renderMsgContacts()
   document.getElementById('msgThreadWrap').innerHTML = `<div class="msg-no-contact"><span style="font-size:32px">💬</span><span>选择联系人开始对话</span></div>`
-  subscribeRealtime()
+  startDmPolling()
 }
 
 function renderMsgContacts() {
@@ -250,14 +251,14 @@ async function openDM(peerId) {
 
 async function loadMessages() {
   if (!_msgMyId || !_msgPeerId) return
-  const { data } = await db.from('direct_messages')
-    .select('*')
-    .or(`and(from_id.eq.${_msgMyId},to_id.eq.${_msgPeerId}),and(from_id.eq.${_msgPeerId},to_id.eq.${_msgMyId})`)
-    .order('created_at', { ascending: true })
-    .limit(100)
-  renderMessages(data || [])
-  await db.from('direct_messages').update({ read_at: new Date().toISOString() })
-    .eq('to_id', _msgMyId).eq('from_id', _msgPeerId).is('read_at', null)
+  try {
+    // 后端返回最新 100 条（按时间正序），并把返回的未读消息标记为已读
+    const { messages } = await apiCall('direct_message_crud', { method: 'list', me: _msgMyId, peer: _msgPeerId })
+    renderMessages(messages || [])
+  } catch(e) {
+    const el = document.getElementById('msgThread')
+    if (el) el.innerHTML = `<p class="msg-empty">加载失败：${esc(e.message)}</p>`
+  }
 }
 
 function renderMessages(msgs) {
@@ -271,7 +272,7 @@ function renderMessages(msgs) {
 function dmBubble(m) {
   const sent = m.from_id === _msgMyId
   const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' })
-  return `<div class="dm-row ${sent?'sent':'recv'}">
+  return `<div class="dm-row ${sent?'sent':'recv'}" data-id="${esc(m.id)}">
     <div class="dm-bubble">${esc(m.content)}<div class="dm-time">${time}</div></div>
   </div>`
 }
@@ -279,6 +280,7 @@ function dmBubble(m) {
 function appendDM(msg) {
   const el = document.getElementById('msgThread')
   if (!el) return
+  if (msg.id && el.querySelector(`.dm-row[data-id="${msg.id}"]`)) return   // 轮询和加载可能返回同一条
   const empty = el.querySelector('.msg-empty')
   if (empty) empty.remove()
   const div = document.createElement('div')
@@ -293,31 +295,39 @@ async function sendDM() {
   const content = input.value.trim()
   if (!content || !_msgMyId || !_msgPeerId) return
   input.value = ''; input.style.height = 'auto'
-  const { data, error } = await db.from('direct_messages')
-    .insert({ from_id: _msgMyId, to_id: _msgPeerId, content, tenant_id: 'default' })
-    .select().single()
-  if (!error && data) appendDM(data)
+  try {
+    const { message } = await apiCall('direct_message_crud', { method: 'send', me: _msgMyId, peer: _msgPeerId, content })
+    if (message) appendDM(message)
+  } catch(e) {
+    input.value = content
+    toast('发送失败：' + e.message, 'error')
+  }
 }
 
-function subscribeRealtime() {
-  if (_dmChannel) { db.removeChannel(_dmChannel); _dmChannel = null }
-  if (!_msgMyId) return
-  _dmChannel = db.channel('dm_inbox_' + _msgMyId)
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'direct_messages',
-      filter: `to_id=eq.${_msgMyId}`
-    }, payload => {
-      const msg = payload.new
-      if (_msgPeerId && msg.from_id === _msgPeerId) {
-        appendDM(msg)
-        db.from('direct_messages').update({ read_at: new Date().toISOString() }).eq('id', msg.id)
-      } else {
-        // Show unread badge for a different contact
-        const badge = document.getElementById('msgUnreadBadge')
-        if (badge) { badge.style.display = ''; badge.textContent = '●' }
-      }
-    })
-    .subscribe()
+// 新消息用轮询获取（替代 Supabase Realtime）：消息页打开时每 3 秒一次，由 showPage 启停
+function startDmPolling() {
+  stopDmPolling()
+  _dmPollTimer = setInterval(pollDMs, 3000)
+}
+
+function stopDmPolling() {
+  if (_dmPollTimer) { clearInterval(_dmPollTimer); _dmPollTimer = null }
+}
+
+async function pollDMs() {
+  if (!_msgMyId || _dmPollBusy) return
+  _dmPollBusy = true
+  const me = _msgMyId, peer = _msgPeerId
+  try {
+    const { messages, unread_from } = await apiCall('direct_message_crud', { method: 'poll', me, peer: peer || undefined })
+    // 轮询期间切换了身份或联系人：跳过，重新打开对话时会完整加载
+    if (me === _msgMyId && peer === _msgPeerId) (messages || []).forEach(appendDM)
+    if (unread_from?.length) {
+      // 其他联系人有未读消息
+      const badge = document.getElementById('msgUnreadBadge')
+      if (badge) { badge.style.display = ''; badge.textContent = '●' }
+    }
+  } catch {} finally { _dmPollBusy = false }
 }
 
 // ── Skills Page ──────────────────────────────────────────────────────

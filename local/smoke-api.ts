@@ -13,7 +13,7 @@
 // are skipped instead.
 // ══════════════════════════════════════════════════════════════════════
 
-import { dbDelete, dbGet, dbInsert } from '../supabase/functions/orchestrator/db.ts'
+import { dbDelete, dbGet, dbInsert, dbInsertReturning } from '../supabase/functions/orchestrator/db.ts'
 
 if (Deno.env.get('DB_DRIVER') !== 'postgres') {
   console.error('Refusing to run: DB_DRIVER must be "postgres" (never run this against production).')
@@ -360,9 +360,42 @@ await api('staff_task_crud', { method: 'delete', id: t2?.id })
 const t2r = await dbGet('tasks', 'id', { id: `eq.${t2?.id}` })
 check('task delete', t2r.length === 0, t2r)
 
+// ── 11. direct messages ────────────────────────────────────────────────
+console.log('\n[11] direct messages')
+const A = String((await dbInsertReturning('staff', { name: `${MARK} dmA` })).id)
+const B = String((await dbInsertReturning('staff', { name: `${MARK} dmB` })).id)
+const C = String((await dbInsertReturning('staff', { name: `${MARK} dmC` })).id)
+const send = (me: string, peer: string, content: string) => api('direct_message_crud', { method: 'send', me, peer, content })
+const sd = await send(A, B, `${MARK} hi B`)
+check('send returns the stored message', sd.status === 200 && !!sd.json.message?.id && sd.json.message.from_id === A && sd.json.message.content === `${MARK} hi B`, sd.json)
+const blank = await send(A, B, '   ')
+const badId = await send('not-a-uuid', B, 'x')
+check('send: blank content → 400; invalid staff id → 400', blank.status === 400 && badId.status === 400, { blank: blank.json, badId: badId.json })
+const pNone = await api('direct_message_crud', { method: 'poll', me: B })
+check('poll with no open thread: no messages, sender listed in unread_from', pNone.json.messages?.length === 0 && pNone.json.unread_from?.includes(A), pNone.json)
+await send(C, B, `${MARK} hi from C`)
+const pA = await api('direct_message_crud', { method: 'poll', me: B, peer: A })
+check("poll with A's thread open: A's unread message returned; C in unread_from",
+  pA.json.messages?.length === 1 && pA.json.messages[0].from_id === A && pA.json.unread_from?.join() === C, pA.json)
+const pA2 = await api('direct_message_crud', { method: 'poll', me: B, peer: A })
+check('poll again: that message was marked read and is not returned twice', pA2.json.messages?.length === 0, pA2.json)
+// 105 messages between A and C; C's thread view must show the newest 100
+const base = Date.now() - 300_000
+await dbInsert('direct_messages', Array.from({ length: 105 }, (_, i) => ({
+  from_id: i % 2 ? A : C, to_id: i % 2 ? C : A, content: `${MARK} #${i}`, created_at: new Date(base + i * 1000).toISOString(),
+})))
+const hist = await api('direct_message_crud', { method: 'list', me: C, peer: A })
+const hc = ((hist.json.messages || []) as R[]).map(x => x.content)
+check('list: the newest 100 messages, oldest first', hc.length === 100 && hc[0] === `${MARK} #5` && hc[99] === `${MARK} #104`, { n: hc.length, first: hc[0], last: hc[99] })
+const stillUnread = (await dbGet('direct_messages', 'content', { to_id: `eq.${C}`, read_at: 'is.null' }) as R[]).map(x => x.content).sort()
+check('list marks read only the messages it returned', stillUnread.join() === [`${MARK} #1`, `${MARK} #3`].join(), stillUnread)
+const noPeer = await api('direct_message_crud', { method: 'list', me: C })
+check('list without peer → 400', noPeer.status === 400, noPeer.json)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
+await dbDelete('direct_messages', { content: `like.${MARK}*` })   // before staff: messages reference staff
 await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })
 await dbDelete('agents', { id: `like.${MARK}*` })
