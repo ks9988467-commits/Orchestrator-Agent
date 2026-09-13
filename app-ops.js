@@ -10,18 +10,17 @@ async function loadTasks() {
   el.innerHTML = '<p style="color:var(--ink-5);font-size:13px">加载中…</p>'
   // Pre-load staff into dropdowns on first call
   if (!_msgStaff.length) {
-    const { data } = await db.from('staff').select('id,name,avatar').eq('active',true).order('name')
-    _msgStaff = data || []
+    const { staff } = await apiCall('staff_crud', { method: 'list', active_only: true }).catch(() => ({ staff: [] }))
+    _msgStaff = staff || []
     const af2 = document.getElementById('taskAssigneeFilter')
     const as2 = document.getElementById('taskAssignee')
     if (af2) af2.innerHTML = '<option value="">全部负责人</option>' + _msgStaff.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')
     if (as2) as2.innerHTML = '<option value="">未分配</option>' + _msgStaff.map(s=>`<option value="${s.id}">${s.avatar||'👤'} ${esc(s.name)}</option>`).join('')
   }
-  let q = db.from('tasks').select('*,assignee:assignee_id(id,name,avatar),creator:created_by(id,name)').order('created_at', {ascending:false})
-  if (sf) q = q.eq('status', sf)
-  if (af) q = q.eq('assignee_id', af)
-  const { data, error } = await q
-  if (error) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">加载失败：${esc(error.message)}</p>`; return }
+  let data
+  try {
+    ;({ tasks: data } = await apiCall('staff_task_crud', { method: 'list', status: sf, assignee_id: af }))
+  } catch(e) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">加载失败：${esc(e.message)}</p>`; return }
   const tasks = data || []
   document.getElementById('tasksCount').textContent = tasks.length ? `共 ${tasks.length} 条` : ''
   if (!tasks.length) { el.innerHTML = '<p style="color:var(--ink-5);font-size:13px;padding:20px 0">暂无任务，点击「创建任务」开始</p>'; return }
@@ -55,7 +54,7 @@ async function loadTasks() {
 
 async function cycleTaskStatus(id, current) {
   const next = PRIORITY_NEXT[current] || 'todo'
-  await db.from('tasks').update({ status: next, updated_at: new Date().toISOString() }).eq('id', id)
+  await apiCall('staff_task_crud', { method: 'set_status', id, status: next }).catch(e => toast('更新失败：' + e.message, 'error'))
   loadTasks()
 }
 
@@ -89,20 +88,17 @@ async function saveTask() {
   const errEl = document.getElementById('taskErr')
   if (!title) { errEl.textContent = '请填写任务标题'; return }
   errEl.textContent = '保存中…'
-  const payload = {
+  const data = {
     title,
     description:  document.getElementById('taskDesc').value.trim() || null,
     assignee_id:  document.getElementById('taskAssignee').value || null,
     priority:     document.getElementById('taskPriority').value,
     due_date:     document.getElementById('taskDue').value || null,
-    updated_at:   new Date().toISOString(),
-    created_by:   _msgMyId || null,
-    tenant_id:    'default',
+    created_by:   _msgMyId || null,   // 后端只在创建时写入
   }
-  const { error } = id
-    ? await db.from('tasks').update(payload).eq('id', id)
-    : await db.from('tasks').insert(payload)
-  if (error) { errEl.textContent = error.message; return }
+  try {
+    await apiCall('staff_task_crud', { method: 'save', id: id || undefined, data })
+  } catch(e) { errEl.textContent = e.message; return }
   document.getElementById('taskModal').style.display = 'none'
   toast('任务已保存', 'success')
   loadTasks()
@@ -110,7 +106,9 @@ async function saveTask() {
 
 async function deleteTask(id) {
   if (!confirm('确定删除此任务？')) return
-  await db.from('tasks').delete().eq('id', id)
+  try {
+    await apiCall('staff_task_crud', { method: 'delete', id })
+  } catch(e) { toast('删除失败：' + e.message, 'error'); return }
   toast('已删除', 'success')
   loadTasks()
 }
@@ -118,8 +116,10 @@ async function deleteTask(id) {
 // ── Staff ─────────────────────────────────────────────────────────────
 async function loadStaffPage() {
   const el = document.getElementById('staffContent')
-  const { data, error } = await db.from('staff').select('*').order('name')
-  if (error) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">${esc(error.message)}</p>`; return }
+  let data
+  try {
+    ;({ staff: data } = await apiCall('staff_crud', { method: 'list' }))
+  } catch(e) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">${esc(e.message)}</p>`; return }
   const staff = data || []
   if (!staff.length) { el.innerHTML = '<p style="color:var(--ink-5);font-size:13px">暂无员工，点击「添加员工」</p>'; return }
   el.innerHTML = `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden">` +
@@ -167,17 +167,15 @@ async function saveStaff() {
   const errEl = document.getElementById('staffErr')
   if (!name) { errEl.textContent = '请填写姓名'; return }
   errEl.textContent = '保存中…'
-  const payload = {
+  const data = {
     name,
     avatar:     document.getElementById('staffAvatar').value.trim() || null,
     role:       document.getElementById('staffRole').value.trim() || null,
     department: document.getElementById('staffDept').value.trim() || null,
-    tenant_id:  'default',
   }
-  const { error } = id
-    ? await db.from('staff').update(payload).eq('id', id)
-    : await db.from('staff').insert(payload)
-  if (error) { errEl.textContent = error.message; return }
+  try {
+    await apiCall('staff_crud', { method: 'save', id: id || undefined, data })
+  } catch(e) { errEl.textContent = e.message; return }
   document.getElementById('staffModal').style.display = 'none'
   toast('员工已保存', 'success')
   loadStaffPage()
@@ -186,7 +184,7 @@ async function saveStaff() {
 }
 
 async function toggleStaffActive(id, active) {
-  await db.from('staff').update({ active }).eq('id', id)
+  await apiCall('staff_crud', { method: 'set_active', id, active }).catch(e => toast('操作失败：' + e.message, 'error'))
   loadStaffPage()
   _msgStaff = []
 }
@@ -198,8 +196,8 @@ let _msgPeerId = null
 let _dmChannel = null
 
 async function loadMsgPage() {
-  const { data } = await db.from('staff').select('*').eq('active', true).order('name')
-  _msgStaff = data || []
+  const { staff } = await apiCall('staff_crud', { method: 'list', active_only: true }).catch(() => ({ staff: [] }))
+  _msgStaff = staff || []
   const sel = document.getElementById('msgMyId')
   sel.innerHTML = _msgStaff.map(s => `<option value="${s.id}">${s.avatar||'👤'} ${esc(s.name)}</option>`).join('')
   _msgMyId = _msgStaff[0]?.id || null

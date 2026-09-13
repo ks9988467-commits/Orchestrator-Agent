@@ -318,8 +318,52 @@ const anl = await api('analytics_crud', { method: 'list', from: '2026-03-02', to
 const anMine = (anl.json.rows || []).filter((r: { campaign_name: string }) => r.campaign_name === MARK)
 check('analytics list: date range', anl.status === 200 && anMine.length === 1 && anMine[0].spend_myr === 20, anMine)
 
+// ── 10. staff / team tasks ─────────────────────────────────────────────
+console.log('\n[10] staff / tasks')
+// deno-lint-ignore no-explicit-any
+type R = Record<string, any>
+await api('staff_crud', { method: 'save', data: { name: `${MARK} Alice`, avatar: '🦊', role: ' PM ', department: '' } })
+await api('staff_crud', { method: 'save', data: { name: `${MARK} Bob` } })
+const sAll = (await api('staff_crud', { method: 'list' })).json.staff as R[]
+const alice = sAll.find(s => s.name === `${MARK} Alice`), bob = sAll.find(s => s.name === `${MARK} Bob`)
+check('staff save creates; role trimmed, blank department → null, active by default',
+  !!alice && !!bob && alice.role === 'PM' && alice.department === null && alice.active === true, { alice, bob })
+const noName = await api('staff_crud', { method: 'save', data: { name: ' ' } })
+check('staff save without name → 400', noName.status === 400, noName.json)
+await api('staff_crud', { method: 'save', id: bob?.id, data: { name: `${MARK} Bobby`, role: 'Dev' } })
+await api('staff_crud', { method: 'set_active', id: bob?.id, active: false })
+const bobRow = ((await api('staff_crud', { method: 'list' })).json.staff as R[]).find(s => s.id === bob?.id)
+const activeOnly = (await api('staff_crud', { method: 'list', active_only: true })).json.staff as R[]
+check('staff update + set_active; active_only hides inactive staff',
+  bobRow?.name === `${MARK} Bobby` && bobRow?.active === false && !activeOnly.some(s => s.id === bob?.id) && activeOnly.some(s => s.id === alice?.id), bobRow)
+
+const tsv = await api('staff_task_crud', { method: 'save', data: { title: `${MARK} task 1`, assignee_id: alice?.id, created_by: bob?.id, priority: 'high', due_date: '2026-10-01', description: '' } })
+check('task save (create) → ok', tsv.status === 200 && tsv.json.ok === true, tsv.json)
+await api('staff_task_crud', { method: 'save', data: { title: `${MARK} task 2`, priority: 'bogus' } })
+const myTasks = ((await api('staff_task_crud', { method: 'list' })).json.tasks as R[]).filter(t => String(t.title).startsWith(MARK))
+const t1 = myTasks.find(t => t.title === `${MARK} task 1`), t2 = myTasks.find(t => t.title === `${MARK} task 2`)
+check('task list attaches assignee and creator', t1?.assignee?.name === `${MARK} Alice` && t1?.assignee?.avatar === '🦊' &&
+  t1?.creator?.name === `${MARK} Bobby` && t1?.due_date === '2026-10-01' && t1?.description === null, t1)
+check('task defaults: status todo, unknown priority → normal, no assignee → null', t2?.status === 'todo' && t2?.priority === 'normal' && t2?.assignee === null, t2)
+const byAssignee = (await api('staff_task_crud', { method: 'list', assignee_id: alice?.id })).json.tasks as R[]
+check('task list: assignee filter', byAssignee.length >= 1 && byAssignee.every(t => t.assignee_id === alice?.id), byAssignee)
+await api('staff_task_crud', { method: 'set_status', id: t1?.id, status: 'in_progress' })
+const inProg = (await api('staff_task_crud', { method: 'list', status: 'in_progress' })).json.tasks as R[]
+check('set_status + status filter', inProg.some(t => t.id === t1?.id) && inProg.every(t => t.status === 'in_progress'), inProg)
+const badStatus = await api('staff_task_crud', { method: 'set_status', id: t1?.id, status: 'nope' })
+check('set_status with unknown status → 400', badStatus.status === 400, badStatus.json)
+await api('staff_task_crud', { method: 'save', id: t1?.id, data: { title: `${MARK} task 1 edited`, assignee_id: '', priority: 'low' } })
+const t1r = await dbGet('tasks', 'title,assignee_id,created_by,priority,status', { id: `eq.${t1?.id}` })
+check('task edit: creator and status kept, assignee cleared',
+  t1r[0]?.title === `${MARK} task 1 edited` && t1r[0]?.assignee_id === null && t1r[0]?.created_by === bob?.id && t1r[0]?.priority === 'low' && t1r[0]?.status === 'in_progress', t1r)
+await api('staff_task_crud', { method: 'delete', id: t2?.id })
+const t2r = await dbGet('tasks', 'id', { id: `eq.${t2?.id}` })
+check('task delete', t2r.length === 0, t2r)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
+await dbDelete('tasks', { title: `like.${MARK}*` })
+await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })
 await dbDelete('agents', { id: `like.${MARK}*` })
 await dbDelete('agent_skills', { agent: `like.${MARK}*` })

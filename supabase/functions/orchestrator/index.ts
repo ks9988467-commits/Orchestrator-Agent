@@ -3103,6 +3103,99 @@ Return ONLY a valid JSON array, no markdown:
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // ── Staff (员工) ─────────────────────────────────────────────────────
+    if (body.action === 'staff_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = body.active_only ? { active: 'eq.true' } : {}
+        const staff = await dbGet('staff', 'id,name,avatar,role,department,active', tenantFilters(filt), 'name.asc')
+        return new Response(JSON.stringify({ ok: true, staff }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const name = String(d.name ?? '').trim()
+        if (!name) return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { name }
+        for (const k of ['avatar', 'role', 'department']) fields[k] = String(d[k] ?? '').trim() || null
+        const id = String(body.id || '')
+        if (id) {
+          await dbPatchWhere('staff', tenantFilters({ id: `eq.${id}` }), fields)
+        } else {
+          const ins = await dbInsert('staff', { ...fields, tenant_id: _reqTenantId || 'default' })
+          if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_active') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbPatchWhere('staff', tenantFilters({ id: `eq.${id}` }), { active: !!body.active })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Team tasks (任务) ─────────────────────────────────────────────────
+    // Not `list_tasks` — that name belongs to the agent task runner.
+    if (body.action === 'staff_task_crud') {
+      const m = String(body.method || 'list')
+      const STATUSES = ['todo', 'in_progress', 'done']
+      const PRIORITIES = ['high', 'normal', 'low']
+
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.status)      filt['status']      = `eq.${String(body.status)}`
+        if (body.assignee_id) filt['assignee_id'] = `eq.${String(body.assignee_id)}`
+        const tasks = await dbGet('tasks', 'id,title,description,assignee_id,created_by,priority,status,due_date,updated_at,created_at',
+          tenantFilters(filt), 'created_at.desc') as Record<string, unknown>[]
+        // Attach assignee / creator here: postgres mode has no PostgREST resource embedding
+        const ids = [...new Set(tasks.flatMap(t => [t.assignee_id, t.created_by]).filter(Boolean).map(String))]
+        const people = ids.length ? await dbGet('staff', 'id,name,avatar', { id: `in.(${ids.join(',')})` }) as { id: string; name: string; avatar: string | null }[] : []
+        const byId = new Map(people.map(p => [p.id, p]))
+        for (const t of tasks) {
+          const a = byId.get(String(t.assignee_id))
+          const c = byId.get(String(t.created_by))
+          t.assignee = a ? { id: a.id, name: a.name, avatar: a.avatar } : null
+          t.creator  = c ? { id: c.id, name: c.name } : null
+        }
+        return new Response(JSON.stringify({ ok: true, tasks }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const title = String(d.title ?? '').trim()
+        if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = {
+          title,
+          description: String(d.description ?? '').trim() || null,
+          assignee_id: d.assignee_id || null,
+          priority:    PRIORITIES.includes(String(d.priority)) ? String(d.priority) : 'normal',
+          due_date:    d.due_date || null,
+          updated_at:  new Date().toISOString(),
+        }
+        const id = String(body.id || '')
+        if (id) {
+          await dbPatchWhere('tasks', tenantFilters({ id: `eq.${id}` }), fields)   // creator is set once, on create
+        } else {
+          const ins = await dbInsert('tasks', { ...fields, created_by: d.created_by || null, tenant_id: _reqTenantId || 'default' })
+          if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_status' || m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (m === 'delete') {
+          await dbDelete('tasks', tenantFilters({ id: `eq.${id}` }))
+        } else {
+          const status = String(body.status || '')
+          if (!STATUSES.includes(status)) return new Response(JSON.stringify({ error: 'unknown status' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+          await dbPatchWhere('tasks', tenantFilters({ id: `eq.${id}` }), { status, updated_at: new Date().toISOString() })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // ── API integrations (API 集成) ─────────────────────────────────────
     // Secret credential values are masked in `list`; on `save`, a value that is
     // still masked keeps the stored secret. webhook_url stays visible because the
