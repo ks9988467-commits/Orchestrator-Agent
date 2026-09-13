@@ -299,7 +299,7 @@ async function initDataPage() {
   // Load account list
   const sel = document.getElementById('accountSelector')
   try {
-    const { data } = await db.from('accounts').select('id,name').eq('active', true).order('name')
+    const { accounts: data } = await apiCall('account_crud', { method: 'list' })
     if (data && data.length > 1) {
       sel.innerHTML = '<option value="">所有账户</option>' +
         data.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')
@@ -350,10 +350,7 @@ async function loadDataEntries() {
   const ftype  = document.getElementById('dEntriesType')?.value || ''
   wrap.innerHTML = '<p style="color:var(--ink-5);font-size:13px;padding:30px;text-align:center">加载中…</p>'
   try {
-    let q = db.from('data_entries').select('*', { count: 'exact' }).order('created_at', { ascending: false }).limit(50)
-    if (search) q = q.ilike('file_name', `%${search}%`)
-    if (ftype)  q = q.eq('file_type', ftype)
-    const { data, count } = await q
+    const { rows: data, count } = await apiCall('data_entry_crud', { method: 'list', search, file_type: ftype })
     const entries = data || []
     document.getElementById('dEntriesCount').textContent = `共 ${count || 0} 条`
     if (entries.length === 0) {
@@ -465,16 +462,7 @@ async function loadLeads(page = 1) {
   const label  = document.getElementById('dLeadsLabel')?.value.trim()
   try {
     const acct = document.getElementById('accountSelector')?.value
-    let q = db.from('leads').select('*', { count: 'exact' })
-      .order('date', { ascending: false })
-      .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
-    if (search) q = q.or(`name.ilike.%${search}%,phone.ilike.%${search}%`)
-    if (from)   q = q.gte('date', from)
-    if (to)     q = q.lte('date', to)
-    if (label)  q = q.ilike('labels', `%${label}%`)
-    if (acct)   q = q.eq('account_id', acct)
-    const { data, count, error } = await q
-    if (error) throw error
+    const { rows: data, count } = await apiCall('lead_crud', { method: 'list', page, limit: DATA_PAGE_SIZE, search, from, to, label, account_id: acct })
     _leadsCache = data || []
     document.getElementById('dLeadsCount').textContent = `共 ${count} 条`
     // Stats
@@ -509,15 +497,7 @@ async function loadAdReports(page = 1) {
   const to     = document.getElementById('dAdsTo')?.value
   try {
     const acctAds = document.getElementById('accountSelector')?.value
-    let q = db.from('ad_reports').select('campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts', { count: 'exact' })
-      .order('amount_spent_myr', { ascending: false })
-      .range((page-1)*DATA_PAGE_SIZE, page*DATA_PAGE_SIZE - 1)
-    if (search)   q = q.ilike('campaign_name', `%${search}%`)
-    if (from)     q = q.gte('day', from)
-    if (to)       q = q.lte('day', to)
-    if (acctAds)  q = q.eq('account_id', acctAds)
-    const { data, count, error } = await q
-    if (error) throw error
+    const { rows: data, count } = await apiCall('ad_report_crud', { method: 'list', page, limit: DATA_PAGE_SIZE, search, from, to, account_id: acctAds })
     _adsCache = data || []
     document.getElementById('dAdsCount').textContent = `共 ${count} 条`
     // Stats
@@ -564,22 +544,13 @@ async function exportExcel(tab) {
       const from   = document.getElementById('dLeadsFrom')?.value
       const to     = document.getElementById('dLeadsTo')?.value
       const label  = document.getElementById('dLeadsLabel')?.value.trim()
-      let q = db.from('leads').select('date,name,phone,email,labels,campaign_source,created_at').order('date', { ascending: false })
-      if (search) q = q.or(`name.ilike.%${search}%,phone.ilike.%${search}%`)
-      if (from)   q = q.gte('date', from)
-      if (to)     q = q.lte('date', to)
-      if (label)  q = q.ilike('labels', `%${label}%`)
-      const { data: d, error } = await q; if (error) throw error
+      const { rows: d } = await apiCall('lead_crud', { method: 'export', search, from, to, label }, { timeout: 120000 })
       data = d || []; filename = 'leads'; sheetName = 'Leads'
     } else if (tab === 'adreports') {
       const search = document.getElementById('dAdsSearch')?.value.trim()
       const from   = document.getElementById('dAdsFrom')?.value
       const to     = document.getElementById('dAdsTo')?.value
-      let q = db.from('ad_reports').select('campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts').order('day', { ascending: false })
-      if (search) q = q.ilike('campaign_name', `%${search}%`)
-      if (from)   q = q.gte('day', from)
-      if (to)     q = q.lte('day', to)
-      const { data: d, error } = await q; if (error) throw error
+      const { rows: d } = await apiCall('ad_report_crud', { method: 'export', search, from, to }, { timeout: 120000 })
       data = d || []; filename = 'ad_reports'; sheetName = '广告报告'
     } else if (tab === 'analytics') {
       const thead = document.getElementById('analyticsHead')
@@ -742,12 +713,8 @@ async function confirmImport() {
   btn.textContent = '扫描重复中…'; btn.disabled = true
   try {
     const phones = [...new Set(mapped.map(r => String(r.phone || '')).filter(p => p))]
-    for (let i = 0; i < phones.length; i += 100) {
-      const chunk = phones.slice(i, i + 100)
-      const { data, error } = await db.from('leads').select('id, phone').in('phone', chunk)
-      if (error) throw error
-      for (const row of (data || [])) _importConflicts[String(row.phone)] = row.id
-    }
+    const { conflicts } = await apiCall('lead_crud', { method: 'check_phones', phones }, { timeout: 120000 })
+    _importConflicts = conflicts || {}
 
     const conflictCount = Object.keys(_importConflicts).length
     if (conflictCount === 0) { await executeImport('insert'); return }
@@ -776,48 +743,17 @@ async function executeImport(mode) {
   const btn = document.getElementById('importConfirmBtn')
   const cz  = document.getElementById('importConflictZone')
   btn.disabled = true; cz.style.display = 'none'
-  const table = _importType === 'leads' ? 'leads' : 'ad_reports'
-  const rows  = _importMapped
-  let toInsert = rows
-  let deleteIds = []
-
-  if (mode === 'skip') {
-    // 只插入不在冲突表里的行
-    toInsert = rows.filter(r => !_importConflicts[String(r.phone || '')])
-  } else if (mode === 'overwrite') {
-    // 先删旧记录，再插入全部（CSV 内部同一手机号只保留最后一行）
-    deleteIds = Object.values(_importConflicts)
-    const seen = new Set()
-    toInsert = rows.filter(r => {
-      const ph = String(r.phone || '')
-      if (!ph) return true
-      if (seen.has(ph)) return false
-      seen.add(ph); return true
-    })
-  }
-
-  let inserted = 0
   btn.textContent = '导入中…'
   try {
-    // 删除冲突旧记录（overwrite 模式）
-    for (let i = 0; i < deleteIds.length; i += 100) {
-      const { error } = await db.from(table).delete().in('id', deleteIds.slice(i, i + 100))
-      if (error) throw error
-    }
-    // 插入新行
-    for (let i = 0; i < toInsert.length; i += 100) {
-      const { error } = await db.from(table).insert(toInsert.slice(i, i + 100))
-      if (error) throw error
-      inserted += Math.min(100, toInsert.length - i)
-      btn.textContent = '导入中… ' + inserted + '/' + toInsert.length
-    }
+    // 重复处理（跳过 / 覆盖同手机号）在后端执行
+    const action = _importType === 'leads' ? 'lead_crud' : 'ad_report_crud'
+    const r = await apiCall(action, { method: 'import', mode, rows: _importMapped }, { timeout: 120000 })
     closeImportModal()
-    const overwriteCount = deleteIds.length
     const msg = mode === 'skip'
-      ? `✅ 导入完成：新增 ${inserted} 条，跳过 ${Object.keys(_importConflicts).length} 条重复`
+      ? `✅ 导入完成：新增 ${r.inserted} 条，跳过 ${r.skipped} 条重复`
       : mode === 'overwrite'
-      ? `✅ 导入完成：覆盖 ${overwriteCount} 条，新增 ${inserted - overwriteCount} 条`
-      : `✅ 成功导入 ${inserted} 条`
+      ? `✅ 导入完成：覆盖 ${r.overwritten} 条，新增 ${r.inserted - r.overwritten} 条`
+      : `✅ 成功导入 ${r.inserted} 条`
     toast(msg, 'success')
     if (_importType === 'leads') loadLeads(1); else loadAdReports(1)
   } catch(e) {

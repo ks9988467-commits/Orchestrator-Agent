@@ -240,6 +240,83 @@ check('recent_convs: user messages only, newest first', h1.json.recent_convs?.[0
   (h1.json.recent_convs || []).every((c: { role: string }) => c.role === 'user'), h1.json.recent_convs)
 const hBad = await api('home_summary', { month_start: '2026-9-1', today_start: todayStart })
 check('bad month_start → 400', hBad.status === 400, hBad.json)
+await dbDelete('leads', { name: `eq.${MARK}` })   // section 9 searches leads by MARK
+
+// ── 9. data page: accounts / leads / ad reports / data entries / analytics ──
+// Every test row's name / campaign / file name starts with MARK (cleanup relies on it).
+console.log('\n[9] data page')
+const P = `9${String(Date.now()).slice(-7)}`   // phone prefix unique to this run
+await dbInsert('accounts', [{ id: `${MARK}_acc1`, name: 'B acct', active: true }, { id: `${MARK}_acc2`, name: 'A acct', active: false }])
+const acc = await api('account_crud', { method: 'list' })
+const accIds = (acc.json.accounts || []).map((a: { id: string }) => a.id)
+check('account_crud list: active accounts only', acc.status === 200 && accIds.includes(`${MARK}_acc1`) && !accIds.includes(`${MARK}_acc2`), acc.json)
+
+const imp = await api('lead_crud', { method: 'import', mode: 'insert', rows: [
+  { name: `${MARK} one`, phone: `${P}01`, date: '2026-01-05', labels: '[Google] x' },
+  { name: `${MARK} two`, phone: `${P}02`, date: '', email: 'a@b.c', bogus: 'x' },
+  { name: `${MARK}, three (x)`, phone: `${P}03`, date: '2026-01-20' },
+] })
+check('lead import (insert): rows with different keys and an unknown column', imp.status === 200 && imp.json.inserted === 3, imp.json)
+const two = await dbGet('leads', 'date,email', { phone: `eq.${P}02` })
+check("lead import: '' date stored as null", two.length === 1 && two[0].date === null && two[0].email === 'a@b.c', two)
+
+const lp = await api('lead_crud', { method: 'list', search: MARK, page: 2, limit: 2 })
+check('lead list: search + page 2 of size 2 → 1 row, total 3', lp.json.rows?.length === 1 && lp.json.count === 3, lp.json)
+const lc = await api('lead_crud', { method: 'list', search: `${MARK}, three (x)"` })
+check('lead list: search text with comma, parentheses and a quote', lc.status === 200 && lc.json.count === 1, lc.json)
+const lph = await api('lead_crud', { method: 'list', search: `${P}03` })
+check('lead list: search matches phone', lph.json.count === 1, lph.json)
+const ld = await api('lead_crud', { method: 'list', search: MARK, from: '2026-01-01', to: '2026-01-10' })
+check('lead list: date range', ld.json.count === 1 && ld.json.rows?.[0]?.name === `${MARK} one`, ld.json)
+const ll = await api('lead_crud', { method: 'list', search: MARK, label: 'google' })
+check('lead list: label filter (case-insensitive)', ll.json.count === 1, ll.json)
+const lx = await api('lead_crud', { method: 'export', search: MARK })
+check('lead export: all matching rows', lx.status === 200 && lx.json.rows?.length === 3, lx.json)
+
+const cp = await api('lead_crud', { method: 'check_phones', phones: [`${P}01`, `${P}99`] })
+check('check_phones: returns only existing phones', Object.keys(cp.json.conflicts || {}).join() === `${P}01`, cp.json)
+const sk = await api('lead_crud', { method: 'import', mode: 'skip', rows: [
+  { name: `${MARK} dup`, phone: `${P}01` }, { name: `${MARK} four`, phone: `${P}04` },
+] })
+const p01 = await dbGet('leads', 'name', { phone: `eq.${P}01` })
+check('import skip: new row added, existing phone untouched', sk.json.inserted === 1 && sk.json.skipped === 1 && p01.length === 1 && p01[0].name === `${MARK} one`, { res: sk.json, p01 })
+const ow = await api('lead_crud', { method: 'import', mode: 'overwrite', rows: [
+  { name: `${MARK} replaced`, phone: `${P}02` }, { name: `${MARK} dup in file`, phone: `${P}02` }, { name: `${MARK} five`, phone: `${P}05` },
+] })
+const p02 = await dbGet('leads', 'name', { phone: `eq.${P}02` })
+check('import overwrite: old lead replaced, first row per phone wins, new row added',
+  ow.json.overwritten === 1 && ow.json.inserted === 2 && p02.length === 1 && p02[0].name === `${MARK} replaced`, { res: ow.json, p02 })
+const badMode = await api('lead_crud', { method: 'import', mode: 'nope', rows: [{ name: MARK }] })
+const noRows = await api('lead_crud', { method: 'import', rows: [{ bogus: 1 }, { name: '' }] })
+check('import: unknown mode → 400; no valid rows → 400', badMode.status === 400 && noRows.status === 400, { badMode: badMode.json, noRows: noRows.json })
+
+const ai = await api('ad_report_crud', { method: 'import', rows: [
+  { campaign_name: `${MARK} camp A`, day: '2026-02-01', amount_spent_myr: '120.5', results: '4', frequency: '' },
+  { campaign_name: `${MARK} camp B`, day: '2026-02-02', amount_spent_myr: 80 },
+] })
+check('ad import: 2 rows', ai.status === 200 && ai.json.inserted === 2, ai.json)
+const alist = await api('ad_report_crud', { method: 'list', search: MARK })
+check('ad list: highest spend first, numbers as numbers, blank → null',
+  alist.json.count === 2 && alist.json.rows?.[0]?.campaign_name === `${MARK} camp A` && alist.json.rows[0].amount_spent_myr === 120.5 && alist.json.rows[0].frequency === null, alist.json.rows)
+const adup = await api('ad_report_crud', { method: 'import', rows: [{ campaign_name: `${MARK} camp A`, day: '2026-02-01' }] })
+check('ad import: duplicate campaign + day → error returned', adup.status === 500 && !!adup.json.error, adup.json)
+const ax = await api('ad_report_crud', { method: 'export', search: MARK, from: '2026-02-02' })
+check('ad export: filters apply', ax.json.rows?.length === 1 && ax.json.rows[0].campaign_name === `${MARK} camp B`, ax.json)
+
+await dbInsert('data_entries', [
+  { file_name: `${MARK}.pdf`, file_type: 'pdf', structured_data: { total: 1 } },
+  { file_name: `${MARK}.png`, file_type: 'image', structured_data: null },
+])
+const de = await api('data_entry_crud', { method: 'list', search: MARK, file_type: 'pdf' })
+check('data_entry list: search + type filter, jsonb returned as object', de.json.count === 1 && de.json.rows?.[0]?.structured_data?.total === 1, de.json)
+
+await dbInsert('analytics_daily', [
+  { campaign_name: MARK, date: '2026-03-01', spend_myr: 10 },
+  { campaign_name: MARK, date: '2026-03-05', spend_myr: 20 },
+])
+const anl = await api('analytics_crud', { method: 'list', from: '2026-03-02', to: '2026-03-31' })
+const anMine = (anl.json.rows || []).filter((r: { campaign_name: string }) => r.campaign_name === MARK)
+check('analytics list: date range', anl.status === 200 && anMine.length === 1 && anMine[0].spend_myr === 20, anMine)
 
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
@@ -247,17 +324,23 @@ await dbDelete('conversations', { session_id: `eq.${MARK}` })
 await dbDelete('agents', { id: `like.${MARK}*` })
 await dbDelete('agent_skills', { agent: `like.${MARK}*` })
 await dbDelete('agent_suggestions', { session_id: `eq.${MARK}` })
-await dbDelete('leads', { name: `eq.${MARK}` })
+await dbDelete('leads', { name: `like.${MARK}*` })
 await dbDelete('analytics_daily', { campaign_name: `eq.${MARK}` })
 await dbDelete('alerts', { rule_name: `eq.${MARK}` })
+await dbDelete('accounts', { id: `like.${MARK}*` })
+await dbDelete('ad_reports', { campaign_name: `like.${MARK}*` })
+await dbDelete('data_entries', { file_name: `like.${MARK}*` })
 const leftover = [
   ...await dbGet('conversations', 'id', { session_id: `eq.${MARK}` }),
   ...await dbGet('agents', 'id', { id: `like.${MARK}*` }),
   ...await dbGet('agent_skills', 'id', { agent: `like.${MARK}*` }),
   ...await dbGet('agent_suggestions', 'id', { session_id: `eq.${MARK}` }),
-  ...await dbGet('leads', 'id', { name: `eq.${MARK}` }),
+  ...await dbGet('leads', 'id', { name: `like.${MARK}*` }),
   ...await dbGet('analytics_daily', 'id', { campaign_name: `eq.${MARK}` }),
   ...await dbGet('alerts', 'id', { rule_name: `eq.${MARK}` }),
+  ...await dbGet('accounts', 'id', { id: `like.${MARK}*` }),
+  ...await dbGet('ad_reports', 'id', { campaign_name: `like.${MARK}*` }),
+  ...await dbGet('data_entries', 'id', { file_name: `like.${MARK}*` }),
 ]
 check('cleanup removed test rows', leftover.length === 0, leftover)
 

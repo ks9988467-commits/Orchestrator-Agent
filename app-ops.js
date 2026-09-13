@@ -1220,11 +1220,7 @@ async function loadAnalytics() {
   if (!body) return
   body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--ink-5);padding:40px">加载中…</td></tr>'
   try {
-    let q = db.from('analytics_daily').select('*').order('date', { ascending: false })
-    if (from) q = q.gte('date', from)
-    if (to)   q = q.lte('date', to)
-    const { data, error } = await q
-    if (error) throw error
+    const { rows: data } = await apiCall('analytics_crud', { method: 'list', from, to })
     const rows = data || []
     // Aggregate
     const agg = {}

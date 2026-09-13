@@ -200,6 +200,40 @@ function tenantFilters(extra: Record<string,string> = {}): Record<string,string>
   return extra
 }
 
+// Search text for an ilike filter, wrapped in `*` wildcards. `"` and `\` are
+// removed so the pattern can sit inside quotes in an or=(…) list.
+function likePattern(s: unknown): string {
+  return `*${String(s ?? '').replace(/["\\]/g, '').trim()}*`
+}
+
+// Rows imported from the dashboard: keep allowed columns, drop blank values
+// ('' would be rejected by date/numeric columns) and give every row the same
+// keys — a batch insert rejects rows whose keys differ.
+function normalizeImportRows(rows: unknown, cols: string[]): Record<string, unknown>[] {
+  if (!Array.isArray(rows)) return []
+  const picked = rows.map(r => {
+    const out: Record<string, unknown> = {}
+    for (const c of cols) {
+      const v = (r as Record<string, unknown> | null)?.[c]
+      if (v !== undefined && v !== null && String(v).trim() !== '') out[c] = v
+    }
+    return out
+  }).filter(r => Object.keys(r).length > 0)
+  const used = cols.filter(c => picked.some(r => c in r))
+  return picked.map(r => Object.fromEntries(used.map(c => [c, r[c] ?? null])))
+}
+
+async function insertInChunks(table: string, rows: Record<string, unknown>[]): Promise<{ inserted: number; error?: string }> {
+  let inserted = 0
+  for (let i = 0; i < rows.length; i += 100) {
+    const chunk = rows.slice(i, i + 100)
+    const r = await dbInsert(table, chunk)
+    if (!r.ok) return { inserted, error: r.error || 'insert failed' }
+    inserted += chunk.length
+  }
+  return { inserted }
+}
+
 // ── DB helpers moved to ./db.ts (dbGet/dbPatch/dbInsert/dbUpsert/dbInsertReturning)
 //    Imported at top. Same signatures; backend switched by env DB_DRIVER.
 
@@ -2936,6 +2970,137 @@ Return ONLY a valid JSON array, no markdown:
         ok: true, analytics, alerts, recent_convs, active_agents,
         lead_count: leads.count, gap_count: gaps.count, skill_count: skills.count, today_conv_count: today.count,
       }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Data page (数据): accounts / leads / ad reports / data entries / analytics ──
+    if (body.action === 'account_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const accounts = await dbGet('accounts', 'id,name', tenantFilters({ active: 'eq.true' }), 'name.asc')
+        return new Response(JSON.stringify({ ok: true, accounts }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'lead_crud') {
+      const m = String(body.method || 'list')
+      const filt: Record<string, string> = {}
+      if (body.search)     filt['or']         = `(name.ilike."${likePattern(body.search)}",phone.ilike."${likePattern(body.search)}")`
+      if (body.from)       filt['date']       = `gte.${String(body.from)}`
+      if (body.to)         filt['date2']      = `lte.${String(body.to)}`
+      if (body.label)      filt['labels']     = `ilike.${likePattern(body.label)}`
+      if (body.account_id) filt['account_id'] = `eq.${String(body.account_id)}`
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 200)
+        const page  = Math.max(Number(body.page) || 1, 1)
+        const { rows, count } = await dbGetPage('leads', '*', tenantFilters(filt), 'date.desc', limit, (page - 1) * limit)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'export') {
+        const rows = await dbGet('leads', 'date,name,phone,email,labels,campaign_source,created_at', tenantFilters(filt), 'date.desc', 10000)
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      // phone → id of an existing lead with that phone
+      const findConflicts = async (phones: string[]) => {
+        const found: Record<string, string> = {}
+        const uniq = [...new Set(phones.map(p => p.replace(/["\\]/g, '')).filter(Boolean))]
+        for (let i = 0; i < uniq.length; i += 100) {
+          const list = uniq.slice(i, i + 100).map(p => `"${p}"`).join(',')
+          const rows = await dbGet('leads', 'id,phone', tenantFilters({ phone: `in.(${list})` })) as { id: string; phone: string }[]
+          for (const r of rows) found[String(r.phone)] = r.id
+        }
+        return found
+      }
+      if (m === 'check_phones') {
+        const phones = Array.isArray(body.phones) ? (body.phones as unknown[]).map(String) : []
+        return new Response(JSON.stringify({ ok: true, conflicts: await findConflicts(phones) }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'import') {
+        // mode: insert | skip (leave leads whose phone exists) | overwrite (replace them)
+        const mode = String(body.mode || 'insert')
+        if (!['insert', 'skip', 'overwrite'].includes(mode)) return new Response(JSON.stringify({ error: 'unknown mode' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        let rows = normalizeImportRows(body.rows, ['date', 'name', 'phone', 'email', 'labels', 'campaign_source', 'account_id'])
+        if (!rows.length || rows.length > 20000) return new Response(JSON.stringify({ error: 'rows: 1–20000 valid rows required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        let skipped = 0, deleteIds: string[] = []
+        if (mode !== 'insert') {
+          const conflicts = await findConflicts(rows.map(r => String(r.phone ?? '')))
+          if (mode === 'skip') {
+            skipped = Object.keys(conflicts).length
+            rows = rows.filter(r => !conflicts[String(r.phone ?? '')])
+          } else {
+            deleteIds = Object.values(conflicts)
+            const seen = new Set<string>()   // within the file, the first row per phone wins
+            rows = rows.filter(r => {
+              const ph = String(r.phone ?? '')
+              if (!ph) return true
+              if (seen.has(ph)) return false
+              seen.add(ph); return true
+            })
+          }
+        }
+        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        // Insert first, then delete the leads being replaced: a failed insert leaves the old data intact.
+        const res = await insertInChunks('leads', rows)
+        if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        for (let i = 0; i < deleteIds.length; i += 100) await dbDelete('leads', { id: `in.(${deleteIds.slice(i, i + 100).join(',')})` })
+        return new Response(JSON.stringify({ ok: true, inserted: res.inserted, skipped, overwritten: deleteIds.length }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'ad_report_crud') {
+      const m = String(body.method || 'list')
+      const COLS = 'campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts'
+      const filt: Record<string, string> = {}
+      if (body.search)     filt['campaign_name'] = `ilike.${likePattern(body.search)}`
+      if (body.from)       filt['day']           = `gte.${String(body.from)}`
+      if (body.to)         filt['day2']          = `lte.${String(body.to)}`
+      if (body.account_id) filt['account_id']    = `eq.${String(body.account_id)}`
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 200)
+        const page  = Math.max(Number(body.page) || 1, 1)
+        const { rows, count } = await dbGetPage('ad_reports', COLS, tenantFilters(filt), 'amount_spent_myr.desc', limit, (page - 1) * limit)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'export') {
+        const rows = await dbGet('ad_reports', COLS, tenantFilters(filt), 'day.desc', 10000)
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'import') {
+        const rows = normalizeImportRows(body.rows, [...COLS.split(','), 'account_id'])
+        if (!rows.length || rows.length > 20000) return new Response(JSON.stringify({ error: 'rows: 1–20000 valid rows required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        const res = await insertInChunks('ad_reports', rows)
+        if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true, inserted: res.inserted }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'data_entry_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.search)    filt['file_name'] = `ilike.${likePattern(body.search)}`
+        if (body.file_type) filt['file_type'] = `eq.${String(body.file_type)}`
+        const { rows, count } = await dbGetPage('data_entries', '*', tenantFilters(filt), 'created_at.desc', 50, 0)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'analytics_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.from) filt['date']  = `gte.${String(body.from)}`
+        if (body.to)   filt['date2'] = `lte.${String(body.to)}`
+        const rows = await dbGet('analytics_daily', '*', tenantFilters(filt), 'date.desc')
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // ── API integrations (API 集成) ─────────────────────────────────────
