@@ -24,3 +24,4 @@ Thumbs.db
 .claude/launch.json
 supabase/.temp/
 design-preview.html
+local/storage/

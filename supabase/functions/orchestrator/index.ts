@@ -2,6 +2,7 @@
 // Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
 // old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
+import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile } from './storage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -12,7 +13,7 @@ const SELF_URL = Deno.env.get('ORCH_SELF_URL') || `${SUPABASE_URL}/functions/v1/
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-file-name',
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
 }
 
@@ -2071,6 +2072,49 @@ async function extractPrefs(message: string, response: string, providers: Provid
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
+  // ── File storage ──────────────────────────────────────────────────
+  // POST <base>/files/<bucket>         upload; raw file body, original name in x-file-name
+  // GET  <base>/files/<bucket>/<name>  download (local driver; Supabase serves its own URLs)
+  const fileRoute = new URL(req.url).pathname.match(/\/files\/([a-z0-9-]+)(?:\/([^/]+))?\/?$/)
+  if (fileRoute) {
+    const [, bucket, rawName] = fileRoute
+    const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    const decode = (s: string) => { try { return decodeURIComponent(s) } catch { return '' } }
+    if (!BUCKETS.includes(bucket)) return json({ error: 'unknown bucket' }, 404)
+    if (req.method === 'POST' && !rawName) {
+      const original = decode(req.headers.get('x-file-name') || '')
+      if (!original) return json({ error: 'x-file-name header required' }, 400)
+      if (Number(req.headers.get('content-length') || 0) > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
+      const data = new Uint8Array(await req.arrayBuffer())
+      if (!data.length) return json({ error: 'empty file' }, 400)
+      if (data.length > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
+      const name = objectName(original)
+      const type = req.headers.get('content-type') || 'application/octet-stream'
+      try {
+        await putFile(bucket, name, data, type)
+      } catch (e) {
+        console.error('putFile', bucket, name, e)
+        return json({ error: (e as Error).message }, 500)
+      }
+      return json({ ok: true, url: publicUrl(bucket, name), name, size: data.length, type })
+    }
+    if (req.method === 'GET' && rawName && USE_LOCAL_STORAGE) {
+      const name = decode(rawName)
+      if (!isValidName(name)) return json({ error: 'not found' }, 404)
+      const data = await readFile(bucket, name)
+      if (!data) return json({ error: 'not found' }, 404)
+      const type = contentTypeFor(name)
+      const headers: Record<string, string> = {
+        ...CORS, 'Content-Type': type, 'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': `${INLINE_TYPES.has(type) ? 'inline' : 'attachment'}; filename="${name}"`,
+      }
+      // No scripts for anything served from here (Chrome refuses to render a PDF under a sandbox CSP)
+      if (type !== 'application/pdf') headers['Content-Security-Policy'] = 'sandbox'
+      return new Response(data, { headers })
+    }
+    return json({ error: 'method not allowed' }, 405)
+  }
+
   // ── WhatsApp webhook verification (GET) ───────────────────────────
   if (req.method === 'GET') {
     const url   = new URL(req.url)
@@ -3232,6 +3276,89 @@ Return ONLY a valid JSON array, no markdown:
         await markRead(messages)
         const unread_from = [...new Set(unread.filter(r => r.from_id !== peer).map(r => r.from_id))]
         return new Response(JSON.stringify({ ok: true, messages, unread_from }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Document approval (文件审批) ─────────────────────────────────────
+    // Attachments are uploaded first via POST <base>/files/documents. The
+    // document status is recomputed here after every reviewer decision.
+    if (body.action === 'document_crud') {
+      const m = String(body.method || 'list')
+      const DOC_COLS = 'id,title,notes,file_url,file_name,file_type,file_size,status,uploaded_by,tenant_id,created_at'
+
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.status) filt['status'] = `eq.${String(body.status)}`
+        let docs = await dbGet('documents', DOC_COLS, tenantFilters(filt), 'created_at.desc', 100) as Record<string, unknown>[]
+        // Members see only documents they uploaded or review (viewer_email = the session email)
+        const viewer = String(body.viewer_email || '').trim()
+        if (body.role === 'member' && viewer) {
+          const mine = await dbGet('document_reviewers', 'document_id', { contact: `eq.${viewer}` }) as { document_id: string }[]
+          const reviewing = new Set(mine.map(r => r.document_id))
+          docs = docs.filter(d => d.uploaded_by === viewer || reviewing.has(String(d.id)))
+        }
+        const ids = docs.map(d => String(d.id))
+        const revs = ids.length ? await dbGet('document_reviewers', 'document_id,decision', { document_id: `in.(${ids.join(',')})` }) as { document_id: string; decision: string | null }[] : []
+        for (const d of docs) d.decisions = revs.filter(r => r.document_id === d.id).map(r => r.decision)
+        return new Response(JSON.stringify({ ok: true, documents: docs }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'get') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [doc] = await dbGet('documents', DOC_COLS, tenantFilters({ id: `eq.${id}` }), undefined, 1)
+        if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const reviewers = await dbGet('document_reviewers', 'id,document_id,name,contact,decision,comment,decided_at,created_at', { document_id: `eq.${id}` }, 'created_at.asc')
+        return new Response(JSON.stringify({ ok: true, document: doc, reviewers }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'create') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const title = String(d.title ?? '').trim()
+        const reviewers = (Array.isArray(body.reviewers) ? body.reviewers as Record<string, unknown>[] : [])
+          .map(r => ({ name: String(r?.name ?? '').trim(), contact: String(r?.contact ?? '').trim() || null }))
+          .filter(r => r.name)
+        if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (!reviewers.length) return new Response(JSON.stringify({ error: 'at least one reviewer required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const doc = await dbInsertReturning('documents', {
+          title, notes: String(d.notes ?? '').trim() || null,
+          file_url: d.file_url || null, file_name: d.file_name || null, file_type: d.file_type || null,
+          file_size: d.file_size ? Number(d.file_size) : null, status: 'pending',
+          tenant_id: _reqTenantId, uploaded_by: d.uploaded_by || null,
+        })
+        const ins = await dbInsert('document_reviewers', reviewers.map(r => ({ document_id: doc.id, ...r })))
+        if (!ins.ok) {
+          await dbDelete('documents', { id: `eq.${doc.id}` })   // no document without reviewers
+          return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true, id: doc.id }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'decide') {
+        const reviewerId = String(body.reviewer_id || '')
+        const decision = String(body.decision || '')
+        if (!reviewerId || !['approved', 'rejected'].includes(decision)) return new Response(JSON.stringify({ error: 'reviewer_id and decision (approved | rejected) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [rev] = await dbGet('document_reviewers', 'id,document_id', { id: `eq.${reviewerId}` }, undefined, 1)
+        if (!rev) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbPatch('document_reviewers', reviewerId, { decision, comment: String(body.comment ?? '').trim() || null, decided_at: new Date().toISOString() })
+        const all = await dbGet('document_reviewers', 'decision', { document_id: `eq.${rev.document_id}` }) as { decision: string | null }[]
+        const approved = all.filter(r => r.decision === 'approved').length
+        const rejected = all.filter(r => r.decision === 'rejected').length
+        const status = rejected > 0 ? 'rejected' : approved === all.length ? 'approved' : approved > 0 ? 'partial' : 'pending'
+        await dbPatch('documents', String(rev.document_id), { status })
+        return new Response(JSON.stringify({ ok: true, status }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [doc] = await dbGet('documents', 'id,file_url', tenantFilters({ id: `eq.${id}` }), undefined, 1)
+        if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('documents', { id: `eq.${id}` })   // reviewers go with it (ON DELETE CASCADE)
+        // Best effort: the record is already gone, and a leftover file is harmless
+        const name = doc.file_url ? nameFromUrl('documents', String(doc.file_url)) : null
+        let file_deleted = false
+        if (name) {
+          try { await deleteFile('documents', name); file_deleted = true } catch (e) { console.error('deleteFile documents', name, e) }
+        }
+        return new Response(JSON.stringify({ ok: true, file_deleted }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }

@@ -521,38 +521,19 @@ async function loadDocs() {
   wrap.innerHTML = '<p style="color:var(--ink-5);font-size:13px">加载中…</p>'
   const sf = document.getElementById('docStatusFilter')?.value || ''
   try {
-    let q = db.from('documents').select('id,title,file_name,file_url,file_type,status,uploaded_by,notes,created_at')
-               .order('created_at', { ascending: false }).limit(100)
-    if (_session.tenant_id) q = q.eq('tenant_id', _session.tenant_id)
-    if (sf) q = q.eq('status', sf)
-    const { data: allDocs, error } = await q
-    if (error) throw error
-    // Member 只能看自己上传 + 自己是审批人的文件
-    let docs = allDocs || []
-    if (_session.role === 'member' && _session.email) {
-      const { data: myRevDocs } = await db.from('document_reviewers')
-        .select('document_id').eq('contact', _session.email)
-      const myRevIds = new Set((myRevDocs || []).map(r => r.document_id))
-      docs = docs.filter(d => d.uploaded_by === _session.email || myRevIds.has(d.id))
-    }
+    // Member 只能看自己上传 + 自己是审批人的文件（后端按 viewer_email 过滤）
+    const { documents } = await apiCall('document_crud', { method: 'list', status: sf, viewer_email: _session.email || undefined })
+    const docs = documents || []
     const badge = document.getElementById('docsCountBadge')
     if (badge) badge.textContent = docs?.length ? `共 ${docs.length} 条` : ''
     if (!docs || !docs.length) {
       wrap.innerHTML = '<div style="text-align:center;padding:48px 0;color:var(--ink-5);font-size:13px">暂无文件记录<br><span style="font-size:11px">点击「+ 上传文件」开始</span></div>'
       return
     }
-    // load reviewer counts per doc
-    const ids = docs.map(d => d.id)
-    const { data: revs } = await db.from('document_reviewers')
-      .select('document_id,decision').in('document_id', ids)
-    const revMap = {}
-    ;(revs || []).forEach(r => {
-      if (!revMap[r.document_id]) revMap[r.document_id] = []
-      revMap[r.document_id].push(r.decision)
-    })
+    // 每个文件的审批结果由后端一并返回（doc.decisions）
     wrap.innerHTML = `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden">`
       + docs.map((doc, i) => {
-        const revList = revMap[doc.id] || []
+        const revList = doc.decisions || []
         const total = revList.length
         const approved = revList.filter(d => d === 'approved').length
         const rejected = revList.filter(d => d === 'rejected').length
@@ -668,27 +649,21 @@ async function submitDocUpload() {
   btn.disabled = true; btn.textContent = '上传中…'
   try {
     let file_url = null, file_name = null, file_type = null, file_size = null
-    // 1. upload file to Storage (optional — can submit without file)
+    // 1. 上传附件（可选 — 可以不带附件提交）
     if (_uploadDocFile) {
-      const safeName = `${Date.now()}_${_uploadDocFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-      const { data: upData, error: upErr } = await db.storage.from('documents').upload(safeName, _uploadDocFile, { contentType: _uploadDocFile.type, upsert: false })
-      if (upErr) throw new Error('文件上传失败：' + upErr.message)
-      const { data: { publicUrl } } = db.storage.from('documents').getPublicUrl(upData.path)
-      file_url  = publicUrl
+      let up
+      try { up = await uploadFile('documents', _uploadDocFile) }
+      catch (err) { throw new Error('文件上传失败：' + err.message) }
+      file_url  = up.url
       file_name = _uploadDocFile.name
       file_type = _uploadDocFile.type
       file_size = _uploadDocFile.size
     }
-    // 2. insert document
-    const { data: doc, error: dErr } = await db.from('documents')
-      .insert({ title, notes: notes || null, file_url, file_name, file_type, file_size, status: 'pending',
-                tenant_id: _session.tenant_id || null, uploaded_by: _session.email || null })
-      .select('id').single()
-    if (dErr) throw new Error(dErr.message)
-    // 3. insert reviewers
-    const reviewerRows = _docReviewers.map(r => ({ document_id: doc.id, name: r.name, contact: r.contact || null }))
-    const { error: rErr } = await db.from('document_reviewers').insert(reviewerRows)
-    if (rErr) throw new Error(rErr.message)
+    // 2. 创建文件记录和审批人
+    const { id: docId } = await apiCall('document_crud', { method: 'create',
+      data: { title, notes: notes || null, file_url, file_name, file_type, file_size, uploaded_by: _session.email || null },
+      reviewers: _docReviewers })
+    const doc = { id: docId }
     toast('文件已提交审批！', 'success')
     closeUploadDocModal()
     pageLoaded['review'] = false
@@ -723,11 +698,7 @@ async function openDocDetail(id) {
   document.getElementById('ddMeta').innerHTML = ''
   document.getElementById('ddReviewers').innerHTML = '<p style="color:var(--ink-5);font-size:12px">加载中…</p>'
   try {
-    const [{ data: doc, error: dErr }, { data: revs, error: rErr }] = await Promise.all([
-      db.from('documents').select('*').eq('id', id).single(),
-      db.from('document_reviewers').select('*').eq('document_id', id).order('created_at')
-    ])
-    if (dErr) throw dErr
+    const { document: doc, reviewers: revs } = await apiCall('document_crud', { method: 'get', id })
     _currentDoc = doc  // store for notification calls
     // Delete button visibility: uploader or admin/master only
     const canDelete = _session.role === 'admin' || _session.role === 'master'
@@ -800,12 +771,10 @@ function closeDocDetail() {
 
 async function makeDocDecision(reviewerId, decision) {
   const comment = (document.getElementById('cmt_' + reviewerId)?.value || '').trim()
-  const { error } = await db.from('document_reviewers')
-    .update({ decision, comment: comment || null, decided_at: new Date().toISOString() })
-    .eq('id', reviewerId)
-  if (error) { toast('操作失败：' + error.message, 'error'); return }
-  // recalculate document status
-  await _recalcDocStatus(_currentDocId)
+  try {
+    // 后端记录决定并重新计算文件状态
+    await apiCall('document_crud', { method: 'decide', reviewer_id: reviewerId, decision, comment })
+  } catch(e) { toast('操作失败：' + e.message, 'error'); return }
   toast(decision === 'approved' ? '已批准' : '已拒绝', decision === 'approved' ? 'success' : 'error')
   openDocDetail(_currentDocId) // refresh detail
   loadDocs()                   // refresh list
@@ -823,35 +792,14 @@ async function makeDocDecision(reviewerId, decision) {
   }
 }
 
-async function _recalcDocStatus(docId) {
-  const { data: revs } = await db.from('document_reviewers')
-    .select('decision').eq('document_id', docId)
-  if (!revs || !revs.length) return
-  const total    = revs.length
-  const approved = revs.filter(r => r.decision === 'approved').length
-  const rejected = revs.filter(r => r.decision === 'rejected').length
-  let status = 'pending'
-  if (rejected > 0)                    status = 'rejected'
-  else if (approved === total)         status = 'approved'
-  else if (approved > 0)               status = 'partial'
-  await db.from('documents').update({ status }).eq('id', docId)
-}
-
 async function deleteDoc() {
   if (!_currentDocId) return
   if (!confirm('确定删除此文件及所有审批记录？此操作不可恢复。')) return
   const btn = document.getElementById('ddDeleteBtn')
   if (btn) btn.disabled = true
   try {
-    // get file path to delete from storage
-    const { data: doc } = await db.from('documents').select('file_url,file_name').eq('id', _currentDocId).single()
-    const { error } = await db.from('documents').delete().eq('id', _currentDocId)
-    if (error) throw error
-    // try delete from storage (best effort)
-    if (doc?.file_url) {
-      const path = doc.file_url.split('/documents/')[1]
-      if (path) await db.storage.from('documents').remove([path])
-    }
+    // 后端删除记录（审批人随之删除），并尽量删除附件
+    await apiCall('document_crud', { method: 'delete', id: _currentDocId })
     toast('文件已删除', 'success')
     closeDocDetail()
     loadDocs()

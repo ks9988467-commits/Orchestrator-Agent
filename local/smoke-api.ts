@@ -392,9 +392,87 @@ check('list marks read only the messages it returned', stillUnread.join() === [`
 const noPeer = await api('direct_message_crud', { method: 'list', me: C })
 check('list without peer → 400', noPeer.status === 400, noPeer.json)
 
+// ── 12. file storage + document approval ───────────────────────────────
+console.log('\n[12] file storage / documents')
+// With the local driver a missing file is a 404; the Supabase driver has no GET route (405)
+const probe = await fetch(`${BASE}/files/documents/apismoke_probe_missing.txt`)
+await probe.body?.cancel()
+const storageIsLocal = probe.status === 404
+let docFileUrl = '', htmlFileUrl = ''
+if (!storageIsLocal) {
+  console.log(`  (skipped file storage tests: backend is not on STORAGE_DRIVER=local — probe returned ${probe.status})`)
+} else {
+  const upload = (bucket: string, name: string | null, body: string, type = 'text/plain') => fetch(`${BASE}/files/${bucket}`, {
+    method: 'POST', headers: { 'Content-Type': type, ...(name === null ? {} : { 'x-file-name': encodeURIComponent(name) }) }, body,
+  })
+  const up = await upload('documents', `${MARK} 报告.txt`, 'hello 文件')
+  const upj = await up.json()
+  check('upload: backend URL, sanitized object name, byte size', up.status === 200 && String(upj.url).startsWith(`${BASE}/files/documents/`) &&
+    /^[A-Za-z0-9._-]+$/.test(upj.name) && upj.size === new TextEncoder().encode('hello 文件').length, upj)
+  const dl = await fetch(upj.url)
+  const dlText = await dl.text()
+  check('download: same content, text/plain inline, nosniff + sandbox CSP', dl.status === 200 && dlText === 'hello 文件' &&
+    (dl.headers.get('content-type') || '').startsWith('text/plain') && dl.headers.get('x-content-type-options') === 'nosniff' &&
+    dl.headers.get('content-security-policy') === 'sandbox' && (dl.headers.get('content-disposition') || '').startsWith('inline'), Object.fromEntries(dl.headers))
+  const upHtml = await (await upload('documents', `${MARK}.html`, '<script>alert(1)</script>', 'text/html')).json()
+  const dlHtml = await fetch(upHtml.url)
+  await dlHtml.body?.cancel()
+  check('download: an HTML upload is served as an attachment, never inline', dlHtml.status === 200 &&
+    (dlHtml.headers.get('content-disposition') || '').startsWith('attachment') && dlHtml.headers.get('content-type') === 'application/octet-stream', Object.fromEntries(dlHtml.headers))
+  const badBucket = await upload('secrets', 'a.txt', 'x'); await badBucket.body?.cancel()
+  const noFileName = await upload('documents', null, 'x'); await noFileName.body?.cancel()
+  const emptyFile = await upload('documents', 'a.txt', ''); await emptyFile.body?.cancel()
+  check('upload: unknown bucket → 404, no file name → 400, empty file → 400', badBucket.status === 404 && noFileName.status === 400 && emptyFile.status === 400,
+    { badBucket: badBucket.status, noFileName: noFileName.status, emptyFile: emptyFile.status })
+  const traversal = await fetch(`${BASE}/files/documents/..%2F..%2Fdeno.json`)
+  await traversal.body?.cancel()
+  check('download: path traversal → 404', traversal.status === 404, traversal.status)
+  docFileUrl = upj.url
+  htmlFileUrl = upHtml.url
+}
+
+const noReviewer = await api('document_crud', { method: 'create', data: { title: `${MARK} doc` }, reviewers: [{ name: ' ' }] })
+check('document create without a named reviewer → 400', noReviewer.status === 400, noReviewer.json)
+const dc = await api('document_crud', {
+  method: 'create',
+  data: { title: `${MARK} 合同`, notes: '  ', file_url: docFileUrl || null, file_name: 'x.txt', file_type: 'text/plain', file_size: 12, uploaded_by: 'up@example.com' },
+  reviewers: [{ name: 'Rev A', contact: 'a@example.com' }, { name: 'Rev B', contact: '' }],
+})
+const docId = dc.json.id
+check('document create → id', dc.status === 200 && !!docId, dc.json)
+const listed = ((await api('document_crud', { method: 'list' })).json.documents as R[]).find(x => x.id === docId)
+check('document list: pending, blank notes → null, one decision per reviewer', listed?.status === 'pending' && listed?.notes === null && listed?.decisions?.length === 2, listed)
+const sees = async (email: string) => ((await api('document_crud', { method: 'list', viewer_email: email })).json.documents as R[]).some(x => x.id === docId)
+const [asReviewer, asUploader, asOther] = [await sees('a@example.com'), await sees('up@example.com'), await sees('nobody@example.com')]
+check('document list for a member: reviewer and uploader see it, others do not', asReviewer && asUploader && !asOther, { asReviewer, asUploader, asOther })
+const dg = await api('document_crud', { method: 'get', id: docId })
+const docRevs = (dg.json.reviewers || []) as R[]
+check('document get: document + reviewers in order, blank contact → null',
+  dg.json.document?.title === `${MARK} 合同` && docRevs.length === 2 && docRevs[0].name === 'Rev A' && docRevs[1].contact === null, dg.json)
+const dec1 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[0]?.id, decision: 'approved', comment: ' ok ' })
+check('decide: 1 of 2 approved → partial', dec1.json.status === 'partial', dec1.json)
+const dec2 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected' })
+const decided = await dbGet('document_reviewers', 'decision,comment,decided_at', { document_id: `eq.${docId}` }, 'created_at.asc')
+check('decide: any rejection → rejected; comment trimmed; decided_at set', dec2.json.status === 'rejected' && decided[0]?.comment === 'ok' && !!decided[1]?.decided_at, decided)
+const decBad = await api('document_crud', { method: 'decide', reviewer_id: docRevs[0]?.id, decision: 'maybe' })
+check('decide with an unknown decision → 400', decBad.status === 400, decBad.json)
+const dd = await api('document_crud', { method: 'delete', id: docId })
+const docLeft = await dbGet('documents', 'id', { id: `eq.${docId}` })
+const revLeft = await dbGet('document_reviewers', 'id', { document_id: `eq.${docId}` })
+check('document delete: record and its reviewers removed', dd.status === 200 && docLeft.length === 0 && revLeft.length === 0, { dd: dd.json, docLeft, revLeft })
+if (storageIsLocal) {
+  const afterDelete = await fetch(docFileUrl)
+  await afterDelete.body?.cancel()
+  check('document delete: attached file removed as well', dd.json.file_deleted === true && afterDelete.status === 404, { file_deleted: dd.json.file_deleted, status: afterDelete.status })
+  // remove the HTML test upload the same way
+  const hd = await api('document_crud', { method: 'create', data: { title: `${MARK} html`, file_url: htmlFileUrl }, reviewers: [{ name: 'x' }] })
+  await api('document_crud', { method: 'delete', id: hd.json.id })
+}
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
+await dbDelete('documents', { title: `like.${MARK}*` })
 await dbDelete('direct_messages', { content: `like.${MARK}*` })   // before staff: messages reference staff
 await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })

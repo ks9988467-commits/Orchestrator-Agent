@@ -130,6 +130,20 @@ function apiRaw(payload) {
   })
 }
 
+// Upload a file through the backend, which stores it on local disk or in
+// Supabase Storage (its STORAGE_DRIVER). bucket: 'documents' | 'review-files'.
+// Resolves to { url, name, size, type }.
+async function uploadFile(bucket, file) {
+  const res = await fetch(EDGE_URL.replace(/\/+$/, '') + '/files/' + bucket, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name), 'Authorization': 'Bearer ' + SUPABASE_ANON },
+    body: file,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
 function newSession() {
   sessionId = crypto.randomUUID()
   document.getElementById('sessionInfo').textContent = 'Session: ' + sessionId.slice(0,8)
