@@ -199,17 +199,65 @@ check('mark_handled sets handled; delete removes the other', gRows.length === 1 
 const noGid = await api('agent_suggestion_crud', { method: 'mark_handled' })
 check('mark_handled without id → 400', noGid.status === 400, noGid.json)
 
+// ── 8. home_summary ────────────────────────────────────────────────────
+// Asserts on before/after differences, so existing rows don't matter.
+console.log('\n[8] home_summary')
+const nowD = new Date()
+const monthStart = `${nowD.getUTCFullYear()}-${String(nowD.getUTCMonth() + 1).padStart(2, '0')}-01`
+const dayBefore = new Date(Date.parse(monthStart + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10)
+const todayStart = new Date(nowD.getTime() - 3600000).toISOString()   // one hour ago
+const hs = { month_start: monthStart, today_start: todayStart }
+const h0 = await api('home_summary', hs)
+check('home_summary returns ok', h0.status === 200 && h0.json.ok === true, h0.json)
+await dbInsert('leads', [{ name: MARK, date: monthStart }, { name: MARK, date: monthStart }, { name: MARK, date: dayBefore }])
+// every row in a batch insert needs the same keys (PostgREST rejects mixed keys)
+const nowIso = nowD.toISOString()
+await dbInsert('conversations', [
+  { session_id: MARK, role: 'user', content: `${MARK} today`, agent: 'chat', created_at: nowIso },
+  { session_id: MARK, role: 'assistant', content: `${MARK} reply`, agent: 'chat', created_at: nowIso },
+  { session_id: MARK, role: 'user', content: `${MARK} old`, agent: 'chat', created_at: new Date(nowD.getTime() - 2 * 86400000).toISOString() },
+])
+await dbInsert('agent_suggestions', [{ message: MARK, session_id: MARK, handled: false }, { message: MARK, session_id: MARK, handled: true }])
+await dbInsert('agent_skills', { agent: `${MARK}_hs`, skill: 'x' })
+await dbInsert('agents', [{ id: `${MARK}_on`, name: 'On', active: true }, { id: `${MARK}_off`, name: 'Off', active: false }])
+await dbInsert('analytics_daily', [
+  { campaign_name: MARK, date: monthStart, spend_myr: 12.5 },
+  { campaign_name: MARK, date: dayBefore, spend_myr: 99 },
+])
+await dbInsert('alerts', { rule_name: MARK, campaign_name: MARK, metric: 'cpl', value: 1.5 })
+const h1 = await api('home_summary', hs)
+const d = (k: string) => h1.json[k] - h0.json[k]
+check('lead_count counts only leads from month_start on', d('lead_count') === 2, { delta: d('lead_count') })
+check('today_conv_count counts user messages since today_start only', d('today_conv_count') === 1, { delta: d('today_conv_count') })
+check('gap_count counts unhandled suggestions only', d('gap_count') === 1, { delta: d('gap_count') })
+check('skill_count counts skills', d('skill_count') === 1, { delta: d('skill_count') })
+const agentIds = (h1.json.active_agents || []).map((a: { id: string }) => a.id)
+check('active_agents includes active and excludes inactive', agentIds.includes(`${MARK}_on`) && !agentIds.includes(`${MARK}_off`), agentIds)
+const hsAnal = (h1.json.analytics || []).filter((r: { campaign_name: string }) => r.campaign_name === MARK)
+check('analytics: only this month, spend_myr as a number', hsAnal.length === 1 && hsAnal[0].spend_myr === 12.5, hsAnal)
+check('alerts: newest first, value as a number', h1.json.alerts?.[0]?.rule_name === MARK && h1.json.alerts[0].value === 1.5, h1.json.alerts?.[0])
+check('recent_convs: user messages only, newest first', h1.json.recent_convs?.[0]?.content === `${MARK} today` &&
+  (h1.json.recent_convs || []).every((c: { role: string }) => c.role === 'user'), h1.json.recent_convs)
+const hBad = await api('home_summary', { month_start: '2026-9-1', today_start: todayStart })
+check('bad month_start → 400', hBad.status === 400, hBad.json)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('conversations', { session_id: `eq.${MARK}` })
-await dbDelete('agents', { id: `eq.${MARK}_a` })
-await dbDelete('agent_skills', { agent: `in.(${skA},${skB})` })
+await dbDelete('agents', { id: `like.${MARK}*` })
+await dbDelete('agent_skills', { agent: `like.${MARK}*` })
 await dbDelete('agent_suggestions', { session_id: `eq.${MARK}` })
+await dbDelete('leads', { name: `eq.${MARK}` })
+await dbDelete('analytics_daily', { campaign_name: `eq.${MARK}` })
+await dbDelete('alerts', { rule_name: `eq.${MARK}` })
 const leftover = [
   ...await dbGet('conversations', 'id', { session_id: `eq.${MARK}` }),
   ...await dbGet('agents', 'id', { id: `like.${MARK}*` }),
   ...await dbGet('agent_skills', 'id', { agent: `like.${MARK}*` }),
   ...await dbGet('agent_suggestions', 'id', { session_id: `eq.${MARK}` }),
+  ...await dbGet('leads', 'id', { name: `eq.${MARK}` }),
+  ...await dbGet('analytics_daily', 'id', { campaign_name: `eq.${MARK}` }),
+  ...await dbGet('alerts', 'id', { rule_name: `eq.${MARK}` }),
 ]
 check('cleanup removed test rows', leftover.length === 0, leftover)
 

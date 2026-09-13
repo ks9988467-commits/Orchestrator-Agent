@@ -132,27 +132,15 @@ async function renderHome() {
   }
 
   const now = new Date()
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10)
-  const todayStr = now.toISOString().slice(0,10)
+  // Local calendar dates: toISOString() would shift them to UTC (a day early in UTC+8)
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
   try {
-    const [analRes, leadRes, alertRes, convRes, agentRes, gapsRes, skillsRes, todayConvRes] = await Promise.all([
-      db.from('analytics_daily').select('spend_myr,results,new_contacts,campaign_name').gte('date', monthStart),
-      db.from('leads').select('id,name,date,labels').gte('date', monthStart).order('date', {ascending:false}).limit(100),
-      db.from('alerts').select('id,rule_name,campaign_name,metric,value,triggered_at').order('triggered_at', {ascending:false}).limit(10),
-      db.from('conversations').select('id,role,content,agent,created_at').eq('role','user').order('created_at', {ascending:false}).limit(6),
-      db.from('agents').select('id,name,active').eq('active', true),
-      db.from('agent_suggestions').select('id').eq('handled', false).limit(100),
-      db.from('agent_skills').select('id').limit(500),
-      db.from('conversations').select('id').eq('role','user').gte('created_at', todayStr + 'T00:00:00'),
-    ])
-    const anal = analRes.data || []
-    const leads = leadRes.data || []
-    const alerts = alertRes.data || []
-    const convs = convRes.data || []
-    const activeAgents = agentRes.data || []
-    const gaps = gapsRes.data || []
-    const skills = skillsRes.data || []
-    const todayConvs = todayConvRes.data || []
+    const s = await apiCall('home_summary', { month_start: monthStart, today_start: todayStart })
+    const anal = s.analytics || []
+    const alerts = s.alerts || []
+    const convs = s.recent_convs || []
+    const activeAgents = s.active_agents || []
     let totalSpend = 0, totalContacts = 0, totalResults = 0
     const campaigns = new Set()
     for (const r of anal) {
@@ -176,7 +164,7 @@ async function renderHome() {
           <div class="metric-card">
             <div class="mc-icon">👥</div>
             <div class="mc-label">本月线索</div>
-            <div class="mc-value">${leads.length}</div>
+            <div class="mc-value">${s.lead_count}</div>
             <div class="mc-sub">新增联系人</div>
           </div>
           <div class="metric-card ${avgCPL && avgCPL > 80 ? 'warn-card' : avgCPL && avgCPL < 40 ? 'good-card' : ''}">
@@ -211,7 +199,7 @@ async function renderHome() {
           <div class="metric-card">
             <div class="mc-icon">💬</div>
             <div class="mc-label">今日对话</div>
-            <div class="mc-value">${todayConvs.length}</div>
+            <div class="mc-value">${s.today_conv_count}</div>
             <div class="mc-sub">用户消息数</div>
           </div>
           <div class="metric-card">
@@ -220,16 +208,16 @@ async function renderHome() {
             <div class="mc-value">${activeAgents.length}</div>
             <div class="mc-sub">${activeAgents.map(a => esc(a.name)).join(' · ').slice(0,40) || '—'}</div>
           </div>
-          <div class="metric-card ${gaps.length > 10 ? 'warn-card' : ''}">
+          <div class="metric-card ${s.gap_count > 10 ? 'warn-card' : ''}">
             <div class="mc-icon">❓</div>
             <div class="mc-label">未覆盖问题</div>
-            <div class="mc-value">${gaps.length}</div>
+            <div class="mc-value">${s.gap_count}</div>
             <div class="mc-sub" style="cursor:pointer;text-decoration:underline;color:#ffd405" onclick="nav('routing')">待学习 →</div>
           </div>
           <div class="metric-card">
             <div class="mc-icon">🧠</div>
             <div class="mc-label">已学技能</div>
-            <div class="mc-value">${skills.length}</div>
+            <div class="mc-value">${s.skill_count}</div>
             <div class="mc-sub" style="cursor:pointer;text-decoration:underline;color:#ffd405" onclick="nav('skills')">查看 →</div>
           </div>
         </div>
@@ -562,8 +550,8 @@ function switchLogsTab(tab, btn) {
 // ── Sidebar dots ──────────────────────────────────────────────────────
 async function loadSidebarDots() {
   try {
-    const {data} = await db.from('provider_config').select('provider,active,model')
-    ;(data||[]).forEach(r => {
+    const {providers} = await apiCall('provider_config_crud', { method: 'list' })
+    ;(providers||[]).forEach(r => {
       const dot = document.getElementById('dot-'+r.provider)
       if (dot) dot.className = 'dot' + (r.active ? ' on' : '')
       const mdl = document.getElementById('pvdm-'+r.provider)

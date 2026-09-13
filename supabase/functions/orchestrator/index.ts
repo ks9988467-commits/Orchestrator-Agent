@@ -2913,6 +2913,31 @@ Return ONLY a valid JSON array, no markdown:
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // ── Home overview (首页) ─────────────────────────────────────────────
+    // The client sends its own local month start (YYYY-MM-DD) and local midnight
+    // (ISO), so "this month" / "today" follow the viewer's timezone.
+    if (body.action === 'home_summary') {
+      const monthStart = String(body.month_start || '')
+      const todayStart = new Date(String(body.today_start || ''))
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(monthStart) || isNaN(todayStart.getTime())) {
+        return new Response(JSON.stringify({ error: 'month_start (YYYY-MM-DD) and today_start (ISO) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      const [analytics, leads, alerts, recent_convs, active_agents, gaps, skills, today] = await Promise.all([
+        dbGet('analytics_daily', 'spend_myr,results,new_contacts,campaign_name', tenantFilters({ date: `gte.${monthStart}` })),
+        dbGetPage('leads', 'id', tenantFilters({ date: `gte.${monthStart}` }), undefined, 0),
+        dbGet('alerts', 'id,rule_name,campaign_name,metric,value,triggered_at', tenantFilters(), 'triggered_at.desc', 10),
+        dbGet('conversations', 'id,role,content,agent,created_at', tenantFilters({ role: 'eq.user' }), 'created_at.desc', 6),
+        dbGet('agents', 'id,name', { active: 'eq.true' }, 'id.asc'),
+        dbGetPage('agent_suggestions', 'id', tenantFilters({ handled: 'eq.false' }), undefined, 0),
+        dbGetPage('agent_skills', 'id', {}, undefined, 0),
+        dbGetPage('conversations', 'id', tenantFilters({ role: 'eq.user', created_at: `gte.${todayStart.toISOString()}` }), undefined, 0),
+      ])
+      return new Response(JSON.stringify({
+        ok: true, analytics, alerts, recent_convs, active_agents,
+        lead_count: leads.count, gap_count: gaps.count, skill_count: skills.count, today_conv_count: today.count,
+      }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // ── API integrations (API 集成) ─────────────────────────────────────
     // Secret credential values are masked in `list`; on `save`, a value that is
     // still masked keeps the stored secret. webhook_url stays visible because the
