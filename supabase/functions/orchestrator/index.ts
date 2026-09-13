@@ -3487,6 +3487,10 @@ Return ONLY a valid JSON array, no markdown:
         await dbPatchWhere('automation_logs', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` }, { read: true })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
+      if (crudMethod === 'unread_count') {
+        const { count } = await dbGetPage('automation_logs', 'id', { tenant_id: `eq.${tid}`, read: 'eq.false' }, undefined, 0)
+        return new Response(JSON.stringify({ ok: true, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
       return new Response(JSON.stringify({ error: 'invalid method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -3995,7 +3999,7 @@ Return ONLY a valid JSON array, no markdown:
 
     // ── KB CRUD ──────────────────────────────────────────────────────
     if (body.action === 'list_kbs') {
-      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',tenantFilters(),undefined,50)
+      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',tenantFilters(),'created_at.desc',50)
       return new Response(JSON.stringify({ kbs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'create_kb') {
@@ -4007,7 +4011,10 @@ Return ONLY a valid JSON array, no markdown:
     if (body.action === 'delete_kb') {
       const { kb_id } = body
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      await dbDelete('knowledge_bases', tenantFilters({ id: `eq.${kb_id}` }))
+      const own = await dbGet('knowledge_bases','id',tenantFilters({ id: `eq.${kb_id}` }),undefined,1)
+      if (!own.length) return new Response(JSON.stringify({ error:'not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
+      await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}` })   // kb_chunks has no foreign key to cascade from
+      await dbDelete('knowledge_bases', { id: `eq.${kb_id}` })
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'list_kb_chunks') {
@@ -4015,6 +4022,12 @@ Return ONLY a valid JSON array, no markdown:
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const rows = await dbGet('kb_chunks','id,source_name,chunk_index,content,created_at',{ kb_id:`eq.${kb_id}` },'chunk_index.asc',200)
       return new Response(JSON.stringify({ chunks: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'count_kb_chunks') {
+      const { kb_id } = body
+      if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const { count } = await dbGetPage('kb_chunks','id',{ kb_id:`eq.${kb_id}` },undefined,0)
+      return new Response(JSON.stringify({ count }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── Agent version history ────────────────────────────────────────
@@ -4047,6 +4060,12 @@ Return ONLY a valid JSON array, no markdown:
     if (body.action === 'list_workflows') {
       const rows = await dbGet('workflows','id,name,description,active,created_at',tenantFilters(),'created_at.desc',50)
       return new Response(JSON.stringify({ workflows: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'list_workflow_runs') {
+      const { id: wfId } = body
+      if (!wfId) return new Response(JSON.stringify({ error:'id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const rows = await dbGet('workflow_runs','ran_at,response,error',{ workflow_id:`eq.${wfId}` },'ran_at.desc',10)
+      return new Response(JSON.stringify({ runs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'save_workflow') {
       const { id: wfId, name, description, nodes, edges, schedule } = body

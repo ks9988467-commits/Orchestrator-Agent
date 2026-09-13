@@ -469,10 +469,53 @@ if (storageIsLocal) {
   await api('document_crud', { method: 'delete', id: hd.json.id })
 }
 
+// ── 13. workflow runs / knowledge bases / automation logs ───────────────
+console.log('\n[13] workflow runs / knowledge bases / automation logs')
+const WF = crypto.randomUUID()
+const runBase = Date.now() - 100_000
+await dbInsert('workflow_runs', Array.from({ length: 12 }, (_, i) => ({
+  workflow_id: WF, response: i === 11 ? null : `${MARK} run ${i}`, error: i === 11 ? 'boom' : null, ran_at: new Date(runBase + i * 1000).toISOString(),
+})))
+const wr = await api('list_workflow_runs', { id: WF })
+check('list_workflow_runs: the 10 newest, newest first', wr.json.runs?.length === 10 && wr.json.runs[0].error === 'boom' && wr.json.runs[9].response === `${MARK} run 2`, wr.json.runs?.map((r: R) => r.response ?? r.error))
+const wrNoId = await api('list_workflow_runs', {})
+check('list_workflow_runs without id → 400', wrNoId.status === 400, wrNoId.json)
+
+const kbc = await api('create_kb', { name: `${MARK} kb`, description: 'd' })
+const kbId = kbc.json.kb?.id
+check('create_kb → id; list_kbs includes it', !!kbId && ((await api('list_kbs')).json.kbs as R[]).some(k => k.id === kbId), kbc.json)
+await dbInsert('kb_chunks', [0, 1, 2].map(i => ({ kb_id: kbId, source_name: MARK, chunk_index: i, content: `${MARK} chunk ${i}` })))
+const kcount = await api('count_kb_chunks', { kb_id: kbId })
+check('count_kb_chunks', kcount.json.count === 3, kcount.json)
+const kdel = await api('delete_kb', { kb_id: kbId })
+const chunksLeft = await dbGet('kb_chunks', 'id', { kb_id: `eq.${kbId}` })
+const kbLeft = await dbGet('knowledge_bases', 'id', { id: `eq.${kbId}` })
+check('delete_kb removes the knowledge base and all its chunks', kdel.status === 200 && kbLeft.length === 0 && chunksLeft.length === 0, { kdel: kdel.json, kbLeft, chunksLeft })
+const kdelMissing = await api('delete_kb', { kb_id: crypto.randomUUID() })
+check('delete_kb for an unknown id → 404', kdelMissing.status === 404, kdelMissing.json)
+
+const unread0 = (await api('automation_crud', { method: 'unread_count' })).json.count
+await dbInsert('automation_logs', [
+  { tenant_id: 'default', action_taken: 'dashboard_alert', message: `${MARK} log 1`, read: false },
+  { tenant_id: 'default', action_taken: 'dashboard_alert', message: `${MARK} log 2`, read: false },
+  { tenant_id: 'default', action_taken: 'dashboard_alert', message: `${MARK} log 3`, read: true },
+])
+const unread1 = (await api('automation_crud', { method: 'unread_count' })).json.count
+check('automation unread_count counts unread logs only', unread1 - unread0 === 2, { unread0, unread1 })
+const myLogs = ((await api('automation_crud', { method: 'get_logs' })).json.logs as R[]).filter(l => String(l.message).startsWith(MARK))
+check('automation get_logs returns the logs', myLogs.length === 3, myLogs)
+await api('automation_crud', { method: 'mark_read', rule_id: myLogs.find(l => !l.read)?.id })
+const unread2 = (await api('automation_crud', { method: 'unread_count' })).json.count
+check('mark_read lowers unread_count', unread2 - unread0 === 1, { unread0, unread2 })
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
 await dbDelete('documents', { title: `like.${MARK}*` })
+await dbDelete('workflow_runs', { workflow_id: `eq.${WF}` })
+await dbDelete('kb_chunks', { source_name: `eq.${MARK}` })
+await dbDelete('knowledge_bases', { name: `like.${MARK}*` })
+await dbDelete('automation_logs', { message: `like.${MARK}*` })
 await dbDelete('direct_messages', { content: `like.${MARK}*` })   // before staff: messages reference staff
 await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })

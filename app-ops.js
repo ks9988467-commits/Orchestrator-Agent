@@ -1113,11 +1113,7 @@ async function loadWfRuns(wfId) {
   const el = document.getElementById('wfRunHistory')
   if (!el) return
   try {
-    const { data } = await db.from('workflow_runs')
-      .select('ran_at,response,error')
-      .eq('workflow_id', wfId)
-      .order('ran_at', { ascending: false })
-      .limit(10)
+    const { runs: data } = await apiCall('list_workflow_runs', { id: wfId })
     if (!data || !data.length) { el.innerHTML = '<span style="color:var(--ink-5)">暂无记录</span>'; return }
     el.innerHTML = data.map(r => {
       const ok = !r.error
@@ -1273,10 +1269,7 @@ async function loadKbPage() {
   if (!list) return
   list.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">加载中…</p>'
   try {
-    const q = db.from('knowledge_bases').select('*').order('created_at', { ascending:false })
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { data, error } = await q
-    if (error) throw error
+    const { kbs: data } = await apiCall('list_kbs')
     const kbs = data || []
     if (!kbs.length) {
       list.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">暂无知识库<br><small style=\'color:var(--ink-4)\'>点击右上角新建</small></p>'
@@ -1319,8 +1312,7 @@ async function confirmCreateKb() {
   const desc = document.getElementById('kbNewDesc')?.value.trim()
   if (!name) { toast('请输入知识库名称', 'error'); return }
   try {
-    const { error } = await db.from('knowledge_bases').insert({ name, description:desc||null, tenant_id:_session.tenant_id })
-    if (error) throw error
+    await apiCall('create_kb', { name, description: desc || null })
     document.getElementById('kbCreateModal')?.remove()
     toast('知识库已创建', 'success')
     loadKbPage()
@@ -1336,7 +1328,7 @@ async function selectKb(kb) {
   const detail = document.getElementById('kbDetail')
   if (!detail) return
   detail.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding:40px">加载中…</p>'
-  const { count } = await db.from('kb_chunks').select('*', { count:'exact', head:true }).eq('kb_id', kb.id)
+  const { count } = await apiCall('count_kb_chunks', { kb_id: kb.id }).catch(() => ({ count: 0 }))
   detail.innerHTML = `
     <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:20px">
       <div style="flex:1">
@@ -1464,13 +1456,8 @@ async function searchKb(kbId) {
 async function deleteKb(kbId) {
   if (!confirm('确定删除此知识库及全部 Chunks？此操作不可撤销。')) return
   try {
-    const chunksQ = db.from('kb_chunks').delete().eq('kb_id', kbId)
-    if (_session?.tenant_id) chunksQ.eq('tenant_id', _session.tenant_id)
-    await chunksQ
-    const kbQ = db.from('knowledge_bases').delete().eq('id', kbId)
-    if (_session?.tenant_id) kbQ.eq('tenant_id', _session.tenant_id)
-    const { error } = await kbQ
-    if (error) throw error
+    // 后端先删除全部 Chunks，再删除知识库
+    await apiCall('delete_kb', { kb_id: kbId })
     toast('知识库已删除', 'success')
     _kbSelected = null
     const detail = document.getElementById('kbDetail')
@@ -1482,9 +1469,7 @@ async function deleteKb(kbId) {
 // ── Alert badge ───────────────────────────────────────────────────────
 async function loadAlertBadge() {
   try {
-    const q = db.from('automation_logs').select('id', { count:'exact', head:true }).eq('read', false)
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { count } = await q
+    const { count } = await apiCall('automation_crud', { method: 'unread_count' })
     const el = document.getElementById('alertBadge')
     if (!el) return
     if (count > 0) { el.textContent = count > 9 ? '9+' : String(count); el.style.display = 'inline-block' }
@@ -1555,11 +1540,8 @@ async function loadAlertHistory() {
   const cnt = document.getElementById('alertHistCount')
   if (!el) return
   try {
-    const q = db.from('automation_logs').select('id,rule_id,triggered_at,action_taken,message,status,read')
-      .order('triggered_at', { ascending: false }).limit(50)
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { data } = await q
-    const rows = data || []
+    const { logs } = await apiCall('automation_crud', { method: 'get_logs' })
+    const rows = logs || []
     if (cnt) cnt.textContent = `共 ${rows.length} 条`
     el.innerHTML = rows.length
       ? rows.map(r => `<div class="alert-row" style="grid-template-columns:100px 1fr 90px 32px;${!r.read ? 'background:#fffbeb' : ''}">
