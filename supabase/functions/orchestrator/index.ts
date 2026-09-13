@@ -1,7 +1,14 @@
 ﻿import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+// Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
+// old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
+import { dbGet, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+// URL this function uses to invoke itself (task-step chaining). Defaults to the
+// deployed Supabase Edge Function; set ORCH_SELF_URL when running locally,
+// e.g. ORCH_SELF_URL=http://localhost:8000
+const SELF_URL = Deno.env.get('ORCH_SELF_URL') || `${SUPABASE_URL}/functions/v1/orchestrator`
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -141,7 +148,7 @@ async function executeTaskSteps(taskId: string, providers: ProviderRow[], defaul
   // Chain: trigger next step after 1s delay (prevents request storm)
   if (!stepError && !allDone) {
     setTimeout(() => {
-      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+      fetch(SELF_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: taskId })
@@ -193,51 +200,8 @@ function tenantFilters(extra: Record<string,string> = {}): Record<string,string>
   return extra
 }
 
-// ── DB patch helper ───────────────────────────────────────────────────
-async function dbPatch(table: string, id: string, data: object) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
-    method: 'PATCH',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(data),
-  })
-}
-
-// ── DB helpers ──────────────────────────────────────────────────────
-async function dbGet(table: string, select = '*', filters: Record<string,string> = {}, order?: string, limit?: number) {
-  const params = new URLSearchParams({ select })
-  if (order) params.set('order', order)
-  if (limit) params.set('limit', String(limit))
-  for (const [k,v] of Object.entries(filters)) params.set(k, v)
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  })
-  if (!r.ok) return []
-  return r.json()
-}
-async function dbInsert(table: string, data: object) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(data),
-  })
-}
-async function dbUpsert(table: string, data: object, onConflict: string) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${onConflict}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
-    body: JSON.stringify(data),
-  })
-}
-async function dbInsertReturning(table: string, data: object): Promise<Record<string,unknown>> {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify(data),
-  })
-  if (!r.ok) return {}
-  const rows = await r.json()
-  return Array.isArray(rows) ? (rows[0] ?? {}) : rows
-}
+// ── DB helpers moved to ./db.ts (dbGet/dbPatch/dbInsert/dbUpsert/dbInsertReturning)
+//    Imported at top. Same signatures; backend switched by env DB_DRIVER.
 
 // ── Lark helpers ────────────────────────────────────────────────────
 async function getLarkConfig(): Promise<{webhook_url?:string;app_id?:string;app_secret?:string}|null> {
@@ -755,11 +719,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
         }
         const qEmbed = embedCache[fam]
         if (!qEmbed) continue
-        const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query_embedding: qEmbed, match_kb_id: kb.id, match_count: limit }),
-        }).then(res => res.ok ? res.json() : []).catch(() => [])
+        const rows = await dbRpc('kb_match', { query_embedding: qEmbed, match_kb_id: kb.id, match_count: limit })
         for (const row of rows as Record<string,unknown>[]) {
           allResults.push({ ...row, kb_name: kb.name })
         }
@@ -809,11 +769,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       const ruleId = String(args.rule_id || '')
       if (!ruleId) return JSON.stringify({ error: 'rule_id required' })
       const tid = _reqTenantId || 'default'
-      await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${ruleId}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ enabled: Boolean(args.enabled), updated_at: new Date().toISOString() }),
-      })
+      await dbPatchWhere('automation_rules', { id: `eq.${ruleId}`, tenant_id: `eq.${tid}` },
+        { enabled: Boolean(args.enabled), updated_at: new Date().toISOString() })
       return JSON.stringify({ ok: true, message: `规则已${args.enabled ? '启用' : '停用'}` })
     }
 
@@ -1918,11 +1875,7 @@ ${existingList || '(none yet)'}`,
 
   await Promise.all([
     ...rules.map(rule => dbInsert('agent_skills', { agent: 'chat', skill: rule })),
-    fetch(`${SUPABASE_URL}/rest/v1/agent_suggestions?id=in.(${ids.join(',')})`, {
-      method: 'PATCH',
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ handled: true }),
-    }),
+    dbPatchWhere('agent_suggestions', { id: `in.(${ids.join(',')})` }, { handled: true }),
   ])
 
   return { ok: true, skills_added: rules.length, processed: rows.length }
@@ -1930,12 +1883,7 @@ ${existingList || '(none yet)'}`,
 
 async function runWorkflows() {
   // Find all active workflows due to run
-  const dueResp = await fetch(
-    `${SUPABASE_URL}/rest/v1/workflows?active=eq.true&next_run=lte.${new Date().toISOString()}&select=*`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  )
-  if (!dueResp.ok) return
-  const due = await dueResp.json() as Record<string, unknown>[]
+  const due = await dbGet('workflows', '*', { active: 'eq.true', next_run: `lte.${new Date().toISOString()}` }) as Record<string, unknown>[]
   if (!due.length) return
 
   const [providers, defaultProvider, agents] = await Promise.all([
@@ -1994,10 +1942,7 @@ Return ONLY a JSON array of 1-indexed rule numbers to DELETE: [1,3] or [] if non
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= skillRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n => skillRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`, {
-                  method: 'DELETE',
-                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
-                })
+                await dbDelete('agent_skills', { id: `in.(${ids.join(',')})` })
               }
               const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
               context[node.id] = msg; context.last_output = msg
@@ -2017,10 +1962,7 @@ Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if no
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= prefRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n => prefRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`, {
-                  method: 'DELETE',
-                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
-                })
+                await dbDelete('user_prefs', { id: `in.(${ids.join(',')})` })
               }
               const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
               context[node.id] = msg; context.last_output = msg
@@ -2061,11 +2003,7 @@ Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if no
 
     // Update workflow: last_run, next_run, run_count
     const nextRun = calcNextRun(schedule)
-    await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${wfId}`, {
-      method: 'PATCH',
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ last_run: new Date().toISOString(), next_run: nextRun.toISOString(), run_count: Number(wf.run_count || 0) + 1 })
-    })
+    await dbPatch('workflows', String(wfId), { last_run: new Date().toISOString(), next_run: nextRun.toISOString(), run_count: Number(wf.run_count || 0) + 1 })
   }
 }
 
@@ -2180,11 +2118,7 @@ Deno.serve(async (req: Request) => {
       if (!email) return new Response(JSON.stringify({ error: 'email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const code = String(Math.floor(100000 + Math.random() * 900000))
       // Store OTP (service key bypasses RLS)
-      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests`, {
-        method: 'POST',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ email, code })
-      })
+      await dbInsert('otp_requests', { email, code })
       // Send email via Gmail SMTP using fetch to SMTP2Go-like approach \u2014 use denomailer
       try {
         const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
@@ -2207,16 +2141,13 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'verify_otp') {
       const { email, code } = body
       if (!email || !code) return new Response(JSON.stringify({ error: 'email and code required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?email=eq.${encodeURIComponent(email)}&code=eq.${encodeURIComponent(code)}&used=eq.false&expires_at=gte.${new Date().toISOString()}&order=id.desc&limit=1`, {
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      }).then(r => r.json())
+      const rows = await dbGet('otp_requests', '*', {
+        email: `eq.${email}`, code: `eq.${code}`, used: 'eq.false',
+        expires_at: `gte.${new Date().toISOString()}`,
+      }, 'id.desc', 1)
       if (!rows?.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       // Mark used
-      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?id=eq.${rows[0].id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ used: true })
-      })
+      await dbPatch('otp_requests', String(rows[0].id), { used: true })
       // Resolve tenant + role from tenant_users
       const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${email}` })
       let tenantId: string|null = tuRows[0]?.tenant_id ?? null
@@ -2272,11 +2203,7 @@ Deno.serve(async (req: Request) => {
       const { id, ...fields } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       delete fields.action
-      await fetch(`${SUPABASE_URL}/rest/v1/tenants?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify(fields)
-      })
+      await dbPatch('tenants', String(id), fields)
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2341,36 +2268,28 @@ Deno.serve(async (req: Request) => {
           const resultsVal = results ? parseInt(results.value) : 0
           const contactsVal = newContacts ? parseInt(newContacts.value) : 0
 
-          await fetch(`${SUPABASE_URL}/rest/v1/ad_reports?on_conflict=campaign_name,day`, {
-            method: 'POST',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
-            body: JSON.stringify({
-              campaign_name: String(row.campaign_name || ''),
-              day: String(row.date_start || ''),
-              starts: String(row.date_start || ''),
-              ends: String(row.date_stop || ''),
-              amount_spent_myr: spendMYR,
-              impressions: parseInt(String(row.impressions || 0)),
-              reach: parseInt(String(row.reach || 0)),
-              frequency: parseFloat(String(row.frequency || 0)),
-              cpm: parseFloat(String(row.cpm || 0)),
-              ctr_all: parseFloat(String(row.ctr || 0)),
-              link_clicks: parseInt(String(row.clicks || 0)),
-              results: resultsVal,
-              cost_per_result: cpr ? parseFloat(cpr.value) : null,
-              new_messaging_contacts: contactsVal,
-              tenant_id: _reqTenantId,
-            })
-          })
+          await dbUpsert('ad_reports', {
+            campaign_name: String(row.campaign_name || ''),
+            day: String(row.date_start || ''),
+            starts: String(row.date_start || ''),
+            ends: String(row.date_stop || ''),
+            amount_spent_myr: spendMYR,
+            impressions: parseInt(String(row.impressions || 0)),
+            reach: parseInt(String(row.reach || 0)),
+            frequency: parseFloat(String(row.frequency || 0)),
+            cpm: parseFloat(String(row.cpm || 0)),
+            ctr_all: parseFloat(String(row.ctr || 0)),
+            link_clicks: parseInt(String(row.clicks || 0)),
+            results: resultsVal,
+            cost_per_result: cpr ? parseFloat(cpr.value) : null,
+            new_messaging_contacts: contactsVal,
+            tenant_id: _reqTenantId,
+          }, 'campaign_name,day')
           upserted++
         }
 
         // Refresh analytics after sync
-        await fetch(`${SUPABASE_URL}/rest/v1/rpc/refresh_analytics_daily`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ days_back: 31 })
-        })
+        await dbRpc('refresh_analytics_daily', { days_back: 31 })
 
         return new Response(JSON.stringify({ ok: true, synced: upserted, period: `${dateStart} to ${dateStop}` }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       } catch(e) {
@@ -2394,10 +2313,7 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'delete_alert_rule') {
       const { rule_id } = body
       if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
-      await fetch(`${SUPABASE_URL}/rest/v1/alert_rules?id=eq.${rule_id}${tenantQ}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('alert_rules', tenantFilters({ id: `eq.${rule_id}` }))
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2460,25 +2376,15 @@ Deno.serve(async (req: Request) => {
       // Recalculate next_run if schedule changed
       if (fields.schedule) fields.next_run = calcNextRun(String(fields.schedule)).toISOString()
       delete fields.action
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify(fields)
-      })
+      await dbPatch('workflows', String(id), fields)
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     if (body.action === 'delete_workflow') {
       const { id } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await fetch(`${SUPABASE_URL}/rest/v1/workflow_runs?workflow_id=eq.${id}`, {
-        method: 'DELETE',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'DELETE',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('workflow_runs', { workflow_id: `eq.${id}` })
+      await dbDelete('workflows', { id: `eq.${id}` })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2509,7 +2415,7 @@ Return ONLY a valid JSON array, no markdown:
       } catch { plan = [{ id:'step_1', desc:goal, tool:'call_agent', params:{ agent_id:'chat', prompt:goal }, status:'pending', result:null }] }
       const task = await dbInsertReturning('agent_tasks', { goal, plan, status:'pending', session_id:session_id||null, tenant_id:_reqTenantId }) as AgentTask
       // Kick off step execution immediately (fire-and-forget self-invoke)
-      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+      fetch(SELF_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: String(task.id) })
@@ -2552,11 +2458,7 @@ Return ONLY a valid JSON array, no markdown:
       const { id } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       // Force next_run to now so runWorkflows picks it up
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ next_run: new Date().toISOString() })
-      })
+      await dbPatch('workflows', String(id), { next_run: new Date().toISOString() })
       await runWorkflows()
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -2607,9 +2509,7 @@ Return ONLY a valid JSON array, no markdown:
       const { platform } = body
       if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tid = _reqTenantId || 'default'
-      await fetch(`${SUPABASE_URL}/rest/v1/ugc_platform_rules?tenant_id=eq.${encodeURIComponent(tid)}&platform=eq.${encodeURIComponent(platform)}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('ugc_platform_rules', { tenant_id: `eq.${tid}`, platform: `eq.${platform}` })
       const def = UGC_DEFAULT_RULES[platform] || {}
       return new Response(JSON.stringify({ ok: true, rule: def }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -2687,11 +2587,7 @@ Return ONLY a valid JSON array, no markdown:
         try {
           const { trigger, data } = await checkRuleTrigger(rule)
           // Always update last_run_at
-          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
-            method: 'PATCH',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-            body: JSON.stringify({ last_run_at: now }),
-          })
+          await dbPatch('automation_rules', String(rule.id), { last_run_at: now })
           if (!trigger) continue
 
           const msg = buildActionMessage(rule, data)
@@ -2714,11 +2610,7 @@ Return ONLY a valid JSON array, no markdown:
             read:         false,
           })
           // Update last_triggered_at
-          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
-            method: 'PATCH',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-            body: JSON.stringify({ last_triggered_at: now }),
-          })
+          await dbPatch('automation_rules', String(rule.id), { last_triggered_at: now })
           triggered.push(String(rule.name || rule.id))
         } catch(e) {
           errors.push(`${rule.name}: ${(e as Error).message}`)
@@ -2849,10 +2741,7 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (m === 'delete') {
         const bid = String(body.booking_id || '')
-        const tFilter = tid ? `&tenant_id=eq.${encodeURIComponent(tid)}` : ''
-        if (bid) await fetch(`${SUPABASE_URL}/rest/v1/bookings?id=eq.${bid}${tFilter}`, {
-          method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
-        })
+        if (bid) await dbDelete('bookings', tid ? { id: `eq.${bid}`, tenant_id: `eq.${tid}` } : { id: `eq.${bid}` })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2868,11 +2757,7 @@ Return ONLY a valid JSON array, no markdown:
       const p_from = body.from ? String(body.from) : '-infinity'
       const p_to   = body.to   ? String(body.to)   : 'infinity'
 
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/channel_funnel`, {
-        method: 'POST',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ p_tenant: tid, p_from, p_to }),
-      }).then(r => r.ok ? r.json() : []).catch(() => []) as {source:string;leads:number;customers:number;value:number}[]
+      const rows = await dbRpc('channel_funnel', { p_tenant: tid, p_from, p_to }) as {source:string;leads:number;customers:number;value:number}[]
 
       const spendBy   = (body.spend_by_source || {}) as Record<string, number>
       const marginPct = Number(body.margin_pct ?? 100) / 100   // 默认 100% = 营收口径
@@ -2926,19 +2811,13 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (crudMethod === 'update') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'PATCH',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ ...(crudData as object || {}), updated_at: new Date().toISOString() }),
-        })
+        await dbPatchWhere('automation_rules', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` },
+          { ...(crudData as object || {}), updated_at: new Date().toISOString() })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (crudMethod === 'delete') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'DELETE',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-        })
+        await dbDelete('automation_rules', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (crudMethod === 'get_logs') {
@@ -2951,11 +2830,7 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (crudMethod === 'mark_read') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'log_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_logs?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'PATCH',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ read: true }),
-        })
+        await dbPatchWhere('automation_logs', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` }, { read: true })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'invalid method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3410,9 +3285,7 @@ Return ONLY a valid JSON array, no markdown:
 
       // Dedup: replace any existing chunks for this (kb_id, source) so re-ingesting
       // the same document updates rather than duplicates.
-      await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks?kb_id=eq.${kb_id}&source_name=eq.${encodeURIComponent(src)}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
-      })
+      await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}`, source_name: `eq.${src}` })
 
       // Sentence-aware chunking: pack sentences into ~500-char chunks (50 overlap)
       // so chunks break on natural boundaries (。！？.!?\n) instead of mid-word.
@@ -3442,12 +3315,8 @@ Return ONLY a valid JSON array, no markdown:
           vec = er.vector
         }
         const embeddingStr = `[${vec.join(',')}]`
-        const ir = await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId }),
-        })
-        if (!ir.ok) { errs.push(`insert_${idx}:${ir.status}:${await ir.text()}`); return null }
+        const ir = await dbInsert('kb_chunks', { kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId })
+        if (!ir.ok) { errs.push(`insert_${idx}:${ir.error}`); return null }
         return true
       }))
       const saved = results.filter(r => r === true).length
@@ -3466,11 +3335,7 @@ Return ONLY a valid JSON array, no markdown:
       const er = await getEmbedding(String(query).slice(0, 500), providers, kbRows[0]?.embed_model || undefined)
       if (!er) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       const n = Math.min(Number(kLimit)||5, 20)
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
-        method:'POST',
-        headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ query_embedding: er.vector, match_kb_id: kb_id, match_count: n }),
-      }).then(res => res.ok ? res.json() : [])
+      const rows = await dbRpc('kb_match', { query_embedding: er.vector, match_kb_id: kb_id, match_count: n })
       return new Response(JSON.stringify({ results: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
@@ -3488,10 +3353,7 @@ Return ONLY a valid JSON array, no markdown:
     if (body.action === 'delete_kb') {
       const { kb_id } = body
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
-      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_bases?id=eq.${kb_id}${tenantQ}`,{
-        method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('knowledge_bases', tenantFilters({ id: `eq.${kb_id}` }))
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'list_kb_chunks') {
@@ -3596,7 +3458,7 @@ Return ONLY a valid JSON array, no markdown:
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=skillRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n=>skillRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+                await dbDelete('agent_skills', { id: `in.(${ids.join(',')})` })
               }
               const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
               context[node.id] = msg; context.last_output = msg
@@ -3613,7 +3475,7 @@ Return ONLY a valid JSON array, no markdown:
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=prefRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n=>prefRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+                await dbDelete('user_prefs', { id: `in.(${ids.join(',')})` })
               }
               const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
               context[node.id] = msg; context.last_output = msg

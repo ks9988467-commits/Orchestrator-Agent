@@ -71,9 +71,25 @@ async function verifyOtp() {
 }
 // ─────────────────────────────────────────────────────────────────────
 
+// ── Backend config (portable — decoupled from hardcoded Supabase) ──────
+// Default backend = Supabase Edge Function. To point at a LOCAL or self-hosted
+// server WITHOUT editing code, use either (checked in this order):
+//   1. window.ORCH_CONFIG = { backendUrl: 'http://localhost:8787/orchestrator' }
+//      (define it before app-core.js loads)
+//   2. localStorage.setItem('_orch_backend', 'http://localhost:8787/orchestrator')
+// Leave both unset to keep the current Supabase backend.
 const SUPABASE_URL  = 'https://ontumerafhimxvqtsijr.supabase.co'
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
-const EDGE_URL      = `${SUPABASE_URL}/functions/v1/orchestrator`
+const DEFAULT_EDGE_URL = `${SUPABASE_URL}/functions/v1/orchestrator`
+function resolveBackendUrl() {
+  try {
+    if (window.ORCH_CONFIG && window.ORCH_CONFIG.backendUrl) return window.ORCH_CONFIG.backendUrl
+    const override = localStorage.getItem('_orch_backend')
+    if (override) return override
+  } catch {}
+  return DEFAULT_EDGE_URL
+}
+const EDGE_URL      = resolveBackendUrl()
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON)
 const AGENT_ICONS   = {chat:'💬', crm:'🤝', account:'📊', code:'💻', cpl:'💰', cpr:'🎯', frequency:'🔁', marketing:'📣'}
 const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT', google:'Google · Gemini'}
