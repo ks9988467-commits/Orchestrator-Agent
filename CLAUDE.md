@@ -6,10 +6,13 @@ Orchestrator Agent (codename **UCG**) — a multi-agent AI brain.
 
 ## Architecture
 > ⚠️ **Production still runs on Supabase** (Edge Functions + Postgres). Migration status:
-> - ✅ DB layer portable — all DB access goes through `supabase/functions/orchestrator/db.ts` (`DB_DRIVER=rest` default | `postgres`)
-> - ✅ Local stack verified — `local/docker-compose.yml` (Postgres 17 + pgvector) + `local/initdb/`; `local/smoke-db.ts` passes 20/20
-> - ⏳ Not yet done — running the orchestrator backend itself locally end-to-end (env template: `local/.env.example`)
+> - ✅ DB layer portable — all backend DB access goes through `supabase/functions/orchestrator/db.ts` (`DB_DRIVER=rest` default | `postgres`); postgres mode matches PostgREST's filters and value types
+> - ✅ Local stack — `local/docker-compose.yml` (Postgres 17 + pgvector), schema `local/initdb/01–03`; tests `local/smoke-db.ts` (DB layer) and `local/smoke-api.ts` (backend actions)
+> - ✅ Backend runs locally — `.claude/launch.json` → `backend` (reads `local/.env`, template `local/.env.example`)
+> - 🔄 Frontend moving off direct supabase-js calls to explicit backend actions (`<domain>_crud`), page by page. Done: logs / LLM config / API integrations. Remaining: home, agents, data, tasks, staff, messages, documents, KB / workflow / automation pages, file storage
+> - ⚠️ **No authentication.** The backend trusts `tenant_id` / `role` from the request body, and the dashboard password lock was removed (it was a hardcoded client-side password). Local use only — real auth (backend-issued session tokens) must exist before any public deploy.
 >
+> Start Docker on this machine with `local/start-docker.ps1` — Docker Desktop crashes at startup on stale sockets otherwise.
 > The schema in `local/initdb/` is **reconstructed from code**, not dumped from Supabase.
 
 | Layer | Current (Supabase) | Target (portable / local-first) |

@@ -102,7 +102,7 @@ begin
 
   insert into analytics_daily
     (tenant_id, date, campaign_name, spend_myr, results, cpr,
-     new_contacts, cpl, frequency, lead_count)
+     new_contacts, cpl, frequency, lead_count, impressions, link_clicks)
   -- ad_reports.day is text (may be ''); nullif(...)::date turns '' into NULL
   -- instead of raising, and NULL days fall out of the >= cutoff filter.
   select
@@ -120,7 +120,9 @@ begin
     (select count(*) from leads l
       where l.campaign_source = r.campaign_name
         and l.date = nullif(r.day, '')::date
-        and (r.tenant_id is null or l.tenant_id = r.tenant_id)) as lead_count
+        and (r.tenant_id is null or l.tenant_id = r.tenant_id)) as lead_count,
+    sum(r.impressions)                            as impressions,
+    sum(r.link_clicks)                            as link_clicks
   from ad_reports r
   where nullif(r.day, '')::date >= cutoff
   group by r.tenant_id, r.day, r.campaign_name;

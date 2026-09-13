@@ -1,7 +1,7 @@
 ﻿import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 // Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
 // old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
-import { dbGet, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
+import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -2742,6 +2742,144 @@ Return ONLY a valid JSON array, no markdown:
       if (m === 'delete') {
         const bid = String(body.booking_id || '')
         if (bid) await dbDelete('bookings', tid ? { id: `eq.${bid}`, tenant_id: `eq.${tid}` } : { id: `eq.${bid}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Conversation log (对话日志) ─────────────────────────────────────
+    // Replaces the dashboard's direct supabase-js queries on `conversations`.
+    // The role filter is `log_role`, not `role`: every request body already
+    // carries `role` (the session role that sets _reqIsMaster).
+    if (body.action === 'conversation_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const filt: Record<string,string> = {}
+        if (body.agent)    filt['agent'] = `eq.${String(body.agent)}`
+        if (body.log_role) filt['role']  = `eq.${String(body.log_role)}`
+        if (body.feedback === 'good' || body.feedback === 'bad') filt['feedback'] = `eq.${body.feedback}`
+        else if (body.feedback === 'none') filt['feedback'] = 'is.null'
+        const limit  = Math.min(Math.max(Number(body.limit) || 200, 1), 500)
+        const offset = Math.max(Number(body.offset) || 0, 0)
+        const { rows, count } = await dbGetPage('conversations',
+          'id,role,agent,content,created_at,cost_usd,tokens_in,tokens_out,feedback',
+          tenantFilters(filt), 'created_at.desc', limit, offset)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_feedback') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const feedback = body.feedback === 'good' || body.feedback === 'bad' ? body.feedback : null
+        await dbPatchWhere('conversations', tenantFilters({ id: `eq.${id}` }), { feedback })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete_all') {
+        // `id > 0` matches every row — dbDelete deliberately refuses an empty filter
+        const filt: Record<string,string> = { id: 'gt.0' }
+        if (body.agent) filt['agent'] = `eq.${String(body.agent)}`
+        await dbDelete('conversations', tenantFilters(filt))
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── LLM provider config (LLM 配置) ──────────────────────────────────
+    // API keys never leave the server: `list` returns has_key + the last 4 chars.
+    if (body.action === 'provider_config_crud') {
+      const m = String(body.method || 'list')
+      const PROVIDERS = ['anthropic', 'openai', 'google', 'openrouter']
+
+      if (m === 'list') {
+        const rows = await dbGet('provider_config', 'provider,api_key,model,active') as ProviderRow[]
+        const providers = rows.map(r => {
+          const key = (r.api_key || '').trim()
+          return { provider: r.provider, model: r.model || null, active: !!r.active, has_key: !!key, key_hint: key ? key.slice(-4) : '' }
+        })
+        const pref = await dbGet('user_prefs', 'value', { key: 'eq.default_provider' }, undefined, 1)
+        return new Response(JSON.stringify({ ok: true, providers, default_provider: pref[0]?.value ?? null }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const provider = String(body.provider || '')
+        if (!PROVIDERS.includes(provider)) return new Response(JSON.stringify({ error: 'unknown provider' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { provider }
+        if (body.model !== undefined)  fields.model  = body.model ? String(body.model).trim() : null
+        if (body.active !== undefined) fields.active = !!body.active
+        // a blank api_key means "keep the stored key"
+        if (typeof body.api_key === 'string' && body.api_key.trim()) fields.api_key = body.api_key.trim()
+        await dbUpsert('provider_config', fields, 'provider')
+        _cacheProviders = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_default') {
+        const provider = String(body.provider || '')
+        if (!PROVIDERS.includes(provider)) return new Response(JSON.stringify({ error: 'unknown provider' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbUpsert('user_prefs', { key: 'default_provider', value: provider, confidence: 1.0 }, 'key')
+        _cacheDefProv = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agents (Agent 管理) ─────────────────────────────────────────────
+    // The update payload goes in `data`, keeping it clear of reserved body keys.
+    if (body.action === 'agent_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const agents = await dbGet('agents', 'id,name,active,provider,model,description,system_prompt,uses_tools', {}, 'id.asc')
+        return new Response(JSON.stringify({ ok: true, agents }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'update') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const d = (body.data || {}) as Record<string, unknown>
+        const patch: Record<string, unknown> = {}
+        for (const k of ['name', 'description', 'system_prompt']) if (d[k] !== undefined) patch[k] = d[k]
+        for (const k of ['provider', 'model']) if (d[k] !== undefined) patch[k] = d[k] || null
+        for (const k of ['active', 'uses_tools']) if (d[k] !== undefined) patch[k] = !!d[k]
+        if (!Object.keys(patch).length) return new Response(JSON.stringify({ error: 'nothing to update' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        patch.updated_at = new Date().toISOString()
+        await dbPatch('agents', id, patch)
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── API integrations (API 集成) ─────────────────────────────────────
+    // Secret credential values are masked in `list`; on `save`, a value that is
+    // still masked keeps the stored secret. webhook_url stays visible because the
+    // Lark/Slack test buttons read it straight from the input.
+    if (body.action === 'integration_crud') {
+      const m = String(body.method || 'list')
+      const MASK = '••••••••'
+      const isSecret = (k: string) => /secret|token|password|api_key/i.test(k)
+
+      if (m === 'list') {
+        const rows = await dbGet('api_integrations', 'service,active,credentials,updated_at') as
+          { service: string; active: boolean; credentials: Record<string, unknown> | null; updated_at: string | null }[]
+        const integrations = rows.map(r => ({
+          service: r.service,
+          active: !!r.active,
+          updated_at: r.updated_at,
+          credentials: Object.fromEntries(Object.entries(r.credentials || {}).map(([k, v]) =>
+            [k, isSecret(k) && typeof v === 'string' && v ? (v.length > 8 ? MASK + v.slice(-4) : MASK) : v])),
+        }))
+        return new Response(JSON.stringify({ ok: true, integrations }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const service = String(body.service || '').trim()
+        if (!service) return new Response(JSON.stringify({ error: 'service required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { service, updated_at: new Date().toISOString() }
+        if (body.active !== undefined) fields.active = !!body.active
+        if (body.credentials && typeof body.credentials === 'object') {
+          const existing = await dbGet('api_integrations', 'credentials', { service: `eq.${service}` }, undefined, 1)
+          const stored = (existing[0]?.credentials || {}) as Record<string, unknown>
+          fields.credentials = Object.fromEntries(Object.entries(body.credentials as Record<string, unknown>).map(([k, v]) =>
+            [k, typeof v === 'string' && v.startsWith(MASK) ? (stored[k] ?? null) : v]))
+        }
+        await dbUpsert('api_integrations', fields, 'service')
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })

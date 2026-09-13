@@ -1,36 +1,12 @@
 // ── Lock Screen ───────────────────────────────────────────────────────
-const LOCK_PWD = 'orchestrator2024'
+// Password lock removed: it was a hardcoded password checked in the browser, so
+// it never protected anything. The lock screen is hidden on load. Real
+// authentication (backend-issued session tokens) is a planned step and must be
+// in place before any public deploy. The email-OTP login below is kept for that
+// rework; the lock screen was its only entry point, so it is unreachable for now.
 const LOCK_KEY = 'oa_unlocked'
 const LOCK_TTL = 24 * 60 * 60 * 1000
-;(function(){
-  try {
-    const s = localStorage.getItem(LOCK_KEY)
-    if (s && Date.now() < JSON.parse(s).exp) {
-      document.getElementById('lockScreen').classList.add('hidden')
-    }
-  } catch {}
-})()
-function checkLock() {
-  const v = document.getElementById('lockInput').value
-  if (v === LOCK_PWD) {
-    localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
-    document.getElementById('lockScreen').classList.add('hidden')
-    document.getElementById('lockInput').value = ''
-    document.getElementById('lockErr').textContent = ''
-  } else {
-    document.getElementById('lockErr').textContent = '密码错误，请重试'
-    document.getElementById('lockInput').value = ''
-    document.getElementById('lockInput').focus()
-  }
-}
-function showOtpView() {
-  document.getElementById('lockPwdView').style.display = 'none'
-  document.getElementById('lockOtpView').style.display = 'block'
-}
-function showPwdView() {
-  document.getElementById('lockOtpView').style.display = 'none'
-  document.getElementById('lockPwdView').style.display = 'block'
-}
+document.getElementById('lockScreen')?.classList.add('hidden')
 async function sendOtp() {
   const email = document.getElementById('lockEmailInput').value.trim()
   const errEl = document.getElementById('lockOtpErr')
@@ -165,6 +141,7 @@ function newSession() {
 const _pageCache = {}
 const CACHE_TTL = 2 * 60 * 1000 // 2 分钟缓存
 const pageLoaded = {}
+let _logsRefreshTimer = null  // logs page auto-refresh; showPage clears it when leaving
 
 function toggleSidebar() {
   document.getElementById('sidebar')?.classList.toggle('open')

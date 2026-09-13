@@ -29,13 +29,35 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
 // ── Postgres pool (lazy, only when DB_DRIVER=postgres) ─────────────────
+// PostgREST serializes dates/timestamps as ISO strings and int8/numeric as JSON
+// numbers. deno-postgres defaults differ (Date objects shifted into the machine's
+// local timezone; BigInt / string for int8 / numeric — BigInt even breaks
+// JSON.stringify), so decode those types the way PostgREST does. Both drivers must
+// hand callers identical values. Keys are Postgres type OIDs.
+const PG_DECODERS = {
+  1082: (v: string) => v,                                                    // date        → 'YYYY-MM-DD'
+  1114: (v: string) => v.replace(' ', 'T'),                                  // timestamp   → 'YYYY-MM-DDTHH:MM:SS[.f]'
+  1184: (v: string) => v.replace(' ', 'T').replace(/([+-]\d\d)$/, '$1:00'),  // timestamptz → '…+00:00'
+  20:   (v: string) => Number(v),                                            // int8 (bigserial ids)
+  1700: (v: string) => Number(v),                                            // numeric
+}
+
 let _pool: PgPool | null = null
 async function pool(): Promise<PgPool> {
   if (!_pool) {
-    const url = Deno.env.get('DATABASE_URL')
-    if (!url) throw new Error('DB_DRIVER=postgres but DATABASE_URL is not set')
+    const raw = Deno.env.get('DATABASE_URL')
+    if (!raw) throw new Error('DB_DRIVER=postgres but DATABASE_URL is not set')
+    // Pool takes either a URL string or an options object — decoders need the object form.
+    const url = new URL(raw)
     const { Pool } = await import('https://deno.land/x/postgres@v0.19.3/mod.ts')
-    _pool = new Pool(url, 5, true) // 5 connections, lazy
+    _pool = new Pool({
+      hostname: url.hostname,
+      port: url.port || '5432',
+      user: decodeURIComponent(url.username),
+      password: decodeURIComponent(url.password),
+      database: url.pathname.replace(/^\//, ''),
+      controls: { decoders: PG_DECODERS },
+    }, 5, true) // 5 connections, lazy
   }
   return _pool
 }
@@ -58,53 +80,87 @@ function qid(name: string): string {
 
 // ── PostgREST filter operator → SQL ────────────────────────────────────
 // Returns { clause, params } for a WHERE built from a filters record.
+// Mirrors PostgREST so both drivers return the same rows:
+//   • like/ilike use * as the wildcard (translated to %)
+//   • `or` / `and` keys hold a logical group: "(a.eq.1,b.ilike.*x*,and(c.gte.2,c.lte.5))"
+//   • values may be double-quoted to contain commas or parentheses: labels.eq."vip,hot"
+type WhereCtx = { params: unknown[]; idx: number }
+
+// Split on commas that are not inside parentheses or double quotes.
+function splitTopLevel(s: string): string[] {
+  const out: string[] = []
+  let depth = 0, quoted = false, cur = ''
+  for (const ch of s) {
+    if (ch === '"') quoted = !quoted
+    else if (!quoted && ch === '(') depth++
+    else if (!quoted && ch === ')') depth--
+    if (ch === ',' && depth === 0 && !quoted) { out.push(cur); cur = '' } else cur += ch
+  }
+  if (cur.length) out.push(cur)
+  return out
+}
+
+function unquote(s: string): string {
+  return s.length >= 2 && s.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : s
+}
+
+// One condition: column + "op.value"
+function condToSql(column: string, opAndVal: string, ctx: WhereCtx): string {
+  const col = qid(column)
+  const dot = opAndVal.indexOf('.')
+  const op = dot === -1 ? 'eq' : opAndVal.slice(0, dot)
+  const val = unquote(dot === -1 ? opAndVal : opAndVal.slice(dot + 1))
+  const p = (v: unknown) => { ctx.params.push(v); return `$${ctx.idx++}` }
+
+  switch (op) {
+    case 'eq':    return `${col} = ${p(val)}`
+    case 'neq':   return `${col} <> ${p(val)}`
+    case 'gt':    return `${col} > ${p(val)}`
+    case 'gte':   return `${col} >= ${p(val)}`
+    case 'lt':    return `${col} < ${p(val)}`
+    case 'lte':   return `${col} <= ${p(val)}`
+    case 'like':  return `${col} LIKE ${p(val.replaceAll('*', '%'))}`
+    case 'ilike': return `${col} ILIKE ${p(val.replaceAll('*', '%'))}`
+    case 'is':
+      if (val === 'null')  return `${col} IS NULL`
+      if (val === 'true')  return `${col} IS TRUE`
+      if (val === 'false') return `${col} IS FALSE`
+      return `${col} = ${p(val)}`
+    case 'in': {
+      const items = splitTopLevel(val.replace(/^\(/, '').replace(/\)$/, '')).map(unquote)
+      return items.length ? `${col} IN (${items.map(p).join(', ')})` : 'false'
+    }
+    default:
+      // unknown operator → equality on the raw value (defensive)
+      return `${col} = ${p(opAndVal)}`
+  }
+}
+
+// A logical group "(item,item,…)" where an item is a condition or a nested and(…)/or(…)
+function groupToSql(joiner: 'AND' | 'OR', group: string, ctx: WhereCtx): string {
+  const inner = group.trim().replace(/^\(/, '').replace(/\)$/, '')
+  const parts = splitTopLevel(inner).map((item) => {
+    const nested = item.match(/^(and|or)(\(.*\))$/s)
+    if (nested) return groupToSql(nested[1] === 'and' ? 'AND' : 'OR', nested[2], ctx)
+    const dot = item.indexOf('.')
+    if (dot === -1) throw new Error(`invalid filter condition: ${item}`)
+    return condToSql(item.slice(0, dot), item.slice(dot + 1), ctx)
+  })
+  return parts.length ? `(${parts.join(` ${joiner} `)})` : 'true'
+}
+
 function buildWhere(
   filters: Record<string, string>,
   startIdx = 1,
 ): { clause: string; params: unknown[]; nextIdx: number } {
+  const ctx: WhereCtx = { params: [], idx: startIdx }
   const parts: string[] = []
-  const params: unknown[] = []
-  let idx = startIdx
-
   for (const [rawKey, rawVal] of Object.entries(filters)) {
-    const col = qid(rawKey.replace(/\d+$/, '')) // strip trailing digit (dedup trick)
-    const dot = rawVal.indexOf('.')
-    const op = dot === -1 ? 'eq' : rawVal.slice(0, dot)
-    const val = dot === -1 ? rawVal : rawVal.slice(dot + 1)
-
-    switch (op) {
-      case 'eq':  parts.push(`${col} = $${idx++}`);   params.push(val); break
-      case 'neq': parts.push(`${col} <> $${idx++}`);  params.push(val); break
-      case 'gt':  parts.push(`${col} > $${idx++}`);   params.push(val); break
-      case 'gte': parts.push(`${col} >= $${idx++}`);  params.push(val); break
-      case 'lt':  parts.push(`${col} < $${idx++}`);   params.push(val); break
-      case 'lte': parts.push(`${col} <= $${idx++}`);  params.push(val); break
-      case 'like':  parts.push(`${col} LIKE $${idx++}`);  params.push(val); break
-      case 'ilike': parts.push(`${col} ILIKE $${idx++}`); params.push(val); break
-      case 'is':
-        // is.null / is.true / is.false
-        if (val === 'null')       parts.push(`${col} IS NULL`)
-        else if (val === 'true')  parts.push(`${col} IS TRUE`)
-        else if (val === 'false') parts.push(`${col} IS FALSE`)
-        else { parts.push(`${col} = $${idx++}`); params.push(val) }
-        break
-      case 'in': {
-        // in.(a,b,c)
-        const inner = val.replace(/^\(/, '').replace(/\)$/, '')
-        const items = inner.length ? inner.split(',') : []
-        if (items.length === 0) { parts.push('false'); break }
-        const ph = items.map(() => `$${idx++}`)
-        parts.push(`${col} IN (${ph.join(',')})`)
-        params.push(...items)
-        break
-      }
-      default:
-        // unknown operator → treat whole value as equality (defensive)
-        parts.push(`${col} = $${idx++}`); params.push(rawVal)
-    }
+    const key = rawKey.replace(/\d+$/, '') // strip trailing digit (dedup trick)
+    if (key === 'or' || key === 'and') parts.push(groupToSql(key === 'or' ? 'OR' : 'AND', rawVal, ctx))
+    else parts.push(condToSql(key, rawVal, ctx))
   }
-
-  return { clause: parts.length ? ' WHERE ' + parts.join(' AND ') : '', params, nextIdx: idx }
+  return { clause: parts.length ? ' WHERE ' + parts.join(' AND ') : '', params: ctx.params, nextIdx: ctx.idx }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -146,7 +202,7 @@ export async function dbGet(
     const params = new URLSearchParams({ select })
     if (order) params.set('order', order)
     if (limit) params.set('limit', String(limit))
-    for (const [k, v] of Object.entries(filters)) params.set(k, v)
+    appendRestFilters(params, filters)
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
       headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
     })
@@ -154,22 +210,72 @@ export async function dbGet(
     return r.json()
   }
   try {
-    const cols = select === '*'
-      ? '*'
-      : select.split(',').map((c) => qid(c.trim())).join(', ')
     const { clause, params } = buildWhere(filters)
-    let sql = `SELECT ${cols} FROM ${qid(table)}${clause}`
-    if (order) {
-      // "col.desc" / "col.asc" (default asc)
-      const [ocol, odir] = order.split('.')
-      sql += ` ORDER BY ${qid(ocol)} ${String(odir).toLowerCase() === 'desc' ? 'DESC' : 'ASC'}`
-    }
+    let sql = `SELECT ${selectSql(select)} FROM ${qid(table)}${clause}${orderSql(order)}`
     if (limit) sql += ` LIMIT ${Number(limit)}`
     return await pg(sql, params)
   } catch (e) {
     console.error('dbGet', table, e)
     return []
   }
+}
+
+// ── dbGetPage: one page of rows + the total count ignoring limit/offset ─
+// For paginated lists. rest mode uses PostgREST `Prefer: count=exact` + offset.
+// limit = 0 → count only, no rows.
+export async function dbGetPage(
+  table: string,
+  select = '*',
+  filters: Record<string, string> = {},
+  order?: string,
+  limit = 50,
+  offset = 0,
+  // deno-lint-ignore no-explicit-any
+): Promise<{ rows: any[]; count: number }> {
+  if (!USE_PG) {
+    const params = new URLSearchParams({ select })
+    if (order) params.set('order', order)
+    params.set('limit', String(limit))
+    if (offset) params.set('offset', String(offset))
+    appendRestFilters(params, filters)
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'count=exact' },
+    })
+    if (!r.ok) return { rows: [], count: 0 }
+    const rows = await r.json()
+    // Content-Range: "0-49/1234", or "*/0" when nothing matches
+    const count = Number((r.headers.get('content-range') || '').split('/')[1]) || 0
+    return { rows: limit === 0 ? [] : rows, count }
+  }
+  try {
+    const { clause, params } = buildWhere(filters)
+    const counted = await pg<{ n: number }>(`SELECT count(*)::int AS n FROM ${qid(table)}${clause}`, params)
+    const count = counted[0]?.n ?? 0
+    if (limit === 0) return { rows: [], count }
+    const sql = `SELECT ${selectSql(select)} FROM ${qid(table)}${clause}${orderSql(order)} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
+    return { rows: await pg(sql, params), count }
+  } catch (e) {
+    console.error('dbGetPage', table, e)
+    return { rows: [], count: 0 }
+  }
+}
+
+function selectSql(select: string): string {
+  return select === '*' ? '*' : select.split(',').map((c) => qid(c.trim())).join(', ')
+}
+
+// "col.desc" / "col.asc" (default asc)
+function orderSql(order?: string): string {
+  if (!order) return ''
+  const [ocol, odir] = order.split('.')
+  return ` ORDER BY ${qid(ocol)} ${String(odir).toLowerCase() === 'desc' ? 'DESC' : 'ASC'}`
+}
+
+// rest mode: strip the trailing-digit dedup suffix (created_at2 → created_at) and
+// append instead of set, so one column can carry two filters (PostgREST ANDs them).
+// Sending "created_at2=…" as-is makes PostgREST reject the query (unknown column).
+function appendRestFilters(params: URLSearchParams, filters: Record<string, string>) {
+  for (const [k, v] of Object.entries(filters)) params.append(k.replace(/\d+$/, ''), v)
 }
 
 // ── dbInsert: INSERT INTO <table> (...) VALUES (...) ───────────────────
