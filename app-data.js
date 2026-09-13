@@ -1,7 +1,7 @@
 // ── Agents ────────────────────────────────────────────────────────────
 async function loadAgents() {
   try {
-    const {data:agents} = await db.from('agents').select('*').order('id')
+    const {agents} = await apiCall('agent_crud', { method: 'list' })
 
     _agentsMap = {}
     ;(agents||[]).forEach(a => _agentsMap[a.id] = a)
@@ -131,9 +131,12 @@ async function aeToggleActive() {
   if (lbl) lbl.textContent = chk.checked ? '已启用' : '已停用'
   const id = document.getElementById('aeId')?.value
   if (id) {
-    await db.from('agents').update({active: chk.checked, updated_at: new Date().toISOString()}).eq('id', id)
+    try {
+      await apiCall('agent_crud', { method: 'update', id, data: { active: chk.checked } })
+    } catch(e) { toast('保存失败：' + e.message, 'error'); return }
     const dot = document.querySelector(`#ali-${id} .ali-dot`)
     if (dot) { dot.classList.toggle('on', chk.checked) }
+    if (_agentsMap[id]) _agentsMap[id].active = chk.checked
   }
 }
 
@@ -239,8 +242,9 @@ async function saveAgent() {
   }
   const msg = document.getElementById('aeSaveMsg')
   msg.textContent = '保存中…'; msg.className = 'ae-save-msg'
-  const {error} = await db.from('agents').update(data).eq('id', id)
-  if (error) { msg.className = 'ae-save-msg err'; msg.textContent = error.message; return }
+  try {
+    await apiCall('agent_crud', { method: 'update', id, data })
+  } catch(e) { msg.className = 'ae-save-msg err'; msg.textContent = e.message; return }
   // Auto-save version history
   apiRaw({ action:'save_agent_version', agent_id:id, system_prompt:data.system_prompt, provider:data.provider, model:data.model, note:'Auto-saved on edit' }).catch(()=>{})
   msg.className = 'ae-save-msg ok'; msg.textContent = '✓ 已保存'
@@ -261,8 +265,9 @@ async function deleteAgent() {
   const name = document.getElementById('aeName')?.value
   if (!id) return
   if (!confirm(`确定删除 Agent「${name}」？此操作不可撤销。`)) return
-  const { error } = await db.from('agents').delete().eq('id', id)
-  if (error) { alert('删除失败：' + error.message); return }
+  try {
+    await apiCall('agent_crud', { method: 'delete', id })
+  } catch(e) { alert('删除失败：' + e.message); return }
   _currentAgentId = null
   document.getElementById('agentEditor').innerHTML = '<div class="ae-placeholder">← 选择一个 Agent 开始编辑</div>'
   delete _pageCache['agents']
@@ -271,10 +276,11 @@ async function deleteAgent() {
 
 async function newAgent() {
   const id = 'agent_' + Date.now()
-  const {error} = await db.from('agents').insert({
-    id, name: '新 Agent', description: '', system_prompt: '', active: true,
-  })
-  if (error) { alert('创建失败：' + error.message); return }
+  try {
+    await apiCall('agent_crud', { method: 'create', data: {
+      id, name: '新 Agent', description: '', system_prompt: '', active: true,
+    } })
+  } catch(e) { alert('创建失败：' + e.message); return }
   delete _pageCache['agents']
   _currentAgentId = id
   await loadAgents()

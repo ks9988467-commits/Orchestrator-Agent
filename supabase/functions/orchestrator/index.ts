@@ -2844,6 +2844,72 @@ Return ONLY a valid JSON array, no markdown:
         _cacheAgents = null
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
+      if (m === 'create') {
+        // Insert only: an id that already exists is an error, never an overwrite
+        // (the create-from-gap flow takes its id from an LLM suggestion).
+        const d = (body.data || {}) as Record<string, unknown>
+        const id = String(d.id || '').trim()
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const row: Record<string, unknown> = { id, active: d.active === undefined ? true : !!d.active }
+        for (const k of ['name', 'description', 'system_prompt']) if (d[k] !== undefined) row[k] = d[k]
+        for (const k of ['provider', 'model']) if (d[k] !== undefined) row[k] = d[k] || null
+        if (d.uses_tools !== undefined) row.uses_tools = !!d.uses_tools
+        const existing = await dbGet('agents', 'id', { id: `eq.${id}` }, undefined, 1)
+        if (existing.length) return new Response(JSON.stringify({ error: `Agent ID "${id}" 已存在` }), { status: 409, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const ins = await dbInsert('agents', row)
+        if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true, id }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agents', { id: `eq.${id}` })
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agent skills (技能库) ────────────────────────────────────────────
+    if (body.action === 'agent_skill_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const skills = await dbGet('agent_skills', 'id,agent,skill,created_at', {}, 'created_at.desc')
+        return new Response(JSON.stringify({ ok: true, skills }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agent_skills', { id: `eq.${id}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete_agent') {
+        const agent = String(body.agent || '')
+        if (!agent) return new Response(JSON.stringify({ error: 'agent required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agent_skills', { agent: `eq.${agent}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agent suggestions / knowledge gaps (缺口问题) ─────────────────────
+    if (body.action === 'agent_suggestion_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 500)
+        const suggestions = await dbGet('agent_suggestions', 'id,message,session_id,asked_at,handled,tenant_id', tenantFilters(), 'asked_at.desc', limit)
+        return new Response(JSON.stringify({ ok: true, suggestions }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'mark_handled' || m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (m === 'mark_handled') await dbPatchWhere('agent_suggestions', tenantFilters({ id: `eq.${id}` }), { handled: true })
+        else await dbDelete('agent_suggestions', tenantFilters({ id: `eq.${id}` }))
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 

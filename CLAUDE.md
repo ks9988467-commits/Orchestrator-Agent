@@ -9,7 +9,7 @@ Orchestrator Agent (codename **UCG**) — a multi-agent AI brain.
 > - ✅ DB layer portable — all backend DB access goes through `supabase/functions/orchestrator/db.ts` (`DB_DRIVER=rest` default | `postgres`); postgres mode matches PostgREST's filters and value types
 > - ✅ Local stack — `local/docker-compose.yml` (Postgres 17 + pgvector), schema `local/initdb/01–03`; tests `local/smoke-db.ts` (DB layer) and `local/smoke-api.ts` (backend actions)
 > - ✅ Backend runs locally — `.claude/launch.json` → `backend` (reads `local/.env`, template `local/.env.example`)
-> - 🔄 Frontend moving off direct supabase-js calls to explicit backend actions (`<domain>_crud`), page by page. Done: logs / LLM config / API integrations. Remaining: home, agents, data, tasks, staff, messages, documents, KB / workflow / automation pages, file storage
+> - 🔄 Frontend moving off direct supabase-js calls to explicit backend actions (`<domain>_crud`), page by page. Done: logs / LLM config / API integrations / agents (editor, skills, knowledge gaps, workflow agent pickers). Remaining: home, data, tasks, staff, messages, documents, KB / workflow / automation pages, file storage
 > - ⚠️ **No authentication.** The backend trusts `tenant_id` / `role` from the request body, and the dashboard password lock was removed (it was a hardcoded client-side password). Local use only — real auth (backend-issued session tokens) must exist before any public deploy.
 >
 > Start Docker on this machine with `local/start-docker.ps1` — Docker Desktop crashes at startup on stale sockets otherwise.

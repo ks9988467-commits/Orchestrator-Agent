@@ -149,11 +149,68 @@ check('delete_all with agent removes only that agent', left.length === 1 && left
 const badMethod = await api('conversation_crud', { method: 'nope' })
 check('unknown method → 400', badMethod.status === 400, badMethod.json)
 
+// ── 5. agent_crud create / delete ──────────────────────────────────────
+console.log('\n[5] agent_crud create / delete')
+const newId = `${MARK}_new`
+const cr = await api('agent_crud', { method: 'create', data: { id: newId, name: '新 Agent', provider: '', uses_tools: 0, bogus: 'x' } })
+check('create returns ok with the id', cr.status === 200 && cr.json.ok === true && cr.json.id === newId, cr.json)
+const cg = await dbGet('agents', 'name,active,provider,uses_tools', { id: `eq.${newId}` })
+check("create: active defaults true, '' provider → null, uses_tools boolean",
+  cg[0]?.name === '新 Agent' && cg[0]?.active === true && cg[0]?.provider === null && cg[0]?.uses_tools === false, cg)
+const dup = await api('agent_crud', { method: 'create', data: { id: newId, name: 'overwrite attempt' } })
+const cg2 = await dbGet('agents', 'name', { id: `eq.${newId}` })
+check('create with an existing id → 409 and the row is untouched', dup.status === 409 && cg2[0]?.name === '新 Agent', { dup: dup.json, row: cg2 })
+const noCid = await api('agent_crud', { method: 'create', data: { name: 'x' } })
+check('create without id → 400', noCid.status === 400, noCid.json)
+const del = await api('agent_crud', { method: 'delete', id: newId })
+const gone = await dbGet('agents', 'id', { id: `eq.${newId}` })
+check('delete removes the agent', del.status === 200 && gone.length === 0, gone)
+const noDid = await api('agent_crud', { method: 'delete' })
+check('delete without id → 400', noDid.status === 400, noDid.json)
+
+// ── 6. agent_skill_crud ────────────────────────────────────────────────
+console.log('\n[6] agent_skill_crud')
+const skA = `${MARK}_skA`, skB = `${MARK}_skB`
+await dbInsert('agent_skills', [
+  { agent: skA, skill: 'skill one' }, { agent: skA, skill: 'skill two' }, { agent: skB, skill: 'keep me' },
+])
+const sl = await api('agent_skill_crud', { method: 'list' })
+const mine = (sl.json.skills || []).filter((s: { agent: string }) => s.agent === skA)
+check('list returns the skills with numeric ids', sl.status === 200 && mine.length === 2 && typeof mine[0]?.id === 'number', mine)
+await api('agent_skill_crud', { method: 'delete', id: mine[0]?.id })
+const afterOne = await dbGet('agent_skills', 'id', { agent: `eq.${skA}` })
+check('delete removes one skill', afterOne.length === 1, afterOne)
+await api('agent_skill_crud', { method: 'delete_agent', agent: skA })
+const afterA = await dbGet('agent_skills', 'agent', { agent: `in.(${skA},${skB})` })
+check('delete_agent removes only that agent’s skills', afterA.length === 1 && afterA[0].agent === skB, afterA)
+const noAgent = await api('agent_skill_crud', { method: 'delete_agent' })
+check('delete_agent without agent → 400 (never deletes everything)', noAgent.status === 400, noAgent.json)
+
+// ── 7. agent_suggestion_crud ───────────────────────────────────────────
+console.log('\n[7] agent_suggestion_crud')
+await dbInsert('agent_suggestions', [{ message: `${MARK} gap 1`, session_id: MARK }, { message: `${MARK} gap 2`, session_id: MARK }])
+const gl = await api('agent_suggestion_crud', { method: 'list', limit: 500 })
+const gaps = (gl.json.suggestions || []).filter((s: { session_id: string }) => s.session_id === MARK)
+check('list returns the suggestions, unhandled', gl.status === 200 && gaps.length === 2 && gaps.every((g: { handled: boolean }) => g.handled === false), gaps)
+await api('agent_suggestion_crud', { method: 'mark_handled', id: gaps[0]?.id })
+await api('agent_suggestion_crud', { method: 'delete', id: gaps[1]?.id })
+const gRows = await dbGet('agent_suggestions', 'id,handled', { session_id: `eq.${MARK}` })
+check('mark_handled sets handled; delete removes the other', gRows.length === 1 && gRows[0].handled === true && gRows[0].id === gaps[0]?.id, gRows)
+const noGid = await api('agent_suggestion_crud', { method: 'mark_handled' })
+check('mark_handled without id → 400', noGid.status === 400, noGid.json)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('conversations', { session_id: `eq.${MARK}` })
 await dbDelete('agents', { id: `eq.${MARK}_a` })
-const leftover = await dbGet('conversations', 'id', { session_id: `eq.${MARK}` })
+await dbDelete('agent_skills', { agent: `in.(${skA},${skB})` })
+await dbDelete('agent_suggestions', { session_id: `eq.${MARK}` })
+const leftover = [
+  ...await dbGet('conversations', 'id', { session_id: `eq.${MARK}` }),
+  ...await dbGet('agents', 'id', { id: `like.${MARK}*` }),
+  ...await dbGet('agent_skills', 'id', { agent: `like.${MARK}*` }),
+  ...await dbGet('agent_suggestions', 'id', { session_id: `eq.${MARK}` }),
+]
 check('cleanup removed test rows', leftover.length === 0, leftover)
 
 console.log(`\n${fail === 0 ? '✅' : '❌'}  ${pass} passed, ${fail} failed`)

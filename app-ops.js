@@ -340,10 +340,16 @@ async function loadSkillsPage() {
   listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#333;font-size:12px">加载中…</div>'
 
   // Load all agents + all skills in parallel
-  const [{ data: agents }, { data: skills }] = await Promise.all([
-    db.from('agents').select('id,name,active').order('id'),
-    db.from('agent_skills').select('id,agent,skill,created_at').order('created_at', { ascending: false })
-  ])
+  let agents, skills
+  try {
+    ;[{ agents }, { skills }] = await Promise.all([
+      apiCall('agent_crud', { method: 'list' }),
+      apiCall('agent_skill_crud', { method: 'list' }),
+    ])
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:20px;text-align:center;color:#d11a13;font-size:12px">加载失败：${esc(e.message)}</div>`
+    return
+  }
 
   // Group skills by agent
   skillsData = {}
@@ -424,8 +430,9 @@ function renderSkillCard(s) {
 async function deleteSkill(id, agentId) {
   const card = document.getElementById('skill-'+id)
   if (card) { card.style.opacity='0.4'; card.style.pointerEvents='none' }
-  const { error } = await db.from('agent_skills').delete().eq('id', id)
-  if (error) {
+  try {
+    await apiCall('agent_skill_crud', { method: 'delete', id })
+  } catch {
     toast('删除失败', 'error')
     if (card) { card.style.opacity=''; card.style.pointerEvents='' }
     return
@@ -443,8 +450,9 @@ async function deleteSkill(id, agentId) {
 
 async function clearAgentSkills(agentId) {
   if (!confirm(`确定清空 ${AGENT_META[agentId]?.label || agentId} 的全部技能？此操作不可撤销。`)) return
-  const { error } = await db.from('agent_skills').delete().eq('agent', agentId)
-  if (error) { toast('清空失败', 'error'); return }
+  try {
+    await apiCall('agent_skill_crud', { method: 'delete_agent', agent: agentId })
+  } catch { toast('清空失败', 'error'); return }
   skillsData[agentId] = []
   const meta = AGENT_META[agentId] || { icon: '🤖', label: agentId }
   renderSkillsPanel(agentId, meta)
@@ -930,7 +938,7 @@ async function selectWorkflow(id) {
     const res = await apiCall('list_workflows')
     const wf = (res.workflows||[]).find(w=>w.id===id)
     if (!wf) return
-    const {data:agents} = await db.from('agents').select('id,name').order('id')
+    const {agents} = await apiCall('agent_crud', { method: 'list' })
     const editor = document.getElementById('wfEditor')
     editor.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
@@ -1067,7 +1075,7 @@ async function editWorkflow(id) {
 let _wfNodeCount = 0
 const WF_NODE_COLORS = { agent:'#3b82f6', condition:'#f59e0b', output:'#22c55e', self_learn:'#8b5cf6', skill_audit:'#14b8a6', prefs_compact:'#ec4899' }
 async function addWfNode(existing) {
-  const {data:agents} = await db.from('agents').select('id,name').order('id')
+  const agents = await apiCall('agent_crud', { method: 'list' }).then(r => r.agents).catch(() => [])
   const agOpts = (agents||[]).map(a=>`<option value="${esc(a.id)}"${existing?.config?.agent_id===a.id?' selected':''}>${esc(a.name)}</option>`).join('')
   const idx = _wfNodeCount++
   const type = existing?.type || 'agent'
@@ -1105,7 +1113,7 @@ async function wfNodeTypeChange(sel, nodeId) {
   if (type === 'agent') {
     cfg.innerHTML = `<select class="form-input" style="font-size:12px;padding:5px 8px;margin-bottom:6px"><option value="">加载中…</option></select><input class="form-input" style="font-size:12px" placeholder="Prompt（用 {{input}} 引用上一步输出）">`
     try {
-      const {data:agents} = await db.from('agents').select('id,name').order('id')
+      const {agents} = await apiCall('agent_crud', { method: 'list' })
       const agSel = cfg.querySelector('select')
       if (agSel) agSel.innerHTML = (agents||[]).map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')
     } catch(e) {}

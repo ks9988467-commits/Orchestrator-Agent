@@ -337,11 +337,7 @@ async function loadGapsPage() {
   if (!wrap) return
   wrap.innerHTML = '<div style="color:var(--ink-3);font-size:13px;padding:20px 0">加载中…</div>'
   try {
-    const { data, error } = await db.from('agent_suggestions')
-      .select('id,message,session_id,asked_at,handled,tenant_id')
-      .order('asked_at', { ascending: false })
-      .limit(100)
-    if (error) throw error
+    const { suggestions: data } = await apiCall('agent_suggestion_crud', { method: 'list', limit: 100 })
     if (!data || !data.length) {
       wrap.innerHTML = '<div style="color:var(--ink-3);font-size:13px;padding:20px 0;text-align:center">暂无缺口问题记录</div>'
       return
@@ -381,7 +377,7 @@ async function loadGapsPage() {
 
 async function markGapHandled(id, btn) {
   btn.disabled = true
-  const { error } = await db.from('agent_suggestions').update({ handled: true }).eq('id', id)
+  const error = await apiCall('agent_suggestion_crud', { method: 'mark_handled', id }).then(() => null, e => e)
   if (!error) {
     const row = btn.closest('tr')
     if (row) {
@@ -393,7 +389,7 @@ async function markGapHandled(id, btn) {
 
 async function deleteGap(id, btn) {
   btn.disabled = true
-  const { error } = await db.from('agent_suggestions').delete().eq('id', id)
+  const error = await apiCall('agent_suggestion_crud', { method: 'delete', id }).then(() => null, e => e)
   if (!error) { const row = btn.closest('tr'); if (row) row.remove() }
   else { btn.disabled = false; alert('删除失败') }
 }
@@ -505,11 +501,10 @@ async function confirmCreateAgent() {
   try {
     // insert agent
     const agentRow = { id, name, description: desc || null, system_prompt: prom, provider: 'anthropic', model: 'claude-opus-4-5', active: true }
-    const { error: aErr } = await db.from('agents').upsert(agentRow)
-    if (aErr) throw new Error(aErr.message)
+    await apiCall('agent_crud', { method: 'create', data: agentRow })
     // mark gap handled
     if (_caGapId) {
-      await db.from('agent_suggestions').update({ handled: true }).eq('id', _caGapId)
+      await apiCall('agent_suggestion_crud', { method: 'mark_handled', id: _caGapId })
     }
     toast(`Agent "${name}" 创建成功！`, 'success')
     closeCreateAgentModal()
