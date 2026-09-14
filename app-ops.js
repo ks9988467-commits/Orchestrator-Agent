@@ -10,18 +10,17 @@ async function loadTasks() {
   el.innerHTML = '<p style="color:var(--ink-5);font-size:13px">加载中…</p>'
   // Pre-load staff into dropdowns on first call
   if (!_msgStaff.length) {
-    const { data } = await db.from('staff').select('id,name,avatar').eq('active',true).order('name')
-    _msgStaff = data || []
+    const { staff } = await apiCall('staff_crud', { method: 'list', active_only: true }).catch(() => ({ staff: [] }))
+    _msgStaff = staff || []
     const af2 = document.getElementById('taskAssigneeFilter')
     const as2 = document.getElementById('taskAssignee')
     if (af2) af2.innerHTML = '<option value="">全部负责人</option>' + _msgStaff.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')
     if (as2) as2.innerHTML = '<option value="">未分配</option>' + _msgStaff.map(s=>`<option value="${s.id}">${s.avatar||'👤'} ${esc(s.name)}</option>`).join('')
   }
-  let q = db.from('tasks').select('*,assignee:assignee_id(id,name,avatar),creator:created_by(id,name)').order('created_at', {ascending:false})
-  if (sf) q = q.eq('status', sf)
-  if (af) q = q.eq('assignee_id', af)
-  const { data, error } = await q
-  if (error) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">加载失败：${esc(error.message)}</p>`; return }
+  let data
+  try {
+    ;({ tasks: data } = await apiCall('staff_task_crud', { method: 'list', status: sf, assignee_id: af }))
+  } catch(e) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">加载失败：${esc(e.message)}</p>`; return }
   const tasks = data || []
   document.getElementById('tasksCount').textContent = tasks.length ? `共 ${tasks.length} 条` : ''
   if (!tasks.length) { el.innerHTML = '<p style="color:var(--ink-5);font-size:13px;padding:20px 0">暂无任务，点击「创建任务」开始</p>'; return }
@@ -55,7 +54,7 @@ async function loadTasks() {
 
 async function cycleTaskStatus(id, current) {
   const next = PRIORITY_NEXT[current] || 'todo'
-  await db.from('tasks').update({ status: next, updated_at: new Date().toISOString() }).eq('id', id)
+  await apiCall('staff_task_crud', { method: 'set_status', id, status: next }).catch(e => toast('更新失败：' + e.message, 'error'))
   loadTasks()
 }
 
@@ -89,20 +88,17 @@ async function saveTask() {
   const errEl = document.getElementById('taskErr')
   if (!title) { errEl.textContent = '请填写任务标题'; return }
   errEl.textContent = '保存中…'
-  const payload = {
+  const data = {
     title,
     description:  document.getElementById('taskDesc').value.trim() || null,
     assignee_id:  document.getElementById('taskAssignee').value || null,
     priority:     document.getElementById('taskPriority').value,
     due_date:     document.getElementById('taskDue').value || null,
-    updated_at:   new Date().toISOString(),
-    created_by:   _msgMyId || null,
-    tenant_id:    'default',
+    created_by:   _msgMyId || null,   // 后端只在创建时写入
   }
-  const { error } = id
-    ? await db.from('tasks').update(payload).eq('id', id)
-    : await db.from('tasks').insert(payload)
-  if (error) { errEl.textContent = error.message; return }
+  try {
+    await apiCall('staff_task_crud', { method: 'save', id: id || undefined, data })
+  } catch(e) { errEl.textContent = e.message; return }
   document.getElementById('taskModal').style.display = 'none'
   toast('任务已保存', 'success')
   loadTasks()
@@ -110,7 +106,9 @@ async function saveTask() {
 
 async function deleteTask(id) {
   if (!confirm('确定删除此任务？')) return
-  await db.from('tasks').delete().eq('id', id)
+  try {
+    await apiCall('staff_task_crud', { method: 'delete', id })
+  } catch(e) { toast('删除失败：' + e.message, 'error'); return }
   toast('已删除', 'success')
   loadTasks()
 }
@@ -118,8 +116,10 @@ async function deleteTask(id) {
 // ── Staff ─────────────────────────────────────────────────────────────
 async function loadStaffPage() {
   const el = document.getElementById('staffContent')
-  const { data, error } = await db.from('staff').select('*').order('name')
-  if (error) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">${esc(error.message)}</p>`; return }
+  let data
+  try {
+    ;({ staff: data } = await apiCall('staff_crud', { method: 'list' }))
+  } catch(e) { el.innerHTML = `<p style="color:#da0d15;font-size:13px">${esc(e.message)}</p>`; return }
   const staff = data || []
   if (!staff.length) { el.innerHTML = '<p style="color:var(--ink-5);font-size:13px">暂无员工，点击「添加员工」</p>'; return }
   el.innerHTML = `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden">` +
@@ -167,17 +167,15 @@ async function saveStaff() {
   const errEl = document.getElementById('staffErr')
   if (!name) { errEl.textContent = '请填写姓名'; return }
   errEl.textContent = '保存中…'
-  const payload = {
+  const data = {
     name,
     avatar:     document.getElementById('staffAvatar').value.trim() || null,
     role:       document.getElementById('staffRole').value.trim() || null,
     department: document.getElementById('staffDept').value.trim() || null,
-    tenant_id:  'default',
   }
-  const { error } = id
-    ? await db.from('staff').update(payload).eq('id', id)
-    : await db.from('staff').insert(payload)
-  if (error) { errEl.textContent = error.message; return }
+  try {
+    await apiCall('staff_crud', { method: 'save', id: id || undefined, data })
+  } catch(e) { errEl.textContent = e.message; return }
   document.getElementById('staffModal').style.display = 'none'
   toast('员工已保存', 'success')
   loadStaffPage()
@@ -186,7 +184,7 @@ async function saveStaff() {
 }
 
 async function toggleStaffActive(id, active) {
-  await db.from('staff').update({ active }).eq('id', id)
+  await apiCall('staff_crud', { method: 'set_active', id, active }).catch(e => toast('操作失败：' + e.message, 'error'))
   loadStaffPage()
   _msgStaff = []
 }
@@ -195,16 +193,17 @@ async function toggleStaffActive(id, active) {
 let _msgStaff = []
 let _msgMyId  = null
 let _msgPeerId = null
-let _dmChannel = null
+let _dmPollTimer = null
+let _dmPollBusy = false
 
 async function loadMsgPage() {
-  const { data } = await db.from('staff').select('*').eq('active', true).order('name')
-  _msgStaff = data || []
+  const { staff } = await apiCall('staff_crud', { method: 'list', active_only: true }).catch(() => ({ staff: [] }))
+  _msgStaff = staff || []
   const sel = document.getElementById('msgMyId')
   sel.innerHTML = _msgStaff.map(s => `<option value="${s.id}">${s.avatar||'👤'} ${esc(s.name)}</option>`).join('')
   _msgMyId = _msgStaff[0]?.id || null
   renderMsgContacts()
-  subscribeRealtime()
+  startDmPolling()
 }
 
 function switchMsgIdentity() {
@@ -212,7 +211,7 @@ function switchMsgIdentity() {
   _msgPeerId = null
   renderMsgContacts()
   document.getElementById('msgThreadWrap').innerHTML = `<div class="msg-no-contact"><span style="font-size:32px">💬</span><span>选择联系人开始对话</span></div>`
-  subscribeRealtime()
+  startDmPolling()
 }
 
 function renderMsgContacts() {
@@ -252,14 +251,14 @@ async function openDM(peerId) {
 
 async function loadMessages() {
   if (!_msgMyId || !_msgPeerId) return
-  const { data } = await db.from('direct_messages')
-    .select('*')
-    .or(`and(from_id.eq.${_msgMyId},to_id.eq.${_msgPeerId}),and(from_id.eq.${_msgPeerId},to_id.eq.${_msgMyId})`)
-    .order('created_at', { ascending: true })
-    .limit(100)
-  renderMessages(data || [])
-  await db.from('direct_messages').update({ read_at: new Date().toISOString() })
-    .eq('to_id', _msgMyId).eq('from_id', _msgPeerId).is('read_at', null)
+  try {
+    // 后端返回最新 100 条（按时间正序），并把返回的未读消息标记为已读
+    const { messages } = await apiCall('direct_message_crud', { method: 'list', me: _msgMyId, peer: _msgPeerId })
+    renderMessages(messages || [])
+  } catch(e) {
+    const el = document.getElementById('msgThread')
+    if (el) el.innerHTML = `<p class="msg-empty">加载失败：${esc(e.message)}</p>`
+  }
 }
 
 function renderMessages(msgs) {
@@ -273,7 +272,7 @@ function renderMessages(msgs) {
 function dmBubble(m) {
   const sent = m.from_id === _msgMyId
   const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' })
-  return `<div class="dm-row ${sent?'sent':'recv'}">
+  return `<div class="dm-row ${sent?'sent':'recv'}" data-id="${esc(m.id)}">
     <div class="dm-bubble">${esc(m.content)}<div class="dm-time">${time}</div></div>
   </div>`
 }
@@ -281,6 +280,7 @@ function dmBubble(m) {
 function appendDM(msg) {
   const el = document.getElementById('msgThread')
   if (!el) return
+  if (msg.id && el.querySelector(`.dm-row[data-id="${msg.id}"]`)) return   // 轮询和加载可能返回同一条
   const empty = el.querySelector('.msg-empty')
   if (empty) empty.remove()
   const div = document.createElement('div')
@@ -295,31 +295,39 @@ async function sendDM() {
   const content = input.value.trim()
   if (!content || !_msgMyId || !_msgPeerId) return
   input.value = ''; input.style.height = 'auto'
-  const { data, error } = await db.from('direct_messages')
-    .insert({ from_id: _msgMyId, to_id: _msgPeerId, content, tenant_id: 'default' })
-    .select().single()
-  if (!error && data) appendDM(data)
+  try {
+    const { message } = await apiCall('direct_message_crud', { method: 'send', me: _msgMyId, peer: _msgPeerId, content })
+    if (message) appendDM(message)
+  } catch(e) {
+    input.value = content
+    toast('发送失败：' + e.message, 'error')
+  }
 }
 
-function subscribeRealtime() {
-  if (_dmChannel) { db.removeChannel(_dmChannel); _dmChannel = null }
-  if (!_msgMyId) return
-  _dmChannel = db.channel('dm_inbox_' + _msgMyId)
-    .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'direct_messages',
-      filter: `to_id=eq.${_msgMyId}`
-    }, payload => {
-      const msg = payload.new
-      if (_msgPeerId && msg.from_id === _msgPeerId) {
-        appendDM(msg)
-        db.from('direct_messages').update({ read_at: new Date().toISOString() }).eq('id', msg.id)
-      } else {
-        // Show unread badge for a different contact
-        const badge = document.getElementById('msgUnreadBadge')
-        if (badge) { badge.style.display = ''; badge.textContent = '●' }
-      }
-    })
-    .subscribe()
+// 新消息用轮询获取（替代 Supabase Realtime）：消息页打开时每 3 秒一次，由 showPage 启停
+function startDmPolling() {
+  stopDmPolling()
+  _dmPollTimer = setInterval(pollDMs, 3000)
+}
+
+function stopDmPolling() {
+  if (_dmPollTimer) { clearInterval(_dmPollTimer); _dmPollTimer = null }
+}
+
+async function pollDMs() {
+  if (!_msgMyId || _dmPollBusy) return
+  _dmPollBusy = true
+  const me = _msgMyId, peer = _msgPeerId
+  try {
+    const { messages, unread_from } = await apiCall('direct_message_crud', { method: 'poll', me, peer: peer || undefined })
+    // 轮询期间切换了身份或联系人：跳过，重新打开对话时会完整加载
+    if (me === _msgMyId && peer === _msgPeerId) (messages || []).forEach(appendDM)
+    if (unread_from?.length) {
+      // 其他联系人有未读消息
+      const badge = document.getElementById('msgUnreadBadge')
+      if (badge) { badge.style.display = ''; badge.textContent = '●' }
+    }
+  } catch {} finally { _dmPollBusy = false }
 }
 
 // ── Skills Page ──────────────────────────────────────────────────────
@@ -340,10 +348,16 @@ async function loadSkillsPage() {
   listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#333;font-size:12px">加载中…</div>'
 
   // Load all agents + all skills in parallel
-  const [{ data: agents }, { data: skills }] = await Promise.all([
-    db.from('agents').select('id,name,active').order('id'),
-    db.from('agent_skills').select('id,agent,skill,created_at').order('created_at', { ascending: false })
-  ])
+  let agents, skills
+  try {
+    ;[{ agents }, { skills }] = await Promise.all([
+      apiCall('agent_crud', { method: 'list' }),
+      apiCall('agent_skill_crud', { method: 'list' }),
+    ])
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:20px;text-align:center;color:#d11a13;font-size:12px">加载失败：${esc(e.message)}</div>`
+    return
+  }
 
   // Group skills by agent
   skillsData = {}
@@ -424,8 +438,9 @@ function renderSkillCard(s) {
 async function deleteSkill(id, agentId) {
   const card = document.getElementById('skill-'+id)
   if (card) { card.style.opacity='0.4'; card.style.pointerEvents='none' }
-  const { error } = await db.from('agent_skills').delete().eq('id', id)
-  if (error) {
+  try {
+    await apiCall('agent_skill_crud', { method: 'delete', id })
+  } catch {
     toast('删除失败', 'error')
     if (card) { card.style.opacity=''; card.style.pointerEvents='' }
     return
@@ -443,8 +458,9 @@ async function deleteSkill(id, agentId) {
 
 async function clearAgentSkills(agentId) {
   if (!confirm(`确定清空 ${AGENT_META[agentId]?.label || agentId} 的全部技能？此操作不可撤销。`)) return
-  const { error } = await db.from('agent_skills').delete().eq('agent', agentId)
-  if (error) { toast('清空失败', 'error'); return }
+  try {
+    await apiCall('agent_skill_crud', { method: 'delete_agent', agent: agentId })
+  } catch { toast('清空失败', 'error'); return }
   skillsData[agentId] = []
   const meta = AGENT_META[agentId] || { icon: '🤖', label: agentId }
   renderSkillsPanel(agentId, meta)
@@ -505,38 +521,19 @@ async function loadDocs() {
   wrap.innerHTML = '<p style="color:var(--ink-5);font-size:13px">加载中…</p>'
   const sf = document.getElementById('docStatusFilter')?.value || ''
   try {
-    let q = db.from('documents').select('id,title,file_name,file_url,file_type,status,uploaded_by,notes,created_at')
-               .order('created_at', { ascending: false }).limit(100)
-    if (_session.tenant_id) q = q.eq('tenant_id', _session.tenant_id)
-    if (sf) q = q.eq('status', sf)
-    const { data: allDocs, error } = await q
-    if (error) throw error
-    // Member 只能看自己上传 + 自己是审批人的文件
-    let docs = allDocs || []
-    if (_session.role === 'member' && _session.email) {
-      const { data: myRevDocs } = await db.from('document_reviewers')
-        .select('document_id').eq('contact', _session.email)
-      const myRevIds = new Set((myRevDocs || []).map(r => r.document_id))
-      docs = docs.filter(d => d.uploaded_by === _session.email || myRevIds.has(d.id))
-    }
+    // Member 只能看自己上传 + 自己是审批人的文件（后端按 viewer_email 过滤）
+    const { documents } = await apiCall('document_crud', { method: 'list', status: sf, viewer_email: _session.email || undefined })
+    const docs = documents || []
     const badge = document.getElementById('docsCountBadge')
     if (badge) badge.textContent = docs?.length ? `共 ${docs.length} 条` : ''
     if (!docs || !docs.length) {
       wrap.innerHTML = '<div style="text-align:center;padding:48px 0;color:var(--ink-5);font-size:13px">暂无文件记录<br><span style="font-size:11px">点击「+ 上传文件」开始</span></div>'
       return
     }
-    // load reviewer counts per doc
-    const ids = docs.map(d => d.id)
-    const { data: revs } = await db.from('document_reviewers')
-      .select('document_id,decision').in('document_id', ids)
-    const revMap = {}
-    ;(revs || []).forEach(r => {
-      if (!revMap[r.document_id]) revMap[r.document_id] = []
-      revMap[r.document_id].push(r.decision)
-    })
+    // 每个文件的审批结果由后端一并返回（doc.decisions）
     wrap.innerHTML = `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden">`
       + docs.map((doc, i) => {
-        const revList = revMap[doc.id] || []
+        const revList = doc.decisions || []
         const total = revList.length
         const approved = revList.filter(d => d === 'approved').length
         const rejected = revList.filter(d => d === 'rejected').length
@@ -652,27 +649,21 @@ async function submitDocUpload() {
   btn.disabled = true; btn.textContent = '上传中…'
   try {
     let file_url = null, file_name = null, file_type = null, file_size = null
-    // 1. upload file to Storage (optional — can submit without file)
+    // 1. 上传附件（可选 — 可以不带附件提交）
     if (_uploadDocFile) {
-      const safeName = `${Date.now()}_${_uploadDocFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-      const { data: upData, error: upErr } = await db.storage.from('documents').upload(safeName, _uploadDocFile, { contentType: _uploadDocFile.type, upsert: false })
-      if (upErr) throw new Error('文件上传失败：' + upErr.message)
-      const { data: { publicUrl } } = db.storage.from('documents').getPublicUrl(upData.path)
-      file_url  = publicUrl
+      let up
+      try { up = await uploadFile('documents', _uploadDocFile) }
+      catch (err) { throw new Error('文件上传失败：' + err.message) }
+      file_url  = up.url
       file_name = _uploadDocFile.name
       file_type = _uploadDocFile.type
       file_size = _uploadDocFile.size
     }
-    // 2. insert document
-    const { data: doc, error: dErr } = await db.from('documents')
-      .insert({ title, notes: notes || null, file_url, file_name, file_type, file_size, status: 'pending',
-                tenant_id: _session.tenant_id || null, uploaded_by: _session.email || null })
-      .select('id').single()
-    if (dErr) throw new Error(dErr.message)
-    // 3. insert reviewers
-    const reviewerRows = _docReviewers.map(r => ({ document_id: doc.id, name: r.name, contact: r.contact || null }))
-    const { error: rErr } = await db.from('document_reviewers').insert(reviewerRows)
-    if (rErr) throw new Error(rErr.message)
+    // 2. 创建文件记录和审批人
+    const { id: docId } = await apiCall('document_crud', { method: 'create',
+      data: { title, notes: notes || null, file_url, file_name, file_type, file_size, uploaded_by: _session.email || null },
+      reviewers: _docReviewers })
+    const doc = { id: docId }
     toast('文件已提交审批！', 'success')
     closeUploadDocModal()
     pageLoaded['review'] = false
@@ -707,11 +698,7 @@ async function openDocDetail(id) {
   document.getElementById('ddMeta').innerHTML = ''
   document.getElementById('ddReviewers').innerHTML = '<p style="color:var(--ink-5);font-size:12px">加载中…</p>'
   try {
-    const [{ data: doc, error: dErr }, { data: revs, error: rErr }] = await Promise.all([
-      db.from('documents').select('*').eq('id', id).single(),
-      db.from('document_reviewers').select('*').eq('document_id', id).order('created_at')
-    ])
-    if (dErr) throw dErr
+    const { document: doc, reviewers: revs } = await apiCall('document_crud', { method: 'get', id })
     _currentDoc = doc  // store for notification calls
     // Delete button visibility: uploader or admin/master only
     const canDelete = _session.role === 'admin' || _session.role === 'master'
@@ -784,12 +771,10 @@ function closeDocDetail() {
 
 async function makeDocDecision(reviewerId, decision) {
   const comment = (document.getElementById('cmt_' + reviewerId)?.value || '').trim()
-  const { error } = await db.from('document_reviewers')
-    .update({ decision, comment: comment || null, decided_at: new Date().toISOString() })
-    .eq('id', reviewerId)
-  if (error) { toast('操作失败：' + error.message, 'error'); return }
-  // recalculate document status
-  await _recalcDocStatus(_currentDocId)
+  try {
+    // 后端记录决定并重新计算文件状态
+    await apiCall('document_crud', { method: 'decide', reviewer_id: reviewerId, decision, comment })
+  } catch(e) { toast('操作失败：' + e.message, 'error'); return }
   toast(decision === 'approved' ? '已批准' : '已拒绝', decision === 'approved' ? 'success' : 'error')
   openDocDetail(_currentDocId) // refresh detail
   loadDocs()                   // refresh list
@@ -807,35 +792,14 @@ async function makeDocDecision(reviewerId, decision) {
   }
 }
 
-async function _recalcDocStatus(docId) {
-  const { data: revs } = await db.from('document_reviewers')
-    .select('decision').eq('document_id', docId)
-  if (!revs || !revs.length) return
-  const total    = revs.length
-  const approved = revs.filter(r => r.decision === 'approved').length
-  const rejected = revs.filter(r => r.decision === 'rejected').length
-  let status = 'pending'
-  if (rejected > 0)                    status = 'rejected'
-  else if (approved === total)         status = 'approved'
-  else if (approved > 0)               status = 'partial'
-  await db.from('documents').update({ status }).eq('id', docId)
-}
-
 async function deleteDoc() {
   if (!_currentDocId) return
   if (!confirm('确定删除此文件及所有审批记录？此操作不可恢复。')) return
   const btn = document.getElementById('ddDeleteBtn')
   if (btn) btn.disabled = true
   try {
-    // get file path to delete from storage
-    const { data: doc } = await db.from('documents').select('file_url,file_name').eq('id', _currentDocId).single()
-    const { error } = await db.from('documents').delete().eq('id', _currentDocId)
-    if (error) throw error
-    // try delete from storage (best effort)
-    if (doc?.file_url) {
-      const path = doc.file_url.split('/documents/')[1]
-      if (path) await db.storage.from('documents').remove([path])
-    }
+    // 后端删除记录（审批人随之删除），并尽量删除附件
+    await apiCall('document_crud', { method: 'delete', id: _currentDocId })
     toast('文件已删除', 'success')
     closeDocDetail()
     loadDocs()
@@ -930,7 +894,7 @@ async function selectWorkflow(id) {
     const res = await apiCall('list_workflows')
     const wf = (res.workflows||[]).find(w=>w.id===id)
     if (!wf) return
-    const {data:agents} = await db.from('agents').select('id,name').order('id')
+    const {agents} = await apiCall('agent_crud', { method: 'list' })
     const editor = document.getElementById('wfEditor')
     editor.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
@@ -1067,7 +1031,7 @@ async function editWorkflow(id) {
 let _wfNodeCount = 0
 const WF_NODE_COLORS = { agent:'#3b82f6', condition:'#f59e0b', output:'#22c55e', self_learn:'#8b5cf6', skill_audit:'#14b8a6', prefs_compact:'#ec4899' }
 async function addWfNode(existing) {
-  const {data:agents} = await db.from('agents').select('id,name').order('id')
+  const agents = await apiCall('agent_crud', { method: 'list' }).then(r => r.agents).catch(() => [])
   const agOpts = (agents||[]).map(a=>`<option value="${esc(a.id)}"${existing?.config?.agent_id===a.id?' selected':''}>${esc(a.name)}</option>`).join('')
   const idx = _wfNodeCount++
   const type = existing?.type || 'agent'
@@ -1105,7 +1069,7 @@ async function wfNodeTypeChange(sel, nodeId) {
   if (type === 'agent') {
     cfg.innerHTML = `<select class="form-input" style="font-size:12px;padding:5px 8px;margin-bottom:6px"><option value="">加载中…</option></select><input class="form-input" style="font-size:12px" placeholder="Prompt（用 {{input}} 引用上一步输出）">`
     try {
-      const {data:agents} = await db.from('agents').select('id,name').order('id')
+      const {agents} = await apiCall('agent_crud', { method: 'list' })
       const agSel = cfg.querySelector('select')
       if (agSel) agSel.innerHTML = (agents||[]).map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')
     } catch(e) {}
@@ -1149,11 +1113,7 @@ async function loadWfRuns(wfId) {
   const el = document.getElementById('wfRunHistory')
   if (!el) return
   try {
-    const { data } = await db.from('workflow_runs')
-      .select('ran_at,response,error')
-      .eq('workflow_id', wfId)
-      .order('ran_at', { ascending: false })
-      .limit(10)
+    const { runs: data } = await apiCall('list_workflow_runs', { id: wfId })
     if (!data || !data.length) { el.innerHTML = '<span style="color:var(--ink-5)">暂无记录</span>'; return }
     el.innerHTML = data.map(r => {
       const ok = !r.error
@@ -1212,11 +1172,7 @@ async function loadAnalytics() {
   if (!body) return
   body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--ink-5);padding:40px">加载中…</td></tr>'
   try {
-    let q = db.from('analytics_daily').select('*').order('date', { ascending: false })
-    if (from) q = q.gte('date', from)
-    if (to)   q = q.lte('date', to)
-    const { data, error } = await q
-    if (error) throw error
+    const { rows: data } = await apiCall('analytics_crud', { method: 'list', from, to })
     const rows = data || []
     // Aggregate
     const agg = {}
@@ -1313,10 +1269,7 @@ async function loadKbPage() {
   if (!list) return
   list.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">加载中…</p>'
   try {
-    const q = db.from('knowledge_bases').select('*').order('created_at', { ascending:false })
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { data, error } = await q
-    if (error) throw error
+    const { kbs: data } = await apiCall('list_kbs')
     const kbs = data || []
     if (!kbs.length) {
       list.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">暂无知识库<br><small style=\'color:var(--ink-4)\'>点击右上角新建</small></p>'
@@ -1359,8 +1312,7 @@ async function confirmCreateKb() {
   const desc = document.getElementById('kbNewDesc')?.value.trim()
   if (!name) { toast('请输入知识库名称', 'error'); return }
   try {
-    const { error } = await db.from('knowledge_bases').insert({ name, description:desc||null, tenant_id:_session.tenant_id })
-    if (error) throw error
+    await apiCall('create_kb', { name, description: desc || null })
     document.getElementById('kbCreateModal')?.remove()
     toast('知识库已创建', 'success')
     loadKbPage()
@@ -1376,7 +1328,7 @@ async function selectKb(kb) {
   const detail = document.getElementById('kbDetail')
   if (!detail) return
   detail.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding:40px">加载中…</p>'
-  const { count } = await db.from('kb_chunks').select('*', { count:'exact', head:true }).eq('kb_id', kb.id)
+  const { count } = await apiCall('count_kb_chunks', { kb_id: kb.id }).catch(() => ({ count: 0 }))
   detail.innerHTML = `
     <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:20px">
       <div style="flex:1">
@@ -1504,13 +1456,8 @@ async function searchKb(kbId) {
 async function deleteKb(kbId) {
   if (!confirm('确定删除此知识库及全部 Chunks？此操作不可撤销。')) return
   try {
-    const chunksQ = db.from('kb_chunks').delete().eq('kb_id', kbId)
-    if (_session?.tenant_id) chunksQ.eq('tenant_id', _session.tenant_id)
-    await chunksQ
-    const kbQ = db.from('knowledge_bases').delete().eq('id', kbId)
-    if (_session?.tenant_id) kbQ.eq('tenant_id', _session.tenant_id)
-    const { error } = await kbQ
-    if (error) throw error
+    // 后端先删除全部 Chunks，再删除知识库
+    await apiCall('delete_kb', { kb_id: kbId })
     toast('知识库已删除', 'success')
     _kbSelected = null
     const detail = document.getElementById('kbDetail')
@@ -1522,9 +1469,7 @@ async function deleteKb(kbId) {
 // ── Alert badge ───────────────────────────────────────────────────────
 async function loadAlertBadge() {
   try {
-    const q = db.from('automation_logs').select('id', { count:'exact', head:true }).eq('read', false)
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { count } = await q
+    const { count } = await apiCall('automation_crud', { method: 'unread_count' })
     const el = document.getElementById('alertBadge')
     if (!el) return
     if (count > 0) { el.textContent = count > 9 ? '9+' : String(count); el.style.display = 'inline-block' }
@@ -1595,11 +1540,8 @@ async function loadAlertHistory() {
   const cnt = document.getElementById('alertHistCount')
   if (!el) return
   try {
-    const q = db.from('automation_logs').select('id,rule_id,triggered_at,action_taken,message,status,read')
-      .order('triggered_at', { ascending: false }).limit(50)
-    if (_session?.tenant_id) q.eq('tenant_id', _session.tenant_id)
-    const { data } = await q
-    const rows = data || []
+    const { logs } = await apiCall('automation_crud', { method: 'get_logs' })
+    const rows = logs || []
     if (cnt) cnt.textContent = `共 ${rows.length} 条`
     el.innerHTML = rows.length
       ? rows.map(r => `<div class="alert-row" style="grid-template-columns:100px 1fr 90px 32px;${!r.read ? 'background:#fffbeb' : ''}">

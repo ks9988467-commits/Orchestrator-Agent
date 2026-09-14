@@ -1,11 +1,19 @@
 ﻿import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+// Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
+// old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
+import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
+import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+// URL this function uses to invoke itself (task-step chaining). Defaults to the
+// deployed Supabase Edge Function; set ORCH_SELF_URL when running locally,
+// e.g. ORCH_SELF_URL=http://localhost:8000
+const SELF_URL = Deno.env.get('ORCH_SELF_URL') || `${SUPABASE_URL}/functions/v1/orchestrator`
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-file-name',
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
 }
 
@@ -141,9 +149,9 @@ async function executeTaskSteps(taskId: string, providers: ProviderRow[], defaul
   // Chain: trigger next step after 1s delay (prevents request storm)
   if (!stepError && !allDone) {
     setTimeout(() => {
-      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+      fetch(SELF_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: taskId })
       }).catch(() => {})
     }, 1000)
@@ -178,6 +186,9 @@ const CACHE_TTL = 60_000 // 60 s
 // ── Per-request tenant context (reset each request) ──────────────────
 let _reqTenantId: string | null = null
 let _reqIsMaster = false
+let _reqRole = 'member'
+let _reqEmail = ''
+let _reqAuthHash = ''              // SHA-256 of the caller's session token (for logout)
 // ── Per-request LLM context (for use inside executeTool) ─────────────
 let _reqProviders: ProviderRow[] = []
 let _reqAgents: AgentRow[] = []
@@ -193,51 +204,122 @@ function tenantFilters(extra: Record<string,string> = {}): Record<string,string>
   return extra
 }
 
-// ── DB patch helper ───────────────────────────────────────────────────
-async function dbPatch(table: string, id: string, data: object) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
-    method: 'PATCH',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(data),
-  })
+// ── Authentication helpers ───────────────────────────────────────────
+const INTERNAL_SECRET = Deno.env.get('ORCH_INTERNAL_SECRET') || ''
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-// ── DB helpers ──────────────────────────────────────────────────────
-async function dbGet(table: string, select = '*', filters: Record<string,string> = {}, order?: string, limit?: number) {
-  const params = new URLSearchParams({ select })
-  if (order) params.set('order', order)
-  if (limit) params.set('limit', String(limit))
-  for (const [k,v] of Object.entries(filters)) params.set(k, v)
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  })
-  if (!r.ok) return []
-  return r.json()
+function randomToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
-async function dbInsert(table: string, data: object) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(data),
-  })
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
 }
-async function dbUpsert(table: string, data: object, onConflict: string) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${onConflict}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
-    body: JSON.stringify(data),
-  })
+
+// Emails that log in as master (MASTER_EMAILS, comma-separated), lower-cased
+function masterEmailList(): string[] {
+  return (Deno.env.get('MASTER_EMAILS') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
 }
-async function dbInsertReturning(table: string, data: object): Promise<Record<string,unknown>> {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify(data),
-  })
-  if (!r.ok) return {}
-  const rows = await r.json()
-  return Array.isArray(rows) ? (rows[0] ?? {}) : rows
+
+type AuthContext =
+  | { kind: 'internal' }
+  | { kind: 'session'; email: string; tenantId: string | null; role: string; tokenHash: string }
+
+// Who is calling: a backend-internal caller (x-orch-internal header = ORCH_INTERNAL_SECRET —
+// self-invokes and schedulers) or a logged-in user (Authorization: Bearer <session token>).
+// null = not authenticated.
+async function authenticate(req: Request): Promise<AuthContext | null> {
+  const internal = req.headers.get('x-orch-internal') || ''
+  if (INTERNAL_SECRET && internal && constantTimeEqual(internal, INTERNAL_SECRET)) return { kind: 'internal' }
+  const m = (req.headers.get('authorization') || '').match(/^Bearer\s+(\S+)$/i)
+  if (!m) return null
+  const tokenHash = await sha256Hex(m[1])
+  const rows = await dbGet('sessions', 'email,tenant_id,role',
+    { token_hash: `eq.${tokenHash}`, revoked_at: 'is.null', expires_at: `gt.${new Date().toISOString()}` }, undefined, 1)
+  if (!rows.length) return null
+  return { kind: 'session', email: String(rows[0].email), tenantId: rows[0].tenant_id ?? null, role: String(rows[0].role), tokenHash }
 }
+
+// ── Role requirements ────────────────────────────────────────────────
+// Minimum role per action, or per action + method ('*' = any other method). Actions not
+// listed — including everything the dashboard never calls — need admin. Internal callers
+// count as master; chat messages (no action) are open to every logged-in user.
+const ROLE_RANK: Record<string, number> = { member: 1, admin: 2, master: 3 }
+const ACTION_ROLES: Record<string, string | Record<string, string>> = {
+  // everyday use
+  whoami: 'member', logout: 'member', home_summary: 'member', channel_metrics: 'member',
+  account_crud: 'member', lead_crud: 'member', ad_report_crud: 'member', data_entry_crud: 'member', analytics_crud: 'member',
+  staff_task_crud: 'member', direct_message_crud: 'member',
+  document_crud: 'member',                       // decide / delete / get also check the member's own rows
+  notify_doc_reviewers: 'member', notify_doc_decision: 'member',
+  list_kbs: 'member', count_kb_chunks: 'member', kb_ingest: 'member', kb_search: 'member',
+  list_workflows: 'member', list_workflow_runs: 'member', run_workflow: 'member',
+  list_agent_versions: 'member', learn: 'member', ugc_generate: 'member', ugc_get_rules: 'member',
+  // everyone reads, admins change
+  agent_crud: { list: 'member', '*': 'admin' },
+  agent_skill_crud: { list: 'member', '*': 'admin' },
+  agent_suggestion_crud: { list: 'member', mark_handled: 'member', '*': 'admin' },
+  staff_crud: { list: 'member', '*': 'admin' },
+  provider_config_crud: { list: 'member', '*': 'admin' },   // list returns no keys (sidebar status dots)
+  automation_crud: { list: 'member', get_logs: 'member', mark_read: 'member', unread_count: 'member', '*': 'admin' },
+  conversation_crud: { list: 'member', set_feedback: 'member', '*': 'admin' },
+  booking_crud: { list: 'member', create: 'member', '*': 'admin' },
+  // client (tenant) management
+  list_tenants: 'master', create_tenant: 'master', update_tenant: 'master', add_tenant_user: 'master', get_master_summary: 'master',
+}
+function requiredRole(action: string, method: string): string {
+  if (!action) return 'member'
+  const rule = ACTION_ROLES[action]
+  if (rule === undefined) return 'admin'
+  if (typeof rule === 'string') return rule
+  return rule[method] ?? rule['*'] ?? 'admin'
+}
+
+// Search text for an ilike filter, wrapped in `*` wildcards. `"` and `\` are
+// removed so the pattern can sit inside quotes in an or=(…) list.
+function likePattern(s: unknown): string {
+  return `*${String(s ?? '').replace(/["\\]/g, '').trim()}*`
+}
+
+// Rows imported from the dashboard: keep allowed columns, drop blank values
+// ('' would be rejected by date/numeric columns) and give every row the same
+// keys — a batch insert rejects rows whose keys differ.
+function normalizeImportRows(rows: unknown, cols: string[]): Record<string, unknown>[] {
+  if (!Array.isArray(rows)) return []
+  const picked = rows.map(r => {
+    const out: Record<string, unknown> = {}
+    for (const c of cols) {
+      const v = (r as Record<string, unknown> | null)?.[c]
+      if (v !== undefined && v !== null && String(v).trim() !== '') out[c] = v
+    }
+    return out
+  }).filter(r => Object.keys(r).length > 0)
+  const used = cols.filter(c => picked.some(r => c in r))
+  return picked.map(r => Object.fromEntries(used.map(c => [c, r[c] ?? null])))
+}
+
+async function insertInChunks(table: string, rows: Record<string, unknown>[]): Promise<{ inserted: number; error?: string }> {
+  let inserted = 0
+  for (let i = 0; i < rows.length; i += 100) {
+    const chunk = rows.slice(i, i + 100)
+    const r = await dbInsert(table, chunk)
+    if (!r.ok) return { inserted, error: r.error || 'insert failed' }
+    inserted += chunk.length
+  }
+  return { inserted }
+}
+
+// ── DB helpers moved to ./db.ts (dbGet/dbPatch/dbInsert/dbUpsert/dbInsertReturning)
+//    Imported at top. Same signatures; backend switched by env DB_DRIVER.
 
 // ── Lark helpers ────────────────────────────────────────────────────
 async function getLarkConfig(): Promise<{webhook_url?:string;app_id?:string;app_secret?:string}|null> {
@@ -755,11 +837,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
         }
         const qEmbed = embedCache[fam]
         if (!qEmbed) continue
-        const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query_embedding: qEmbed, match_kb_id: kb.id, match_count: limit }),
-        }).then(res => res.ok ? res.json() : []).catch(() => [])
+        const rows = await dbRpc('kb_match', { query_embedding: qEmbed, match_kb_id: kb.id, match_count: limit })
         for (const row of rows as Record<string,unknown>[]) {
           allResults.push({ ...row, kb_name: kb.name })
         }
@@ -809,11 +887,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       const ruleId = String(args.rule_id || '')
       if (!ruleId) return JSON.stringify({ error: 'rule_id required' })
       const tid = _reqTenantId || 'default'
-      await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${ruleId}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ enabled: Boolean(args.enabled), updated_at: new Date().toISOString() }),
-      })
+      await dbPatchWhere('automation_rules', { id: `eq.${ruleId}`, tenant_id: `eq.${tid}` },
+        { enabled: Boolean(args.enabled), updated_at: new Date().toISOString() })
       return JSON.stringify({ ok: true, message: `规则已${args.enabled ? '启用' : '停用'}` })
     }
 
@@ -1796,7 +1871,7 @@ async function extractFileData(
   } else {
     // Excel / CSV: fetch raw text
     try {
-      const r = await fetch(fileUrl)
+      const r = await fetch(await signedUrl(fileUrl, 300) || fileUrl)   // our own files need a signed link
       const raw = await r.text()
       content.push({ type: 'text', text: `文件内容（${fileName}）：\n${raw.slice(0, 8000)}` })
     } catch { content.push({ type: 'text', text: `文件：${fileName}（无法读取内容）` }) }
@@ -1918,11 +1993,7 @@ ${existingList || '(none yet)'}`,
 
   await Promise.all([
     ...rules.map(rule => dbInsert('agent_skills', { agent: 'chat', skill: rule })),
-    fetch(`${SUPABASE_URL}/rest/v1/agent_suggestions?id=in.(${ids.join(',')})`, {
-      method: 'PATCH',
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ handled: true }),
-    }),
+    dbPatchWhere('agent_suggestions', { id: `in.(${ids.join(',')})` }, { handled: true }),
   ])
 
   return { ok: true, skills_added: rules.length, processed: rows.length }
@@ -1930,12 +2001,7 @@ ${existingList || '(none yet)'}`,
 
 async function runWorkflows() {
   // Find all active workflows due to run
-  const dueResp = await fetch(
-    `${SUPABASE_URL}/rest/v1/workflows?active=eq.true&next_run=lte.${new Date().toISOString()}&select=*`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  )
-  if (!dueResp.ok) return
-  const due = await dueResp.json() as Record<string, unknown>[]
+  const due = await dbGet('workflows', '*', { active: 'eq.true', next_run: `lte.${new Date().toISOString()}` }) as Record<string, unknown>[]
   if (!due.length) return
 
   const [providers, defaultProvider, agents] = await Promise.all([
@@ -1994,10 +2060,7 @@ Return ONLY a JSON array of 1-indexed rule numbers to DELETE: [1,3] or [] if non
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= skillRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n => skillRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`, {
-                  method: 'DELETE',
-                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
-                })
+                await dbDelete('agent_skills', { id: `in.(${ids.join(',')})` })
               }
               const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
               context[node.id] = msg; context.last_output = msg
@@ -2017,10 +2080,7 @@ Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if no
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n => n >= 1 && n <= prefRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n => prefRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`, {
-                  method: 'DELETE',
-                  headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' }
-                })
+                await dbDelete('user_prefs', { id: `in.(${ids.join(',')})` })
               }
               const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
               context[node.id] = msg; context.last_output = msg
@@ -2061,11 +2121,7 @@ Return ONLY a JSON array of 1-indexed entry numbers to DELETE: [2,5] or [] if no
 
     // Update workflow: last_run, next_run, run_count
     const nextRun = calcNextRun(schedule)
-    await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${wfId}`, {
-      method: 'PATCH',
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ last_run: new Date().toISOString(), next_run: nextRun.toISOString(), run_count: Number(wf.run_count || 0) + 1 })
-    })
+    await dbPatch('workflows', String(wfId), { last_run: new Date().toISOString(), next_run: nextRun.toISOString(), run_count: Number(wf.run_count || 0) + 1 })
   }
 }
 
@@ -2099,6 +2155,53 @@ async function extractPrefs(message: string, response: string, providers: Provid
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
+  // ── File storage ──────────────────────────────────────────────────
+  // POST <base>/files/<bucket>         upload; raw file body, original name in x-file-name
+  // GET  <base>/files/<bucket>/<name>  download (local driver; Supabase serves its own URLs)
+  const fileRoute = new URL(req.url).pathname.match(/\/files\/([a-z0-9-]+)(?:\/([^/]+))?\/?$/)
+  if (fileRoute) {
+    const [, bucket, rawName] = fileRoute
+    const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    const decode = (s: string) => { try { return decodeURIComponent(s) } catch { return '' } }
+    if (!BUCKETS.includes(bucket)) return json({ error: 'unknown bucket' }, 404)
+    if (req.method === 'POST' && !rawName) {
+      if (!await authenticate(req)) return json({ error: 'unauthorized' }, 401)
+      const original = decode(req.headers.get('x-file-name') || '')
+      if (!original) return json({ error: 'x-file-name header required' }, 400)
+      if (Number(req.headers.get('content-length') || 0) > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
+      const data = new Uint8Array(await req.arrayBuffer())
+      if (!data.length) return json({ error: 'empty file' }, 400)
+      if (data.length > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
+      const name = objectName(original)
+      const type = req.headers.get('content-type') || 'application/octet-stream'
+      try {
+        await putFile(bucket, name, data, type)
+      } catch (e) {
+        console.error('putFile', bucket, name, e)
+        return json({ error: (e as Error).message }, 500)
+      }
+      return json({ ok: true, url: publicUrl(bucket, name), name, size: data.length, type })
+    }
+    if (req.method === 'GET' && rawName && USE_LOCAL_STORAGE) {
+      const name = decode(rawName)
+      if (!isValidName(name)) return json({ error: 'not found' }, 404)
+      // Only signed, unexpired links (the backend signs file_url when it returns one)
+      const q = new URL(req.url).searchParams
+      if (!await verifySignedDownload(bucket, name, q.get('exp'), q.get('sig'))) return json({ error: '链接无效或已过期' }, 403)
+      const data = await readFile(bucket, name)
+      if (!data) return json({ error: 'not found' }, 404)
+      const type = contentTypeFor(name)
+      const headers: Record<string, string> = {
+        ...CORS, 'Content-Type': type, 'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': `${INLINE_TYPES.has(type) ? 'inline' : 'attachment'}; filename="${name}"`,
+      }
+      // No scripts for anything served from here (Chrome refuses to render a PDF under a sandbox CSP)
+      if (type !== 'application/pdf') headers['Content-Security-Policy'] = 'sandbox'
+      return new Response(data, { headers })
+    }
+    return json({ error: 'method not allowed' }, 405)
+  }
+
   // ── WhatsApp webhook verification (GET) ───────────────────────────
   if (req.method === 'GET') {
     const url   = new URL(req.url)
@@ -2118,9 +2221,12 @@ Deno.serve(async (req: Request) => {
   try {
     const body = await req.json()
 
-    // Set per-request tenant context
-    _reqTenantId = (body.tenant_id as string) || null
-    _reqIsMaster = (body.role as string) === 'master'
+    // Per-request context. Identity is set by the authentication step below — never read from the body.
+    _reqTenantId = null
+    _reqIsMaster = false
+    _reqRole     = 'member'
+    _reqEmail    = ''
+    _reqAuthHash = ''
     _reqDelegated         = false
     _reqSessionId         = ''
     _reqDelegatedId       = ''
@@ -2156,6 +2262,46 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // ── Authentication ───────────────────────────────────────────────
+    // Public: the OTP login actions (and the WhatsApp webhook above). Everything else needs a
+    // session token, or the internal secret for self-invokes and schedulers.
+    if (body.action !== 'send_otp' && body.action !== 'verify_otp') {
+      const auth = await authenticate(req)
+      if (!auth) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (auth.kind === 'internal') {
+        // Internal callers act across tenants unless they name one
+        _reqIsMaster = true
+        _reqRole     = 'master'
+        _reqTenantId = body.tenant_id ? String(body.tenant_id) : null
+      } else {
+        _reqTenantId = auth.tenantId
+        _reqRole     = auth.role
+        _reqIsMaster = auth.role === 'master'
+        _reqEmail    = auth.email
+        _reqAuthHash = auth.tokenHash
+        // Code that reads the session fields from the body sees the verified values. A
+        // non-master is pinned to its own tenant; a master may name the tenant it acts on
+        // (update_tenant / add_tenant_user use tenant_id for the target tenant).
+        if (auth.role !== 'master') body.tenant_id = auth.tenantId ?? undefined
+        body.role = auth.role
+      }
+      // Minimum role for this action (ACTION_ROLES)
+      const need = requiredRole(body.action ? String(body.action) : '', String(body.method || 'list'))
+      if ((ROLE_RANK[_reqRole] ?? 0) < ROLE_RANK[need]) {
+        return new Response(JSON.stringify({ error: '没有权限执行此操作' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Session: who am I / logout ───────────────────────────────────
+    if (body.action === 'whoami') {
+      const tRows = _reqTenantId ? await dbGet('tenants', 'name', { id: `eq.${_reqTenantId}` }, undefined, 1) : []
+      return new Response(JSON.stringify({ ok: true, email: _reqEmail, role: _reqRole, tenant_id: _reqTenantId, tenant_name: tRows[0]?.name ?? '' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    if (body.action === 'logout') {
+      if (_reqAuthHash) await dbPatchWhere('sessions', { token_hash: `eq.${_reqAuthHash}` }, { revoked_at: new Date().toISOString() })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // \u2500\u2500 List models action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_models') {
       const { provider } = body
@@ -2176,15 +2322,26 @@ Deno.serve(async (req: Request) => {
 
     // \u2500\u2500 OTP: send \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'send_otp') {
-      const { email } = body
-      if (!email) return new Response(JSON.stringify({ error: 'email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const code = String(Math.floor(100000 + Math.random() * 900000))
-      // Store OTP (service key bypasses RLS)
-      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests`, {
-        method: 'POST',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ email, code })
-      })
+      const email = String(body.email || '').trim().toLowerCase()
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return new Response(JSON.stringify({ error: 'valid email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Only emails that can log in get a code. The response is the same either way, so
+      // this cannot be used to find out which emails are registered.
+      const canLogIn = masterEmailList().includes(email) || (await dbGet('tenant_users', 'id', { email: `eq.${email}` }, undefined, 1)).length > 0
+      if (!canLogIn) return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Rate limit per email: one code a minute, five an hour
+      const hourAgo = new Date(Date.now() - 3600_000).toISOString()
+      const recent = await dbGet('otp_requests', 'created_at', { email: `eq.${email}`, created_at: `gte.${hourAgo}` }, 'created_at.desc', 5) as { created_at: string }[]
+      if (recent.length >= 5 || (recent[0] && Date.now() - Date.parse(recent[0].created_at) < 60_000)) {
+        return new Response(JSON.stringify({ error: '请求太频繁，请稍后再试' }), { status: 429, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0')
+      // Only a hash of the code is stored
+      await dbInsert('otp_requests', { email, code: await sha256Hex(`${email}:${code}`) })
+      if (Deno.env.get('OTP_DEV_ECHO') === 'true') {
+        // Local development only: print the code instead of emailing it
+        console.log(`[OTP_DEV_ECHO] ${email}: ${code}`)
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
       // Send email via Gmail SMTP using fetch to SMTP2Go-like approach \u2014 use denomailer
       try {
         const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
@@ -2205,36 +2362,51 @@ Deno.serve(async (req: Request) => {
 
     // \u2500\u2500 OTP: verify \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'verify_otp') {
-      const { email, code } = body
+      const email = String(body.email || '').trim().toLowerCase()
+      const code = String(body.code || '').trim()
       if (!email || !code) return new Response(JSON.stringify({ error: 'email and code required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?email=eq.${encodeURIComponent(email)}&code=eq.${encodeURIComponent(code)}&used=eq.false&expires_at=gte.${new Date().toISOString()}&order=id.desc&limit=1`, {
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      }).then(r => r.json())
-      if (!rows?.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      // Mark used
-      await fetch(`${SUPABASE_URL}/rest/v1/otp_requests?id=eq.${rows[0].id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ used: true })
-      })
-      // Resolve tenant + role from tenant_users
+      // Only the newest unused, unexpired code for this email counts
+      const rows = await dbGet('otp_requests', 'id,code,attempts', {
+        email: `eq.${email}`, used: 'eq.false', expires_at: `gte.${new Date().toISOString()}`,
+      }, 'id.desc', 1) as { id: number; code: string; attempts: number }[]
+      if (!rows.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const otp = rows[0]
+      if (!constantTimeEqual(otp.code, await sha256Hex(`${email}:${code}`))) {
+        // Five wrong guesses use the code up
+        const attempts = (otp.attempts || 0) + 1
+        await dbPatch('otp_requests', String(otp.id), attempts >= 5 ? { attempts, used: true } : { attempts })
+        return new Response(JSON.stringify({ ok: false, error: attempts >= 5 ? '\u9519\u8BEF\u6B21\u6570\u8FC7\u591A\uFF0C\u8BF7\u91CD\u65B0\u83B7\u53D6\u9A8C\u8BC1\u7801' : '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      await dbPatch('otp_requests', String(otp.id), { used: true })
+      // Master = an email listed in MASTER_EMAILS (comma-separated). Everyone else needs a
+      // tenant_users row — an unknown email is refused, never treated as master.
+      const isMasterEmail = masterEmailList().includes(email)
       const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${email}` })
       let tenantId: string|null = tuRows[0]?.tenant_id ?? null
-      let role: string = tuRows[0]?.role ?? 'member'
+      let role: string = tuRows[0]?.role === 'admin' ? 'admin' : 'member'
       let tenantName = ''
-      if (tenantId) {
+      if (isMasterEmail) {
+        role = 'master'
+        const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
+        if (masterRows.length) { tenantId = masterRows[0].id; tenantName = masterRows[0].name }
+      } else if (!tuRows.length) {
+        return new Response(JSON.stringify({ ok: false, error: '该邮箱没有访问权限，请联系管理员' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } else if (tenantId) {
         const tRows = await dbGet('tenants', 'name', { id: `eq.${tenantId}` })
         tenantName = tRows[0]?.name ?? ''
-      } else {
-        // Fallback: treat as master if no tenant_users record
-        const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
-        if (masterRows.length) { tenantId = masterRows[0].id; role = 'master'; tenantName = masterRows[0].name }
       }
-      return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Issue a session: the token goes to the browser once, only its hash is kept
+      const token = randomToken()
+      const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString()
+      const sIns = await dbInsert('sessions', { token_hash: await sha256Hex(token), email, tenant_id: tenantId, role, expires_at: expiresAt })
+      if (!sIns.ok) return new Response(JSON.stringify({ ok: false, error: '登录失败，请重试' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ ok: true, token, expires_at: expiresAt, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_tenants') {
+      // Master check (_reqIsMaster comes from the authenticated session)
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.asc')
       const result = await Promise.all((tenants as Record<string,unknown>[]).map(async t => {
         const tid = String(t.id)
@@ -2248,46 +2420,8 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ ok: true, tenants: result }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
-    if (body.action === 'create_tenant') {
-      const { name, slug, contact_name, contact_email, user_email } = body
-      if (!name || !slug || !user_email) return new Response(JSON.stringify({ error: 'name, slug, user_email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenant = await dbInsertReturning('tenants', { name, slug, contact_name: contact_name||'', contact_email: contact_email||'' })
-      if (!tenant.id) return new Response(JSON.stringify({ error: 'Failed to create tenant (slug may already exist)' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbInsert('tenant_users', { email: user_email, tenant_id: tenant.id, role: 'admin' })
-      // Copy default agents from master
-      const masterRows = await dbGet('tenants', 'id', { slug: 'eq.master' })
-      const masterId = masterRows[0]?.id
-      if (masterId) {
-        const masterAgents = await dbGet('agents', 'name,system_prompt,provider,model,active', { tenant_id: `eq.${masterId}` })
-        for (const a of masterAgents as Record<string,unknown>[]) {
-          const { id: _id, ...agentData } = a as Record<string,unknown>
-          void _id
-          await dbInsert('agents', { ...agentData, tenant_id: tenant.id })
-        }
-      }
-      return new Response(JSON.stringify({ ok: true, tenant }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'update_tenant') {
-      const { id, ...fields } = body
-      if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      delete fields.action
-      await fetch(`${SUPABASE_URL}/rest/v1/tenants?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify(fields)
-      })
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'add_tenant_user') {
-      const { tenant_id: tid, email: uemail, role: urole } = body
-      if (!tid || !uemail) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbUpsert('tenant_users', { email: uemail, tenant_id: tid, role: urole || 'member' }, 'email,tenant_id')
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
     if (body.action === 'get_master_summary') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,active')
       const now = new Date()
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10)
@@ -2341,36 +2475,28 @@ Deno.serve(async (req: Request) => {
           const resultsVal = results ? parseInt(results.value) : 0
           const contactsVal = newContacts ? parseInt(newContacts.value) : 0
 
-          await fetch(`${SUPABASE_URL}/rest/v1/ad_reports?on_conflict=campaign_name,day`, {
-            method: 'POST',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
-            body: JSON.stringify({
-              campaign_name: String(row.campaign_name || ''),
-              day: String(row.date_start || ''),
-              starts: String(row.date_start || ''),
-              ends: String(row.date_stop || ''),
-              amount_spent_myr: spendMYR,
-              impressions: parseInt(String(row.impressions || 0)),
-              reach: parseInt(String(row.reach || 0)),
-              frequency: parseFloat(String(row.frequency || 0)),
-              cpm: parseFloat(String(row.cpm || 0)),
-              ctr_all: parseFloat(String(row.ctr || 0)),
-              link_clicks: parseInt(String(row.clicks || 0)),
-              results: resultsVal,
-              cost_per_result: cpr ? parseFloat(cpr.value) : null,
-              new_messaging_contacts: contactsVal,
-              tenant_id: _reqTenantId,
-            })
-          })
+          await dbUpsert('ad_reports', {
+            campaign_name: String(row.campaign_name || ''),
+            day: String(row.date_start || ''),
+            starts: String(row.date_start || ''),
+            ends: String(row.date_stop || ''),
+            amount_spent_myr: spendMYR,
+            impressions: parseInt(String(row.impressions || 0)),
+            reach: parseInt(String(row.reach || 0)),
+            frequency: parseFloat(String(row.frequency || 0)),
+            cpm: parseFloat(String(row.cpm || 0)),
+            ctr_all: parseFloat(String(row.ctr || 0)),
+            link_clicks: parseInt(String(row.clicks || 0)),
+            results: resultsVal,
+            cost_per_result: cpr ? parseFloat(cpr.value) : null,
+            new_messaging_contacts: contactsVal,
+            tenant_id: _reqTenantId,
+          }, 'campaign_name,day')
           upserted++
         }
 
         // Refresh analytics after sync
-        await fetch(`${SUPABASE_URL}/rest/v1/rpc/refresh_analytics_daily`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ days_back: 31 })
-        })
+        await dbRpc('refresh_analytics_daily', { days_back: 31 })
 
         return new Response(JSON.stringify({ ok: true, synced: upserted, period: `${dateStart} to ${dateStop}` }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       } catch(e) {
@@ -2394,10 +2520,7 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'delete_alert_rule') {
       const { rule_id } = body
       if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
-      await fetch(`${SUPABASE_URL}/rest/v1/alert_rules?id=eq.${rule_id}${tenantQ}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('alert_rules', tenantFilters({ id: `eq.${rule_id}` }))
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2460,25 +2583,15 @@ Deno.serve(async (req: Request) => {
       // Recalculate next_run if schedule changed
       if (fields.schedule) fields.next_run = calcNextRun(String(fields.schedule)).toISOString()
       delete fields.action
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify(fields)
-      })
+      await dbPatch('workflows', String(id), fields)
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     if (body.action === 'delete_workflow') {
       const { id } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await fetch(`${SUPABASE_URL}/rest/v1/workflow_runs?workflow_id=eq.${id}`, {
-        method: 'DELETE',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'DELETE',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('workflow_runs', { workflow_id: `eq.${id}` })
+      await dbDelete('workflows', { id: `eq.${id}` })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2509,9 +2622,9 @@ Return ONLY a valid JSON array, no markdown:
       } catch { plan = [{ id:'step_1', desc:goal, tool:'call_agent', params:{ agent_id:'chat', prompt:goal }, status:'pending', result:null }] }
       const task = await dbInsertReturning('agent_tasks', { goal, plan, status:'pending', session_id:session_id||null, tenant_id:_reqTenantId }) as AgentTask
       // Kick off step execution immediately (fire-and-forget self-invoke)
-      fetch(`${SUPABASE_URL}/functions/v1/orchestrator`, {
+      fetch(SELF_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: String(task.id) })
       }).catch(() => {})
       return new Response(JSON.stringify({ ok:true, task }), { headers:{...CORS,'Content-Type':'application/json'} })
@@ -2552,11 +2665,7 @@ Return ONLY a valid JSON array, no markdown:
       const { id } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       // Force next_run to now so runWorkflows picks it up
-      await fetch(`${SUPABASE_URL}/rest/v1/workflows?id=eq.${id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ next_run: new Date().toISOString() })
-      })
+      await dbPatch('workflows', String(id), { next_run: new Date().toISOString() })
       await runWorkflows()
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -2607,9 +2716,7 @@ Return ONLY a valid JSON array, no markdown:
       const { platform } = body
       if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tid = _reqTenantId || 'default'
-      await fetch(`${SUPABASE_URL}/rest/v1/ugc_platform_rules?tenant_id=eq.${encodeURIComponent(tid)}&platform=eq.${encodeURIComponent(platform)}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      })
+      await dbDelete('ugc_platform_rules', { tenant_id: `eq.${tid}`, platform: `eq.${platform}` })
       const def = UGC_DEFAULT_RULES[platform] || {}
       return new Response(JSON.stringify({ ok: true, rule: def }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -2687,11 +2794,7 @@ Return ONLY a valid JSON array, no markdown:
         try {
           const { trigger, data } = await checkRuleTrigger(rule)
           // Always update last_run_at
-          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
-            method: 'PATCH',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-            body: JSON.stringify({ last_run_at: now }),
-          })
+          await dbPatch('automation_rules', String(rule.id), { last_run_at: now })
           if (!trigger) continue
 
           const msg = buildActionMessage(rule, data)
@@ -2714,11 +2817,7 @@ Return ONLY a valid JSON array, no markdown:
             read:         false,
           })
           // Update last_triggered_at
-          await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule.id}`, {
-            method: 'PATCH',
-            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-            body: JSON.stringify({ last_triggered_at: now }),
-          })
+          await dbPatch('automation_rules', String(rule.id), { last_triggered_at: now })
           triggered.push(String(rule.name || rule.id))
         } catch(e) {
           errors.push(`${rule.name}: ${(e as Error).message}`)
@@ -2849,10 +2948,604 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (m === 'delete') {
         const bid = String(body.booking_id || '')
-        const tFilter = tid ? `&tenant_id=eq.${encodeURIComponent(tid)}` : ''
-        if (bid) await fetch(`${SUPABASE_URL}/rest/v1/bookings?id=eq.${bid}${tFilter}`, {
-          method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
+        if (bid) await dbDelete('bookings', tid ? { id: `eq.${bid}`, tenant_id: `eq.${tid}` } : { id: `eq.${bid}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Conversation log (对话日志) ─────────────────────────────────────
+    // Replaces the dashboard's direct supabase-js queries on `conversations`.
+    // The role filter is `log_role`, not `role`: every request body already
+    // carries `role` (the session role that sets _reqIsMaster).
+    if (body.action === 'conversation_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const filt: Record<string,string> = {}
+        if (body.agent)    filt['agent'] = `eq.${String(body.agent)}`
+        if (body.log_role) filt['role']  = `eq.${String(body.log_role)}`
+        if (body.feedback === 'good' || body.feedback === 'bad') filt['feedback'] = `eq.${body.feedback}`
+        else if (body.feedback === 'none') filt['feedback'] = 'is.null'
+        const limit  = Math.min(Math.max(Number(body.limit) || 200, 1), 500)
+        const offset = Math.max(Number(body.offset) || 0, 0)
+        const { rows, count } = await dbGetPage('conversations',
+          'id,role,agent,content,created_at,cost_usd,tokens_in,tokens_out,feedback',
+          tenantFilters(filt), 'created_at.desc', limit, offset)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_feedback') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const feedback = body.feedback === 'good' || body.feedback === 'bad' ? body.feedback : null
+        await dbPatchWhere('conversations', tenantFilters({ id: `eq.${id}` }), { feedback })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete_all') {
+        // `id > 0` matches every row — dbDelete deliberately refuses an empty filter
+        const filt: Record<string,string> = { id: 'gt.0' }
+        if (body.agent) filt['agent'] = `eq.${String(body.agent)}`
+        await dbDelete('conversations', tenantFilters(filt))
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── LLM provider config (LLM 配置) ──────────────────────────────────
+    // API keys never leave the server: `list` returns has_key + the last 4 chars.
+    if (body.action === 'provider_config_crud') {
+      const m = String(body.method || 'list')
+      const PROVIDERS = ['anthropic', 'openai', 'google', 'openrouter']
+
+      if (m === 'list') {
+        const rows = await dbGet('provider_config', 'provider,api_key,model,active') as ProviderRow[]
+        const providers = rows.map(r => {
+          const key = (r.api_key || '').trim()
+          return { provider: r.provider, model: r.model || null, active: !!r.active, has_key: !!key, key_hint: key ? key.slice(-4) : '' }
         })
+        const pref = await dbGet('user_prefs', 'value', { key: 'eq.default_provider' }, undefined, 1)
+        return new Response(JSON.stringify({ ok: true, providers, default_provider: pref[0]?.value ?? null }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const provider = String(body.provider || '')
+        if (!PROVIDERS.includes(provider)) return new Response(JSON.stringify({ error: 'unknown provider' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { provider }
+        if (body.model !== undefined)  fields.model  = body.model ? String(body.model).trim() : null
+        if (body.active !== undefined) fields.active = !!body.active
+        // a blank api_key means "keep the stored key"
+        if (typeof body.api_key === 'string' && body.api_key.trim()) fields.api_key = body.api_key.trim()
+        await dbUpsert('provider_config', fields, 'provider')
+        _cacheProviders = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_default') {
+        const provider = String(body.provider || '')
+        if (!PROVIDERS.includes(provider)) return new Response(JSON.stringify({ error: 'unknown provider' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbUpsert('user_prefs', { key: 'default_provider', value: provider, confidence: 1.0 }, 'key')
+        _cacheDefProv = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agents (Agent 管理) ─────────────────────────────────────────────
+    // The update payload goes in `data`, keeping it clear of reserved body keys.
+    if (body.action === 'agent_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const agents = await dbGet('agents', 'id,name,active,provider,model,description,system_prompt,uses_tools', {}, 'id.asc')
+        return new Response(JSON.stringify({ ok: true, agents }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'update') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const d = (body.data || {}) as Record<string, unknown>
+        const patch: Record<string, unknown> = {}
+        for (const k of ['name', 'description', 'system_prompt']) if (d[k] !== undefined) patch[k] = d[k]
+        for (const k of ['provider', 'model']) if (d[k] !== undefined) patch[k] = d[k] || null
+        for (const k of ['active', 'uses_tools']) if (d[k] !== undefined) patch[k] = !!d[k]
+        if (!Object.keys(patch).length) return new Response(JSON.stringify({ error: 'nothing to update' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        patch.updated_at = new Date().toISOString()
+        await dbPatch('agents', id, patch)
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'create') {
+        // Insert only: an id that already exists is an error, never an overwrite
+        // (the create-from-gap flow takes its id from an LLM suggestion).
+        const d = (body.data || {}) as Record<string, unknown>
+        const id = String(d.id || '').trim()
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const row: Record<string, unknown> = { id, active: d.active === undefined ? true : !!d.active }
+        for (const k of ['name', 'description', 'system_prompt']) if (d[k] !== undefined) row[k] = d[k]
+        for (const k of ['provider', 'model']) if (d[k] !== undefined) row[k] = d[k] || null
+        if (d.uses_tools !== undefined) row.uses_tools = !!d.uses_tools
+        const existing = await dbGet('agents', 'id', { id: `eq.${id}` }, undefined, 1)
+        if (existing.length) return new Response(JSON.stringify({ error: `Agent ID "${id}" 已存在` }), { status: 409, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const ins = await dbInsert('agents', row)
+        if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true, id }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agents', { id: `eq.${id}` })
+        _cacheAgents = null
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agent skills (技能库) ────────────────────────────────────────────
+    if (body.action === 'agent_skill_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const skills = await dbGet('agent_skills', 'id,agent,skill,created_at', {}, 'created_at.desc')
+        return new Response(JSON.stringify({ ok: true, skills }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agent_skills', { id: `eq.${id}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete_agent') {
+        const agent = String(body.agent || '')
+        if (!agent) return new Response(JSON.stringify({ error: 'agent required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbDelete('agent_skills', { agent: `eq.${agent}` })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Agent suggestions / knowledge gaps (缺口问题) ─────────────────────
+    if (body.action === 'agent_suggestion_crud') {
+      const m = String(body.method || 'list')
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 500)
+        const suggestions = await dbGet('agent_suggestions', 'id,message,session_id,asked_at,handled,tenant_id', tenantFilters(), 'asked_at.desc', limit)
+        return new Response(JSON.stringify({ ok: true, suggestions }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'mark_handled' || m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (m === 'mark_handled') await dbPatchWhere('agent_suggestions', tenantFilters({ id: `eq.${id}` }), { handled: true })
+        else await dbDelete('agent_suggestions', tenantFilters({ id: `eq.${id}` }))
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Home overview (首页) ─────────────────────────────────────────────
+    // The client sends its own local month start (YYYY-MM-DD) and local midnight
+    // (ISO), so "this month" / "today" follow the viewer's timezone.
+    if (body.action === 'home_summary') {
+      const monthStart = String(body.month_start || '')
+      const todayStart = new Date(String(body.today_start || ''))
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(monthStart) || isNaN(todayStart.getTime())) {
+        return new Response(JSON.stringify({ error: 'month_start (YYYY-MM-DD) and today_start (ISO) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      const [analytics, leads, alerts, recent_convs, active_agents, gaps, skills, today] = await Promise.all([
+        dbGet('analytics_daily', 'spend_myr,results,new_contacts,campaign_name', tenantFilters({ date: `gte.${monthStart}` })),
+        dbGetPage('leads', 'id', tenantFilters({ date: `gte.${monthStart}` }), undefined, 0),
+        dbGet('alerts', 'id,rule_name,campaign_name,metric,value,triggered_at', tenantFilters(), 'triggered_at.desc', 10),
+        dbGet('conversations', 'id,role,content,agent,created_at', tenantFilters({ role: 'eq.user' }), 'created_at.desc', 6),
+        dbGet('agents', 'id,name', { active: 'eq.true' }, 'id.asc'),
+        dbGetPage('agent_suggestions', 'id', tenantFilters({ handled: 'eq.false' }), undefined, 0),
+        dbGetPage('agent_skills', 'id', {}, undefined, 0),
+        dbGetPage('conversations', 'id', tenantFilters({ role: 'eq.user', created_at: `gte.${todayStart.toISOString()}` }), undefined, 0),
+      ])
+      return new Response(JSON.stringify({
+        ok: true, analytics, alerts, recent_convs, active_agents,
+        lead_count: leads.count, gap_count: gaps.count, skill_count: skills.count, today_conv_count: today.count,
+      }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Data page (数据): accounts / leads / ad reports / data entries / analytics ──
+    if (body.action === 'account_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const accounts = await dbGet('accounts', 'id,name', tenantFilters({ active: 'eq.true' }), 'name.asc')
+        return new Response(JSON.stringify({ ok: true, accounts }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'lead_crud') {
+      const m = String(body.method || 'list')
+      const filt: Record<string, string> = {}
+      if (body.search)     filt['or']         = `(name.ilike."${likePattern(body.search)}",phone.ilike."${likePattern(body.search)}")`
+      if (body.from)       filt['date']       = `gte.${String(body.from)}`
+      if (body.to)         filt['date2']      = `lte.${String(body.to)}`
+      if (body.label)      filt['labels']     = `ilike.${likePattern(body.label)}`
+      if (body.account_id) filt['account_id'] = `eq.${String(body.account_id)}`
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 200)
+        const page  = Math.max(Number(body.page) || 1, 1)
+        const { rows, count } = await dbGetPage('leads', '*', tenantFilters(filt), 'date.desc', limit, (page - 1) * limit)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'export') {
+        const rows = await dbGet('leads', 'date,name,phone,email,labels,campaign_source,created_at', tenantFilters(filt), 'date.desc', 10000)
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      // phone → id of an existing lead with that phone
+      const findConflicts = async (phones: string[]) => {
+        const found: Record<string, string> = {}
+        const uniq = [...new Set(phones.map(p => p.replace(/["\\]/g, '')).filter(Boolean))]
+        for (let i = 0; i < uniq.length; i += 100) {
+          const list = uniq.slice(i, i + 100).map(p => `"${p}"`).join(',')
+          const rows = await dbGet('leads', 'id,phone', tenantFilters({ phone: `in.(${list})` })) as { id: string; phone: string }[]
+          for (const r of rows) found[String(r.phone)] = r.id
+        }
+        return found
+      }
+      if (m === 'check_phones') {
+        const phones = Array.isArray(body.phones) ? (body.phones as unknown[]).map(String) : []
+        return new Response(JSON.stringify({ ok: true, conflicts: await findConflicts(phones) }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'import') {
+        // mode: insert | skip (leave leads whose phone exists) | overwrite (replace them)
+        const mode = String(body.mode || 'insert')
+        if (!['insert', 'skip', 'overwrite'].includes(mode)) return new Response(JSON.stringify({ error: 'unknown mode' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        let rows = normalizeImportRows(body.rows, ['date', 'name', 'phone', 'email', 'labels', 'campaign_source', 'account_id'])
+        if (!rows.length || rows.length > 20000) return new Response(JSON.stringify({ error: 'rows: 1–20000 valid rows required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        let skipped = 0, deleteIds: string[] = []
+        if (mode !== 'insert') {
+          const conflicts = await findConflicts(rows.map(r => String(r.phone ?? '')))
+          if (mode === 'skip') {
+            skipped = Object.keys(conflicts).length
+            rows = rows.filter(r => !conflicts[String(r.phone ?? '')])
+          } else {
+            deleteIds = Object.values(conflicts)
+            const seen = new Set<string>()   // within the file, the first row per phone wins
+            rows = rows.filter(r => {
+              const ph = String(r.phone ?? '')
+              if (!ph) return true
+              if (seen.has(ph)) return false
+              seen.add(ph); return true
+            })
+          }
+        }
+        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        // Insert first, then delete the leads being replaced: a failed insert leaves the old data intact.
+        const res = await insertInChunks('leads', rows)
+        if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        for (let i = 0; i < deleteIds.length; i += 100) await dbDelete('leads', { id: `in.(${deleteIds.slice(i, i + 100).join(',')})` })
+        return new Response(JSON.stringify({ ok: true, inserted: res.inserted, skipped, overwritten: deleteIds.length }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'ad_report_crud') {
+      const m = String(body.method || 'list')
+      const COLS = 'campaign_name,day,amount_spent_myr,results,cost_per_result,frequency,cpm,ctr_all,link_clicks,new_messaging_contacts'
+      const filt: Record<string, string> = {}
+      if (body.search)     filt['campaign_name'] = `ilike.${likePattern(body.search)}`
+      if (body.from)       filt['day']           = `gte.${String(body.from)}`
+      if (body.to)         filt['day2']          = `lte.${String(body.to)}`
+      if (body.account_id) filt['account_id']    = `eq.${String(body.account_id)}`
+
+      if (m === 'list') {
+        const limit = Math.min(Math.max(Number(body.limit) || 50, 1), 200)
+        const page  = Math.max(Number(body.page) || 1, 1)
+        const { rows, count } = await dbGetPage('ad_reports', COLS, tenantFilters(filt), 'amount_spent_myr.desc', limit, (page - 1) * limit)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'export') {
+        const rows = await dbGet('ad_reports', COLS, tenantFilters(filt), 'day.desc', 10000)
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'import') {
+        const rows = normalizeImportRows(body.rows, [...COLS.split(','), 'account_id'])
+        if (!rows.length || rows.length > 20000) return new Response(JSON.stringify({ error: 'rows: 1–20000 valid rows required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        const res = await insertInChunks('ad_reports', rows)
+        if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true, inserted: res.inserted }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'data_entry_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.search)    filt['file_name'] = `ilike.${likePattern(body.search)}`
+        if (body.file_type) filt['file_type'] = `eq.${String(body.file_type)}`
+        const { rows, count } = await dbGetPage('data_entries', '*', tenantFilters(filt), 'created_at.desc', 50, 0)
+        for (const r of rows) r.file_url = await signedUrl(r.file_url, 3600)
+        return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    if (body.action === 'analytics_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.from) filt['date']  = `gte.${String(body.from)}`
+        if (body.to)   filt['date2'] = `lte.${String(body.to)}`
+        const rows = await dbGet('analytics_daily', '*', tenantFilters(filt), 'date.desc')
+        return new Response(JSON.stringify({ ok: true, rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Staff (员工) ─────────────────────────────────────────────────────
+    if (body.action === 'staff_crud') {
+      const m = String(body.method || 'list')
+      if (m === 'list') {
+        const filt: Record<string, string> = body.active_only ? { active: 'eq.true' } : {}
+        const staff = await dbGet('staff', 'id,name,avatar,role,department,active', tenantFilters(filt), 'name.asc')
+        return new Response(JSON.stringify({ ok: true, staff }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const name = String(d.name ?? '').trim()
+        if (!name) return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { name }
+        for (const k of ['avatar', 'role', 'department']) fields[k] = String(d[k] ?? '').trim() || null
+        const id = String(body.id || '')
+        if (id) {
+          await dbPatchWhere('staff', tenantFilters({ id: `eq.${id}` }), fields)
+        } else {
+          const ins = await dbInsert('staff', { ...fields, tenant_id: _reqTenantId || 'default' })
+          if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_active') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        await dbPatchWhere('staff', tenantFilters({ id: `eq.${id}` }), { active: !!body.active })
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Team tasks (任务) ─────────────────────────────────────────────────
+    // Not `list_tasks` — that name belongs to the agent task runner.
+    if (body.action === 'staff_task_crud') {
+      const m = String(body.method || 'list')
+      const STATUSES = ['todo', 'in_progress', 'done']
+      const PRIORITIES = ['high', 'normal', 'low']
+
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.status)      filt['status']      = `eq.${String(body.status)}`
+        if (body.assignee_id) filt['assignee_id'] = `eq.${String(body.assignee_id)}`
+        const tasks = await dbGet('tasks', 'id,title,description,assignee_id,created_by,priority,status,due_date,updated_at,created_at',
+          tenantFilters(filt), 'created_at.desc') as Record<string, unknown>[]
+        // Attach assignee / creator here: postgres mode has no PostgREST resource embedding
+        const ids = [...new Set(tasks.flatMap(t => [t.assignee_id, t.created_by]).filter(Boolean).map(String))]
+        const people = ids.length ? await dbGet('staff', 'id,name,avatar', { id: `in.(${ids.join(',')})` }) as { id: string; name: string; avatar: string | null }[] : []
+        const byId = new Map(people.map(p => [p.id, p]))
+        for (const t of tasks) {
+          const a = byId.get(String(t.assignee_id))
+          const c = byId.get(String(t.created_by))
+          t.assignee = a ? { id: a.id, name: a.name, avatar: a.avatar } : null
+          t.creator  = c ? { id: c.id, name: c.name } : null
+        }
+        return new Response(JSON.stringify({ ok: true, tasks }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const title = String(d.title ?? '').trim()
+        if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = {
+          title,
+          description: String(d.description ?? '').trim() || null,
+          assignee_id: d.assignee_id || null,
+          priority:    PRIORITIES.includes(String(d.priority)) ? String(d.priority) : 'normal',
+          due_date:    d.due_date || null,
+          updated_at:  new Date().toISOString(),
+        }
+        const id = String(body.id || '')
+        if (id) {
+          await dbPatchWhere('tasks', tenantFilters({ id: `eq.${id}` }), fields)   // creator is set once, on create
+        } else {
+          const ins = await dbInsert('tasks', { ...fields, created_by: d.created_by || null, tenant_id: _reqTenantId || 'default' })
+          if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'set_status' || m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (m === 'delete') {
+          await dbDelete('tasks', tenantFilters({ id: `eq.${id}` }))
+        } else {
+          const status = String(body.status || '')
+          if (!STATUSES.includes(status)) return new Response(JSON.stringify({ error: 'unknown status' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+          await dbPatchWhere('tasks', tenantFilters({ id: `eq.${id}` }), { status, updated_at: new Date().toISOString() })
+        }
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Direct messages (消息) ────────────────────────────────────────────
+    // The dashboard polls `poll` instead of subscribing to Supabase Realtime.
+    if (body.action === 'direct_message_crud') {
+      type DmRow = { id: string; from_id: string; to_id: string; content: string; read_at: string | null; created_at: string }
+      const m = String(body.method || 'list')
+      const isId = (v: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+      const me = String(body.me || ''), peer = String(body.peer || '')
+      const DM_COLS = 'id,from_id,to_id,content,read_at,created_at'
+      // Marks only these rows read, so a message arriving mid-request stays unread for the next poll
+      const markRead = async (rows: DmRow[]) => {
+        const ids = rows.filter(r => r.to_id === me && !r.read_at).map(r => r.id)
+        if (ids.length) await dbPatchWhere('direct_messages', { id: `in.(${ids.join(',')})` }, { read_at: new Date().toISOString() })
+      }
+
+      if (m === 'list') {
+        if (!isId(me) || !isId(peer)) return new Response(JSON.stringify({ error: 'me and peer (staff ids) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const rows = await dbGet('direct_messages', DM_COLS,
+          tenantFilters({ or: `(and(from_id.eq.${me},to_id.eq.${peer}),and(from_id.eq.${peer},to_id.eq.${me}))` }), 'created_at.desc', 100) as DmRow[]
+        rows.reverse()   // the newest 100, oldest first
+        await markRead(rows)
+        return new Response(JSON.stringify({ ok: true, messages: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'send') {
+        const content = String(body.content ?? '').trim()
+        if (!isId(me) || !isId(peer) || !content) return new Response(JSON.stringify({ error: 'me, peer and content required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const message = await dbInsertReturning('direct_messages', { from_id: me, to_id: peer, content, tenant_id: _reqTenantId || 'default' })
+        return new Response(JSON.stringify({ ok: true, message }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'poll') {
+        // messages: unread from the open thread's peer (now marked read); unread_from: other senders with unread messages
+        if (!isId(me)) return new Response(JSON.stringify({ error: 'me (staff id) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const unread = await dbGet('direct_messages', DM_COLS, tenantFilters({ to_id: `eq.${me}`, read_at: 'is.null' }), 'created_at.asc', 200) as DmRow[]
+        const messages = isId(peer) ? unread.filter(r => r.from_id === peer) : []
+        await markRead(messages)
+        const unread_from = [...new Set(unread.filter(r => r.from_id !== peer).map(r => r.from_id))]
+        return new Response(JSON.stringify({ ok: true, messages, unread_from }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── Document approval (文件审批) ─────────────────────────────────────
+    // Attachments are uploaded first via POST <base>/files/documents. The
+    // document status is recomputed here after every reviewer decision.
+    if (body.action === 'document_crud') {
+      const m = String(body.method || 'list')
+      const DOC_COLS = 'id,title,notes,file_url,file_name,file_type,file_size,status,uploaded_by,tenant_id,created_at'
+
+      if (m === 'list') {
+        const filt: Record<string, string> = {}
+        if (body.status) filt['status'] = `eq.${String(body.status)}`
+        let docs = await dbGet('documents', DOC_COLS, tenantFilters(filt), 'created_at.desc', 100) as Record<string, unknown>[]
+        // Members see only documents they uploaded or review
+        const viewer = _reqEmail
+        if (_reqRole === 'member') {
+          const mine = await dbGet('document_reviewers', 'document_id', { contact: `eq.${viewer}` }) as { document_id: string }[]
+          const reviewing = new Set(mine.map(r => r.document_id))
+          docs = docs.filter(d => d.uploaded_by === viewer || reviewing.has(String(d.id)))
+        }
+        const ids = docs.map(d => String(d.id))
+        const revs = ids.length ? await dbGet('document_reviewers', 'document_id,decision', { document_id: `in.(${ids.join(',')})` }) as { document_id: string; decision: string | null }[] : []
+        for (const d of docs) {
+          d.decisions = revs.filter(r => r.document_id === d.id).map(r => r.decision)
+          d.file_url = await signedUrl(d.file_url as string | null, 3600)
+        }
+        return new Response(JSON.stringify({ ok: true, documents: docs }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'get') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [doc] = await dbGet('documents', DOC_COLS, tenantFilters({ id: `eq.${id}` }), undefined, 1)
+        if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const reviewers = await dbGet('document_reviewers', 'id,document_id,name,contact,decision,comment,decided_at,created_at', { document_id: `eq.${id}` }, 'created_at.asc')
+        // Same rule as list: a member sees only documents they uploaded or review
+        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail
+            && !reviewers.some((r: { contact: string | null }) => String(r.contact || '').trim().toLowerCase() === _reqEmail)) {
+          return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        doc.file_url = await signedUrl(doc.file_url, 3600)
+        return new Response(JSON.stringify({ ok: true, document: doc, reviewers }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'create') {
+        const d = (body.data || {}) as Record<string, unknown>
+        const title = String(d.title ?? '').trim()
+        const reviewers = (Array.isArray(body.reviewers) ? body.reviewers as Record<string, unknown>[] : [])
+          .map(r => ({ name: String(r?.name ?? '').trim(), contact: String(r?.contact ?? '').trim() || null }))
+          .filter(r => r.name)
+        if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        if (!reviewers.length) return new Response(JSON.stringify({ error: 'at least one reviewer required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const doc = await dbInsertReturning('documents', {
+          title, notes: String(d.notes ?? '').trim() || null,
+          file_url: d.file_url || null, file_name: d.file_name || null, file_type: d.file_type || null,
+          file_size: d.file_size ? Number(d.file_size) : null, status: 'pending',
+          // the uploader is the logged-in user; only internal callers may name one
+          tenant_id: _reqTenantId, uploaded_by: _reqEmail || d.uploaded_by || null,
+        })
+        const ins = await dbInsert('document_reviewers', reviewers.map(r => ({ document_id: doc.id, ...r })))
+        if (!ins.ok) {
+          await dbDelete('documents', { id: `eq.${doc.id}` })   // no document without reviewers
+          return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ ok: true, id: doc.id }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'decide') {
+        const reviewerId = String(body.reviewer_id || '')
+        const decision = String(body.decision || '')
+        if (!reviewerId || !['approved', 'rejected'].includes(decision)) return new Response(JSON.stringify({ error: 'reviewer_id and decision (approved | rejected) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [rev] = await dbGet('document_reviewers', 'id,document_id,contact', { id: `eq.${reviewerId}` }, undefined, 1)
+        if (!rev) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [revDoc] = await dbGet('documents', 'id', tenantFilters({ id: `eq.${rev.document_id}` }), undefined, 1)
+        if (!revDoc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        // A member may only record the decision on their own reviewer row
+        if (_reqRole === 'member' && String(rev.contact || '').trim().toLowerCase() !== _reqEmail) {
+          return new Response(JSON.stringify({ error: '只能填写你自己的审批' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        await dbPatch('document_reviewers', reviewerId, { decision, comment: String(body.comment ?? '').trim() || null, decided_at: new Date().toISOString() })
+        const all = await dbGet('document_reviewers', 'decision', { document_id: `eq.${rev.document_id}` }) as { decision: string | null }[]
+        const approved = all.filter(r => r.decision === 'approved').length
+        const rejected = all.filter(r => r.decision === 'rejected').length
+        const status = rejected > 0 ? 'rejected' : approved === all.length ? 'approved' : approved > 0 ? 'partial' : 'pending'
+        await dbPatch('documents', String(rev.document_id), { status })
+        return new Response(JSON.stringify({ ok: true, status }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'delete') {
+        const id = String(body.id || '')
+        if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [doc] = await dbGet('documents', 'id,file_url,uploaded_by', tenantFilters({ id: `eq.${id}` }), undefined, 1)
+        if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        // A member may only delete documents they uploaded
+        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail) {
+          return new Response(JSON.stringify({ error: '只能删除你自己上传的文件' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        await dbDelete('documents', { id: `eq.${id}` })   // reviewers go with it (ON DELETE CASCADE)
+        // Best effort: the record is already gone, and a leftover file is harmless
+        const name = doc.file_url ? nameFromUrl('documents', String(doc.file_url)) : null
+        let file_deleted = false
+        if (name) {
+          try { await deleteFile('documents', name); file_deleted = true } catch (e) { console.error('deleteFile documents', name, e) }
+        }
+        return new Response(JSON.stringify({ ok: true, file_deleted }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
+    // ── API integrations (API 集成) ─────────────────────────────────────
+    // Secret credential values are masked in `list`; on `save`, a value that is
+    // still masked keeps the stored secret. webhook_url stays visible because the
+    // Lark/Slack test buttons read it straight from the input.
+    if (body.action === 'integration_crud') {
+      const m = String(body.method || 'list')
+      const MASK = '••••••••'
+      const isSecret = (k: string) => /secret|token|password|api_key/i.test(k)
+
+      if (m === 'list') {
+        const rows = await dbGet('api_integrations', 'service,active,credentials,updated_at') as
+          { service: string; active: boolean; credentials: Record<string, unknown> | null; updated_at: string | null }[]
+        const integrations = rows.map(r => ({
+          service: r.service,
+          active: !!r.active,
+          updated_at: r.updated_at,
+          credentials: Object.fromEntries(Object.entries(r.credentials || {}).map(([k, v]) =>
+            [k, isSecret(k) && typeof v === 'string' && v ? (v.length > 8 ? MASK + v.slice(-4) : MASK) : v])),
+        }))
+        return new Response(JSON.stringify({ ok: true, integrations }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (m === 'save') {
+        const service = String(body.service || '').trim()
+        if (!service) return new Response(JSON.stringify({ error: 'service required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const fields: Record<string, unknown> = { service, updated_at: new Date().toISOString() }
+        if (body.active !== undefined) fields.active = !!body.active
+        if (body.credentials && typeof body.credentials === 'object') {
+          const existing = await dbGet('api_integrations', 'credentials', { service: `eq.${service}` }, undefined, 1)
+          const stored = (existing[0]?.credentials || {}) as Record<string, unknown>
+          fields.credentials = Object.fromEntries(Object.entries(body.credentials as Record<string, unknown>).map(([k, v]) =>
+            [k, typeof v === 'string' && v.startsWith(MASK) ? (stored[k] ?? null) : v]))
+        }
+        await dbUpsert('api_integrations', fields, 'service')
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2868,11 +3561,7 @@ Return ONLY a valid JSON array, no markdown:
       const p_from = body.from ? String(body.from) : '-infinity'
       const p_to   = body.to   ? String(body.to)   : 'infinity'
 
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/channel_funnel`, {
-        method: 'POST',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ p_tenant: tid, p_from, p_to }),
-      }).then(r => r.ok ? r.json() : []).catch(() => []) as {source:string;leads:number;customers:number;value:number}[]
+      const rows = await dbRpc('channel_funnel', { p_tenant: tid, p_from, p_to }) as {source:string;leads:number;customers:number;value:number}[]
 
       const spendBy   = (body.spend_by_source || {}) as Record<string, number>
       const marginPct = Number(body.margin_pct ?? 100) / 100   // 默认 100% = 营收口径
@@ -2926,19 +3615,13 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (crudMethod === 'update') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'PATCH',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ ...(crudData as object || {}), updated_at: new Date().toISOString() }),
-        })
+        await dbPatchWhere('automation_rules', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` },
+          { ...(crudData as object || {}), updated_at: new Date().toISOString() })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (crudMethod === 'delete') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_rules?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'DELETE',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-        })
+        await dbDelete('automation_rules', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (crudMethod === 'get_logs') {
@@ -2951,12 +3634,12 @@ Return ONLY a valid JSON array, no markdown:
       }
       if (crudMethod === 'mark_read') {
         if (!rule_id) return new Response(JSON.stringify({ error: 'log_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        await fetch(`${SUPABASE_URL}/rest/v1/automation_logs?id=eq.${rule_id}&tenant_id=eq.${encodeURIComponent(tid)}`, {
-          method: 'PATCH',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ read: true }),
-        })
+        await dbPatchWhere('automation_logs', { id: `eq.${rule_id}`, tenant_id: `eq.${tid}` }, { read: true })
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      if (crudMethod === 'unread_count') {
+        const { count } = await dbGetPage('automation_logs', 'id', { tenant_id: `eq.${tid}`, read: 'eq.false' }, undefined, 0)
+        return new Response(JSON.stringify({ ok: true, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'invalid method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -3011,12 +3694,6 @@ Return ONLY a valid JSON array, no markdown:
     }
 
     // ── Tenant management actions (master only) ─────────────────────
-    if (body.action === 'list_tenants') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rows = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.desc')
-      return new Response(JSON.stringify({ tenants: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
     if (body.action === 'create_tenant') {
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const { name, contact_name, contact_email } = body
@@ -3040,24 +3717,15 @@ Return ONLY a valid JSON array, no markdown:
 
     if (body.action === 'add_tenant_user') {
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const { tenant_id, email, role: uRole } = body
+      // The new user's role is `user_role`: `role` is the caller's own session role.
+      // master is granted only through MASTER_EMAILS, never stored here.
+      const tenant_id = body.tenant_id
+      const email = String(body.email || '').trim().toLowerCase()   // login lookups are lower-case
+      const userRole = String(body.user_role || 'member')
       if (!tenant_id || !email) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbInsert('tenant_users', { tenant_id, email, role: uRole || 'member' })
+      if (!['admin', 'member'].includes(userRole)) return new Response(JSON.stringify({ error: 'user_role must be admin or member' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await dbUpsert('tenant_users', { tenant_id, email, role: userRole }, 'email,tenant_id')
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'get_master_summary') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenants = await dbGet('tenants', 'id,name,active', { active: 'eq.true' })
-      const results = await Promise.all((tenants as {id:string,name:string,active:boolean}[]).map(async t => {
-        const [convs, alerts, reviews] = await Promise.all([
-          dbGet('conversations', 'id', { tenant_id: `eq.${t.id}` }, 'id.desc', 100),
-          dbGet('alerts', 'id,rule_name,triggered_at', { tenant_id: `eq.${t.id}` }, 'triggered_at.desc', 5),
-          dbGet('reviews', 'id,status', { tenant_id: `eq.${t.id}`, status: 'eq.pending' }),
-        ])
-        return { ...t, conversation_count: convs.length, alerts, pending_reviews: reviews.length }
-      }))
-      return new Response(JSON.stringify({ tenants: results }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // ── Review agent actions ────────────────────────────────────────
@@ -3145,6 +3813,8 @@ Return ONLY a valid JSON array, no markdown:
           status: 'pending',
         })
 
+        // Reviewers open the file without logging in: a signed link valid for 7 days
+        const reviewLink = file_url ? await signedUrl(String(file_url), 7 * 24 * 3600) : null
         // Email notification if reviewer has email
         let notified = false
         if (route?.reviewer_email) {
@@ -3152,7 +3822,7 @@ Return ONLY a valid JSON array, no markdown:
             const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
             const client = new SmtpClient()
             await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
-            const fileInfo = file_url ? `\n文件链接：${file_url}` : ''
+            const fileInfo = reviewLink ? `\n文件链接：${reviewLink}` : ''
             await client.send({
               from: 'Orchestrator Agent <ks9988467@gmail.com>',
               to: route.reviewer_email,
@@ -3171,7 +3841,7 @@ Return ONLY a valid JSON array, no markdown:
             await sendLarkWebhook(lark.webhook_url,
               `📋 新文件审核请求 — ${department}`,
               `**文件：** ${file_name}\n**提交人：** ${submitted_by || 'unknown'}\n${summary ? '**摘要：** ' + summary : ''}`,
-              file_url as string|undefined)
+              reviewLink ?? undefined)
             if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
           }
         } catch { /* non-fatal */ }
@@ -3381,6 +4051,7 @@ Return ONLY a valid JSON array, no markdown:
       if (sf) filters['status'] = `eq.${sf}`
       if (df) filters['department'] = `eq.${df}`
       const rows = await dbGet('reviews', 'id,file_name,file_type,file_url,department,status,submitted_by,summary,classification_reason,key_info,review_notes,created_at,reviewed_at,notified_at', filters, 'created_at.desc', 50)
+      for (const r of rows) r.file_url = await signedUrl(r.file_url, 3600)
       return new Response(JSON.stringify({ reviews: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -3410,9 +4081,7 @@ Return ONLY a valid JSON array, no markdown:
 
       // Dedup: replace any existing chunks for this (kb_id, source) so re-ingesting
       // the same document updates rather than duplicates.
-      await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks?kb_id=eq.${kb_id}&source_name=eq.${encodeURIComponent(src)}`, {
-        method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
-      })
+      await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}`, source_name: `eq.${src}` })
 
       // Sentence-aware chunking: pack sentences into ~500-char chunks (50 overlap)
       // so chunks break on natural boundaries (。！？.!?\n) instead of mid-word.
@@ -3442,12 +4111,8 @@ Return ONLY a valid JSON array, no markdown:
           vec = er.vector
         }
         const embeddingStr = `[${vec.join(',')}]`
-        const ir = await fetch(`${SUPABASE_URL}/rest/v1/kb_chunks`, {
-          method: 'POST',
-          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId }),
-        })
-        if (!ir.ok) { errs.push(`insert_${idx}:${ir.status}:${await ir.text()}`); return null }
+        const ir = await dbInsert('kb_chunks', { kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId })
+        if (!ir.ok) { errs.push(`insert_${idx}:${ir.error}`); return null }
         return true
       }))
       const saved = results.filter(r => r === true).length
@@ -3466,17 +4131,13 @@ Return ONLY a valid JSON array, no markdown:
       const er = await getEmbedding(String(query).slice(0, 500), providers, kbRows[0]?.embed_model || undefined)
       if (!er) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       const n = Math.min(Number(kLimit)||5, 20)
-      const rows = await fetch(`${SUPABASE_URL}/rest/v1/rpc/kb_match`, {
-        method:'POST',
-        headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json' },
-        body: JSON.stringify({ query_embedding: er.vector, match_kb_id: kb_id, match_count: n }),
-      }).then(res => res.ok ? res.json() : [])
+      const rows = await dbRpc('kb_match', { query_embedding: er.vector, match_kb_id: kb_id, match_count: n })
       return new Response(JSON.stringify({ results: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── KB CRUD ──────────────────────────────────────────────────────
     if (body.action === 'list_kbs') {
-      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',tenantFilters(),undefined,50)
+      const rows = await dbGet('knowledge_bases','id,name,description,agent_id,created_at',tenantFilters(),'created_at.desc',50)
       return new Response(JSON.stringify({ kbs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'create_kb') {
@@ -3488,10 +4149,10 @@ Return ONLY a valid JSON array, no markdown:
     if (body.action === 'delete_kb') {
       const { kb_id } = body
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const tenantQ = _reqTenantId && !_reqIsMaster ? `&tenant_id=eq.${encodeURIComponent(_reqTenantId)}` : ''
-      await fetch(`${SUPABASE_URL}/rest/v1/knowledge_bases?id=eq.${kb_id}${tenantQ}`,{
-        method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}` }
-      })
+      const own = await dbGet('knowledge_bases','id',tenantFilters({ id: `eq.${kb_id}` }),undefined,1)
+      if (!own.length) return new Response(JSON.stringify({ error:'not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
+      await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}` })   // kb_chunks has no foreign key to cascade from
+      await dbDelete('knowledge_bases', { id: `eq.${kb_id}` })
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'list_kb_chunks') {
@@ -3499,6 +4160,12 @@ Return ONLY a valid JSON array, no markdown:
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       const rows = await dbGet('kb_chunks','id,source_name,chunk_index,content,created_at',{ kb_id:`eq.${kb_id}` },'chunk_index.asc',200)
       return new Response(JSON.stringify({ chunks: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'count_kb_chunks') {
+      const { kb_id } = body
+      if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const { count } = await dbGetPage('kb_chunks','id',{ kb_id:`eq.${kb_id}` },undefined,0)
+      return new Response(JSON.stringify({ count }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── Agent version history ────────────────────────────────────────
@@ -3531,6 +4198,12 @@ Return ONLY a valid JSON array, no markdown:
     if (body.action === 'list_workflows') {
       const rows = await dbGet('workflows','id,name,description,active,created_at',tenantFilters(),'created_at.desc',50)
       return new Response(JSON.stringify({ workflows: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
+    if (body.action === 'list_workflow_runs') {
+      const { id: wfId } = body
+      if (!wfId) return new Response(JSON.stringify({ error:'id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
+      const rows = await dbGet('workflow_runs','ran_at,response,error',{ workflow_id:`eq.${wfId}` },'ran_at.desc',10)
+      return new Response(JSON.stringify({ runs: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'save_workflow') {
       const { id: wfId, name, description, nodes, edges, schedule } = body
@@ -3596,7 +4269,7 @@ Return ONLY a valid JSON array, no markdown:
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=skillRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n=>skillRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/agent_skills?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+                await dbDelete('agent_skills', { id: `in.(${ids.join(',')})` })
               }
               const msg = `技能库审计完成：共 ${skillRows.length} 条规则，删除 ${toDelete.length} 条冗余/矛盾规则`
               context[node.id] = msg; context.last_output = msg
@@ -3613,7 +4286,7 @@ Return ONLY a valid JSON array, no markdown:
               const toDelete = m ? (JSON.parse(m[0]) as number[]).filter(n=>n>=1&&n<=prefRows.length) : []
               if (toDelete.length) {
                 const ids = toDelete.map(n=>prefRows[n-1].id)
-                await fetch(`${SUPABASE_URL}/rest/v1/user_prefs?id=in.(${ids.join(',')})`,{ method:'DELETE', headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' } })
+                await dbDelete('user_prefs', { id: `in.(${ids.join(',')})` })
               }
               const msg = `偏好压缩完成：共 ${prefRows.length} 条偏好，删除 ${toDelete.length} 条冗余条目`
               context[node.id] = msg; context.last_output = msg
@@ -3805,6 +4478,8 @@ Return ONLY a valid JSON array, no markdown:
               submitted_by, submitted_by_staff_id, reviewer_route_id: route?.id ?? null, status: 'pending',
             })
 
+            // Reviewers open the file without logging in: a signed link valid for 7 days
+            const reviewLink = await signedUrl(file_url, 7 * 24 * 3600) ?? file_url
             // Send email notification
             let notified = false
             if (route?.reviewer_email) {
@@ -3816,7 +4491,7 @@ Return ONLY a valid JSON array, no markdown:
                   from: 'Orchestrator Agent <ks9988467@gmail.com>',
                   to: route.reviewer_email,
                   subject: `[审核请求] ${department} - ${file_name}`,
-                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${file_url}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
+                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${reviewLink}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
                 })
                 await client.close()
                 await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
@@ -3830,7 +4505,7 @@ Return ONLY a valid JSON array, no markdown:
                 await sendLarkWebhook(lark.webhook_url,
                   `📋 新文件审核请求 — ${department}`,
                   `**文件：** ${file_name}\n**提交人：** ${submitted_by}\n${summary ? '**摘要：** ' + summary : ''}${note ? '\n**备注：** ' + note : ''}`,
-                  String(file_url))
+                  reviewLink)
                 if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
               }
             } catch { /* non-fatal */ }
