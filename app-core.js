@@ -1,12 +1,18 @@
 // ── Lock Screen ───────────────────────────────────────────────────────
-// Password lock removed: it was a hardcoded password checked in the browser, so
-// it never protected anything. The lock screen is hidden on load. Real
-// authentication (backend-issued session tokens) is a planned step and must be
-// in place before any public deploy. The email-OTP login below is kept for that
-// rework; the lock screen was its only entry point, so it is unreachable for now.
-const LOCK_KEY = 'oa_unlocked'
-const LOCK_TTL = 24 * 60 * 60 * 1000
-document.getElementById('lockScreen')?.classList.add('hidden')
+// Login is email + one-time code. verify_otp returns a session token, kept in
+// localStorage and sent as "Authorization: Bearer <token>" on every request.
+// Identity (tenant / role) always comes from the backend — whoami after load.
+const TOKEN_KEY = '_orch_token'
+function getToken() { try { return localStorage.getItem(TOKEN_KEY) || '' } catch { return '' } }
+function showLockScreen() { document.getElementById('lockScreen')?.classList.remove('hidden') }
+// With a token, stay unlocked until the backend says otherwise (any 401 → lock screen)
+if (getToken()) document.getElementById('lockScreen')?.classList.add('hidden')
+
+// The session is missing, expired or revoked: forget it and ask to log in again
+function handleUnauthorized() {
+  try { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem('_orch_session') } catch {}
+  showLockScreen()
+}
 async function sendOtp() {
   const email = document.getElementById('lockEmailInput').value.trim()
   const errEl = document.getElementById('lockOtpErr')
@@ -19,10 +25,22 @@ async function sendOtp() {
     clearTimeout(timer)
     const d = await r.json()
     if (d.ok) {
+      errEl.textContent = ''
       document.getElementById('lockOtpStep1').style.display = 'none'
       document.getElementById('lockOtpStep2').style.display = 'block'
     } else { errEl.textContent = d.error || '发送失败' }
   } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
+}
+function backToEmailStep() {
+  document.getElementById('lockOtpStep2').style.display = 'none'
+  document.getElementById('lockOtpStep1').style.display = 'block'
+  document.getElementById('lockCodeInput').value = ''
+  document.getElementById('lockCodeErr').textContent = ''
+}
+async function logout() {
+  try { await apiCall('logout') } catch {}
+  handleUnauthorized()
+  location.reload()
 }
 async function verifyOtp() {
   const email = document.getElementById('lockEmailInput').value.trim()
@@ -37,11 +55,10 @@ async function verifyOtp() {
     clearTimeout(timer)
     const d = await r.json()
     if (d.ok) {
-      localStorage.setItem(LOCK_KEY, JSON.stringify({ exp: Date.now() + LOCK_TTL }))
-      _session = { tenant_id: d.tenant_id || null, role: d.role || 'member', tenant_name: d.tenant_name || '', email: d.email || email || '' }
-      localStorage.setItem('_orch_session', JSON.stringify(_session))
-      document.getElementById('lockScreen').classList.add('hidden')
-      applySessionUI()
+      localStorage.setItem(TOKEN_KEY, d.token)
+      localStorage.setItem('_orch_session', JSON.stringify({ tenant_id: d.tenant_id || null, role: d.role || 'member', tenant_name: d.tenant_name || '', email: d.email || email || '' }))
+      // Reload so every page loads its data with the new token
+      location.reload()
     } else { errEl.textContent = d.error || '验证码错误' }
   } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
 }
@@ -55,9 +72,6 @@ async function verifyOtp() {
 //      (define it before app-core.js loads)
 //   2. localStorage.setItem('_orch_backend', 'http://localhost:8000')
 const DEFAULT_BACKEND_URL  = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator'
-// Public anon key the hosted Edge Function requires (Supabase checks it as a JWT).
-// Sent only to that default backend, never to a local or custom one.
-const DEFAULT_BACKEND_AUTH = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
 function resolveBackendUrl() {
   try {
     if (window.ORCH_CONFIG && window.ORCH_CONFIG.backendUrl) return window.ORCH_CONFIG.backendUrl
@@ -67,8 +81,11 @@ function resolveBackendUrl() {
   return DEFAULT_BACKEND_URL
 }
 const EDGE_URL      = resolveBackendUrl()
+// The session token, once logged in. The hosted Edge Function must be deployed with
+// --no-verify-jwt: this token is not a Supabase JWT.
 function backendAuthHeaders() {
-  return EDGE_URL === DEFAULT_BACKEND_URL ? { 'Authorization': 'Bearer ' + DEFAULT_BACKEND_AUTH } : {}
+  const token = getToken()
+  return token ? { 'Authorization': 'Bearer ' + token } : {}
 }
 // URL of another function deployed next to the orchestrator (e.g. 'lark-webhook').
 // Only Edge Function style URLs (…/orchestrator) have siblings; null otherwise.
@@ -89,6 +106,8 @@ const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT'
 let sessionId = crypto.randomUUID()
 
 // ── Tenant session (populated after OTP login) ─────────────────────
+// For the UI only (what to show a role); the backend decides from the session token.
+// Taken from localStorage at once, then refreshed from whoami once the page has loaded.
 let _session = { tenant_id: null, role: 'member', tenant_name: '', email: '' }
 ;(function() {
   try {
@@ -96,11 +115,18 @@ let _session = { tenant_id: null, role: 'member', tenant_name: '', email: '' }
     if (s) _session = JSON.parse(s)
   } catch {}
 })()
+document.addEventListener('DOMContentLoaded', async () => {
+  if (!getToken()) return
+  try {
+    const d = await apiCall('whoami')
+    _session = { tenant_id: d.tenant_id || null, role: d.role || 'member', tenant_name: d.tenant_name || '', email: d.email || '' }
+    localStorage.setItem('_orch_session', JSON.stringify(_session))
+    applySessionUI()
+  } catch {}   // a 401 has already brought up the lock screen
+})
+// Request body for an action. Identity is never sent — the backend takes it from the token.
 function orchBody(extra) {
-  const base = {}
-  if (_session.tenant_id) base.tenant_id = _session.tenant_id
-  if (_session.role)      base.role       = _session.role
-  return Object.assign(base, extra)
+  return Object.assign({}, extra)
 }
 
 /**
@@ -121,6 +147,7 @@ async function apiCall(action, payload = {}, options = {}) {
     });
     clearTimeout(timer);
 
+    if (res.status === 401) { handleUnauthorized(); throw new Error('请先登录'); }
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || `HTTP ${res.status}`);
@@ -143,6 +170,9 @@ function apiRaw(payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...backendAuthHeaders() },
     body: JSON.stringify(orchBody(payload)),
+  }).then(res => {
+    if (res.status === 401) handleUnauthorized()
+    return res
   })
 }
 
@@ -155,6 +185,7 @@ async function uploadFile(bucket, file) {
     headers: { 'Content-Type': file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name), ...backendAuthHeaders() },
     body: file,
   })
+  if (res.status === 401) { handleUnauthorized(); throw new Error('请先登录') }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
   return data

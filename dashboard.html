@@ -20,18 +20,19 @@
     <div class="lock-logo">🧠</div>
     <div class="lock-title">Orchestrator Agent</div>
     <div class="lock-sub">邮箱验证码登录</div>
-    <!-- OTP 登录。密码锁已移除;锁屏目前在加载时隐藏,待身份校验阶段启用 -->
+    <!-- 邮箱验证码登录：后端签发会话令牌（app-core.js 的 sendOtp / verifyOtp） -->
     <div id="lockOtpView">
       <div id="lockOtpStep1">
-        <input id="lockEmailInput" type="email" class="lock-input" placeholder="输入邮箱" style="letter-spacing:0">
+        <input id="lockEmailInput" type="email" class="lock-input" placeholder="输入邮箱" style="letter-spacing:0" onkeydown="if(event.key==='Enter')sendOtp()">
         <button class="lock-btn" onclick="sendOtp()">发送验证码</button>
         <div class="lock-err" id="lockOtpErr"></div>
       </div>
       <div id="lockOtpStep2" style="display:none">
-        <div style="font-size:12px;color:#555;margin-bottom:16px">验证码已发送，10分钟内有效</div>
+        <div style="font-size:12px;color:#555;margin-bottom:16px">如果该邮箱有登录权限，验证码已发送（10 分钟内有效）</div>
         <input id="lockCodeInput" type="text" class="lock-input" placeholder="6位验证码" maxlength="6" onkeydown="if(event.key==='Enter')verifyOtp()">
         <button class="lock-btn" onclick="verifyOtp()">验证进入</button>
         <div class="lock-err" id="lockCodeErr"></div>
+        <button onclick="backToEmailStep()" style="background:none;border:none;color:var(--ink-4);font-size:12px;cursor:pointer;margin-top:6px">← 换一个邮箱</button>
       </div>
     </div>
   </div>
@@ -85,6 +86,7 @@
   </nav>
   <div class="sidebar-footer">
     <div id="tenantNameBadge" style="font-size:11px;color:#555;padding:4px 8px 6px;text-align:center"></div>
+    <button id="logoutBtn" onclick="logout()" style="display:block;margin:0 auto 8px;background:none;border:1px solid var(--border);border-radius:6px;padding:3px 12px;font-size:11px;color:var(--ink-3);cursor:pointer">退出登录</button>
     <div class="provider-badge">
       <div class="dot" id="dot-anthropic"></div>
       <span class="label">Anthropic</span>
