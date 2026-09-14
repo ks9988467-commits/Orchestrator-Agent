@@ -2226,24 +2226,31 @@ Deno.serve(async (req: Request) => {
       if (!rows?.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       // Mark used
       await dbPatch('otp_requests', String(rows[0].id), { used: true })
-      // Resolve tenant + role from tenant_users
+      // Master = an email listed in MASTER_EMAILS (comma-separated). Everyone else needs a
+      // tenant_users row — an unknown email is refused, never treated as master.
+      const masterEmails = (Deno.env.get('MASTER_EMAILS') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      const isMasterEmail = masterEmails.includes(String(email).trim().toLowerCase())
       const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${email}` })
       let tenantId: string|null = tuRows[0]?.tenant_id ?? null
-      let role: string = tuRows[0]?.role ?? 'member'
+      let role: string = tuRows[0]?.role === 'admin' ? 'admin' : 'member'
       let tenantName = ''
-      if (tenantId) {
+      if (isMasterEmail) {
+        role = 'master'
+        const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
+        if (masterRows.length) { tenantId = masterRows[0].id; tenantName = masterRows[0].name }
+      } else if (!tuRows.length) {
+        return new Response(JSON.stringify({ ok: false, error: '该邮箱没有访问权限，请联系管理员' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      } else if (tenantId) {
         const tRows = await dbGet('tenants', 'name', { id: `eq.${tenantId}` })
         tenantName = tRows[0]?.name ?? ''
-      } else {
-        // Fallback: treat as master if no tenant_users record
-        const masterRows = await dbGet('tenants', 'id,name', { name: 'eq.Master' })
-        if (masterRows.length) { tenantId = masterRows[0].id; role = 'master'; tenantName = masterRows[0].name }
       }
       return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_tenants') {
+      // Master check. _reqIsMaster still comes from the request body until backend session auth lands.
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.asc')
       const result = await Promise.all((tenants as Record<string,unknown>[]).map(async t => {
         const tid = String(t.id)
@@ -2257,42 +2264,8 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ ok: true, tenants: result }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
-    if (body.action === 'create_tenant') {
-      const { name, slug, contact_name, contact_email, user_email } = body
-      if (!name || !slug || !user_email) return new Response(JSON.stringify({ error: 'name, slug, user_email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenant = await dbInsertReturning('tenants', { name, slug, contact_name: contact_name||'', contact_email: contact_email||'' })
-      if (!tenant.id) return new Response(JSON.stringify({ error: 'Failed to create tenant (slug may already exist)' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbInsert('tenant_users', { email: user_email, tenant_id: tenant.id, role: 'admin' })
-      // Copy default agents from master
-      const masterRows = await dbGet('tenants', 'id', { slug: 'eq.master' })
-      const masterId = masterRows[0]?.id
-      if (masterId) {
-        const masterAgents = await dbGet('agents', 'name,system_prompt,provider,model,active', { tenant_id: `eq.${masterId}` })
-        for (const a of masterAgents as Record<string,unknown>[]) {
-          const { id: _id, ...agentData } = a as Record<string,unknown>
-          void _id
-          await dbInsert('agents', { ...agentData, tenant_id: tenant.id })
-        }
-      }
-      return new Response(JSON.stringify({ ok: true, tenant }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'update_tenant') {
-      const { id, ...fields } = body
-      if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      delete fields.action
-      await dbPatch('tenants', String(id), fields)
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'add_tenant_user') {
-      const { tenant_id: tid, email: uemail, role: urole } = body
-      if (!tid || !uemail) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbUpsert('tenant_users', { email: uemail, tenant_id: tid, role: urole || 'member' }, 'email,tenant_id')
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
     if (body.action === 'get_master_summary') {
+      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,active')
       const now = new Date()
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10)
@@ -3544,12 +3517,6 @@ Return ONLY a valid JSON array, no markdown:
     }
 
     // ── Tenant management actions (master only) ─────────────────────
-    if (body.action === 'list_tenants') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rows = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.desc')
-      return new Response(JSON.stringify({ tenants: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
     if (body.action === 'create_tenant') {
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const { name, contact_name, contact_email } = body
@@ -3573,24 +3540,14 @@ Return ONLY a valid JSON array, no markdown:
 
     if (body.action === 'add_tenant_user') {
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const { tenant_id, email, role: uRole } = body
+      // The new user's role is `user_role`: `role` is the caller's own session role.
+      // master is granted only through MASTER_EMAILS, never stored here.
+      const { tenant_id, email } = body
+      const userRole = String(body.user_role || 'member')
       if (!tenant_id || !email) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbInsert('tenant_users', { tenant_id, email, role: uRole || 'member' })
+      if (!['admin', 'member'].includes(userRole)) return new Response(JSON.stringify({ error: 'user_role must be admin or member' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      await dbUpsert('tenant_users', { tenant_id, email, role: userRole }, 'email,tenant_id')
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'get_master_summary') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tenants = await dbGet('tenants', 'id,name,active', { active: 'eq.true' })
-      const results = await Promise.all((tenants as {id:string,name:string,active:boolean}[]).map(async t => {
-        const [convs, alerts, reviews] = await Promise.all([
-          dbGet('conversations', 'id', { tenant_id: `eq.${t.id}` }, 'id.desc', 100),
-          dbGet('alerts', 'id,rule_name,triggered_at', { tenant_id: `eq.${t.id}` }, 'triggered_at.desc', 5),
-          dbGet('reviews', 'id,status', { tenant_id: `eq.${t.id}`, status: 'eq.pending' }),
-        ])
-        return { ...t, conversation_count: convs.length, alerts, pending_reviews: reviews.length }
-      }))
-      return new Response(JSON.stringify({ tenants: results }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // ── Review agent actions ────────────────────────────────────────

@@ -508,6 +508,44 @@ await api('automation_crud', { method: 'mark_read', rule_id: myLogs.find(l => !l
 const unread2 = (await api('automation_crud', { method: 'unread_count' })).json.count
 check('mark_read lowers unread_count', unread2 - unread0 === 1, { unread0, unread2 })
 
+// ── 14. OTP login roles / tenant endpoints ─────────────────────────────
+// The backend must run without MASTER_EMAILS containing these test addresses.
+console.log('\n[14] OTP login / tenant endpoints')
+const tn = await dbInsertReturning('tenants', { name: `${MARK} tenant`, slug: `${MARK}-t` })
+const TID = String(tn.id)
+// A tenant named "Master" is what the old fallback used to hand out to unknown emails
+await dbInsert('tenants', { name: 'Master', slug: `${MARK}-master` })
+const memberEmail = `${MARK}@member.test`, strangerEmail = `${MARK}@stranger.test`
+await dbInsert('tenant_users', { email: memberEmail, tenant_id: TID, role: 'admin' })
+await dbInsert('otp_requests', [{ email: memberEmail, code: '123456' }, { email: strangerEmail, code: '654321' }])
+const vKnown = await api('verify_otp', { email: memberEmail, code: '123456' })
+check('verify_otp: a registered email gets its tenant and role', vKnown.json.ok === true && vKnown.json.role === 'admin' && vKnown.json.tenant_id === TID, vKnown.json)
+const vStranger = await api('verify_otp', { email: strangerEmail, code: '654321' })
+check('verify_otp: an unregistered email is refused, not made master', vStranger.status === 403 && vStranger.json.ok === false && !vStranger.json.role, vStranger.json)
+
+const forbidden: Record<string, number> = {}
+for (const [action, payload] of [
+  ['list_tenants', {}], ['get_master_summary', {}], ['create_tenant', { name: `${MARK} nope` }],
+  ['update_tenant', { tenant_id: TID, active: false }], ['add_tenant_user', { tenant_id: TID, email: `${MARK}@x.test` }],
+] as [string, Record<string, unknown>][]) forbidden[action] = (await api(action, payload)).status
+check('tenant endpoints refuse a non-master caller (403)', Object.values(forbidden).every(s => s === 403), forbidden)
+const lt = await api('list_tenants', { role: 'master' })
+check('list_tenants (master): ok, with total_spend and lead_count', lt.json.ok === true && (lt.json.tenants as R[]).some(t => t.id === TID && 'total_spend' in t && 'lead_count' in t), lt.json)
+const msum = await api('get_master_summary', { role: 'master' })
+check('get_master_summary (master): ok, with summary rows', msum.json.ok === true && Array.isArray(msum.json.summary), msum.json)
+const ctn = await api('create_tenant', { role: 'master', name: `${MARK} created`, contact_name: 'c', contact_email: 'c@x.test' })
+check("create_tenant accepts the dashboard's fields (name / contact only)", ctn.json.ok === true && !!ctn.json.tenant?.id, ctn.json)
+const utn = await api('update_tenant', { role: 'master', tenant_id: TID, active: false, slug: 'hijacked' })
+const tnRow = await dbGet('tenants', 'active,slug', { id: `eq.${TID}` })
+check('update_tenant: toggles active, ignores fields outside its allowlist', utn.json.ok === true && tnRow[0]?.active === false && tnRow[0]?.slug === `${MARK}-t`, tnRow)
+const newUser = `${MARK}@new.test`
+const auMaster = await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser, user_role: 'master' })
+check('add_tenant_user: user_role "master" → 400, nothing stored', auMaster.status === 400 && (await dbGet('tenant_users', 'id', { email: `eq.${newUser}` })).length === 0, auMaster.json)
+await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser })
+await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser, user_role: 'admin' })
+const auRows = await dbGet('tenant_users', 'role', { email: `eq.${newUser}` })
+check("add_tenant_user: defaults to member (not the caller's role), repeat call updates the role", auRows.length === 1 && auRows[0].role === 'admin', auRows)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
@@ -516,6 +554,10 @@ await dbDelete('workflow_runs', { workflow_id: `eq.${WF}` })
 await dbDelete('kb_chunks', { source_name: `eq.${MARK}` })
 await dbDelete('knowledge_bases', { name: `like.${MARK}*` })
 await dbDelete('automation_logs', { message: `like.${MARK}*` })
+await dbDelete('tenant_users', { email: `like.${MARK}*` })
+await dbDelete('otp_requests', { email: `like.${MARK}*` })
+await dbDelete('tenants', { name: `like.${MARK}*` })
+await dbDelete('tenants', { slug: `like.${MARK}*` })
 await dbDelete('direct_messages', { content: `like.${MARK}*` })   // before staff: messages reference staff
 await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })
