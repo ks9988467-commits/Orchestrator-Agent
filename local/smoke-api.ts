@@ -3,10 +3,10 @@
 // supabase-js calls, exercised over HTTP against a locally running backend.
 //
 // Run from the project root, with the backend on :8000 (e.g. the `backend`
-// launch config) — PowerShell:
-//   $env:DB_DRIVER="postgres"
-//   $env:DATABASE_URL="postgresql://ucg:ucg_local_dev@localhost:5433/ucg"
-//   deno run --allow-net --allow-env --allow-read local/smoke-api.ts
+// launch config), using the backend's env file:
+//   deno run --allow-net --allow-env --allow-read --env-file=local/.env local/smoke-api.ts
+// ORCH_INTERNAL_SECRET and OTP_DEV_ECHO from that file enable the internal-secret and
+// send_otp tests; without them those tests are skipped.
 //
 // Test rows carry a unique marker and are removed at the end. Sections that
 // would touch real configuration (an existing provider / default provider)
@@ -28,11 +28,25 @@ function check(name: string, ok: boolean, detail: unknown = '') {
   else { fail++; console.log(`  ❌ ${name}`, detail) }
 }
 
-// Mirrors the dashboard's apiCall/orchBody: every body carries the session role.
-async function api(action: string, payload: Record<string, unknown> = {}) {
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Every request needs a session token. Test sessions are inserted directly, one per role;
+// a payload's `role` picks the token to use. The backend ignores `role` in the body — the
+// body still carries role:'member' like the dashboard used to, to show that.
+const TOKENS: Record<string, string> = {}
+for (const r of ['member', 'admin', 'master']) {
+  TOKENS[r] = `${MARK}-${r}-${crypto.randomUUID()}`
+  await dbInsert('sessions', { token_hash: await sha256Hex(TOKENS[r]), email: `${MARK}-${r}@session.test`, role: r, expires_at: new Date(Date.now() + 3600_000).toISOString() })
+}
+
+// token: the session token to send (null = none); defaults to the one for payload.role
+async function api(action: string, payload: Record<string, unknown> = {}, token: string | null = TOKENS[String(payload.role ?? 'member')]) {
   const r = await fetch(BASE, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ role: 'member', action, ...payload }),
   })
   const text = await r.text()
@@ -403,7 +417,7 @@ if (!storageIsLocal) {
   console.log(`  (skipped file storage tests: backend is not on STORAGE_DRIVER=local — probe returned ${probe.status})`)
 } else {
   const upload = (bucket: string, name: string | null, body: string, type = 'text/plain') => fetch(`${BASE}/files/${bucket}`, {
-    method: 'POST', headers: { 'Content-Type': type, ...(name === null ? {} : { 'x-file-name': encodeURIComponent(name) }) }, body,
+    method: 'POST', headers: { 'Content-Type': type, Authorization: `Bearer ${TOKENS.member}`, ...(name === null ? {} : { 'x-file-name': encodeURIComponent(name) }) }, body,
   })
   const up = await upload('documents', `${MARK} 报告.txt`, 'hello 文件')
   const upj = await up.json()
@@ -517,7 +531,11 @@ const TID = String(tn.id)
 await dbInsert('tenants', { name: 'Master', slug: `${MARK}-master` })
 const memberEmail = `${MARK}@member.test`, strangerEmail = `${MARK}@stranger.test`
 await dbInsert('tenant_users', { email: memberEmail, tenant_id: TID, role: 'admin' })
-await dbInsert('otp_requests', [{ email: memberEmail, code: '123456' }, { email: strangerEmail, code: '654321' }])
+// codes are stored as sha256("<email>:<code>")
+await dbInsert('otp_requests', [
+  { email: memberEmail, code: await sha256Hex(`${memberEmail}:123456`) },
+  { email: strangerEmail, code: await sha256Hex(`${strangerEmail}:654321`) },
+])
 const vKnown = await api('verify_otp', { email: memberEmail, code: '123456' })
 check('verify_otp: a registered email gets its tenant and role', vKnown.json.ok === true && vKnown.json.role === 'admin' && vKnown.json.tenant_id === TID, vKnown.json)
 const vStranger = await api('verify_otp', { email: strangerEmail, code: '654321' })
@@ -540,11 +558,74 @@ const tnRow = await dbGet('tenants', 'active,slug', { id: `eq.${TID}` })
 check('update_tenant: toggles active, ignores fields outside its allowlist', utn.json.ok === true && tnRow[0]?.active === false && tnRow[0]?.slug === `${MARK}-t`, tnRow)
 const newUser = `${MARK}@new.test`
 const auMaster = await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser, user_role: 'master' })
-check('add_tenant_user: user_role "master" → 400, nothing stored', auMaster.status === 400 && (await dbGet('tenant_users', 'id', { email: `eq.${newUser}` })).length === 0, auMaster.json)
+check('add_tenant_user: user_role "master" → 400 (for the role), nothing stored',
+  auMaster.status === 400 && String(auMaster.json.error).includes('user_role') && (await dbGet('tenant_users', 'id', { email: `eq.${newUser}` })).length === 0, auMaster.json)
+// a non-master cannot reach another tenant by naming it: its tenant_id is replaced by its own
+const memberTenantPin = await api('whoami', { tenant_id: TID })
+check('a non-master session ignores tenant_id in the body', memberTenantPin.json.tenant_id === null, memberTenantPin.json)
 await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser })
 await api('add_tenant_user', { role: 'master', tenant_id: TID, email: newUser, user_role: 'admin' })
 const auRows = await dbGet('tenant_users', 'role', { email: `eq.${newUser}` })
 check("add_tenant_user: defaults to member (not the caller's role), repeat call updates the role", auRows.length === 1 && auRows[0].role === 'admin', auRows)
+
+// ── 15. authentication ─────────────────────────────────────────────────
+console.log('\n[15] authentication')
+const noTok = await api('agent_crud', { method: 'list' }, null)
+const badTok = await api('agent_crud', { method: 'list' }, 'not-a-real-token')
+check('no token → 401; unknown token → 401', noTok.status === 401 && badTok.status === 401, { noTok: noTok.status, badTok: badTok.status })
+const forged = await api('list_tenants', { role: 'master' }, TOKENS.member)
+check('member token with role:"master" in the body → still 403', forged.status === 403, forged.json)
+const whoAdmin = await api('whoami', { role: 'admin' })
+check('whoami returns the session identity', whoAdmin.json.role === 'admin' && whoAdmin.json.email === `${MARK}-admin@session.test`, whoAdmin.json)
+const loginWho = await api('whoami', {}, vKnown.json.token)
+check('verify_otp returns a session token that works', typeof vKnown.json.token === 'string' && loginWho.status === 200 && loginWho.json.email === memberEmail && loginWho.json.role === 'admin', loginWho.json)
+
+const expTok = `${MARK}-expired-${crypto.randomUUID()}`
+await dbInsert('sessions', { token_hash: await sha256Hex(expTok), email: `${MARK}-exp@session.test`, role: 'master', expires_at: new Date(Date.now() - 1000).toISOString() })
+check('expired session → 401', (await api('agent_crud', { method: 'list' }, expTok)).status === 401)
+const outTok = `${MARK}-logout-${crypto.randomUUID()}`
+await dbInsert('sessions', { token_hash: await sha256Hex(outTok), email: `${MARK}-out@session.test`, role: 'member', expires_at: new Date(Date.now() + 3600_000).toISOString() })
+const whoBefore = (await api('whoami', {}, outTok)).status
+await api('logout', {}, outTok)
+const whoAfter = (await api('whoami', {}, outTok)).status
+check('logout revokes the token', whoBefore === 200 && whoAfter === 401, { whoBefore, whoAfter })
+const upNoTok = await fetch(`${BASE}/files/documents`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'x-file-name': 'a.txt' }, body: 'x' })
+await upNoTok.body?.cancel()
+check('file upload without a token → 401', upNoTok.status === 401, upNoTok.status)
+
+if (Deno.env.get('OTP_DEV_ECHO') === 'true') {
+  const otpUser = `${MARK}@otp.test`
+  await dbInsert('tenant_users', { email: otpUser, tenant_id: TID, role: 'member' })
+  const s1 = await api('send_otp', { email: otpUser.toUpperCase() }, null)
+  const s2 = await api('send_otp', { email: otpUser }, null)
+  const otpRows = await dbGet('otp_requests', 'code', { email: `eq.${otpUser}` })
+  check('send_otp: no token needed, email lower-cased, code stored hashed, 2nd request within 60 s → 429',
+    s1.status === 200 && s2.status === 429 && otpRows.length === 1 && /^[0-9a-f]{64}$/.test(otpRows[0].code), { s1: s1.json, s2: s2.status, otpRows })
+  const unknownOtp = await api('send_otp', { email: `${MARK}@nobody.test` }, null)
+  check('send_otp for an unregistered email: same ok response, no code created',
+    unknownOtp.json.ok === true && (await dbGet('otp_requests', 'id', { email: `eq.${MARK}@nobody.test` })).length === 0, unknownOtp.json)
+} else {
+  console.log('  (skipped send_otp tests: run with OTP_DEV_ECHO=true in the test env, e.g. --env-file=local/.env)')
+}
+const lockEmail = `${MARK}@lock.test`
+await dbInsert('tenant_users', { email: lockEmail, tenant_id: TID, role: 'member' })
+await dbInsert('otp_requests', { email: lockEmail, code: await sha256Hex(`${lockEmail}:111111`) })
+const wrongTries: unknown[] = []
+for (let i = 0; i < 5; i++) wrongTries.push((await api('verify_otp', { email: lockEmail, code: '000000' }, null)).json.error)
+const afterLock = await api('verify_otp', { email: lockEmail, code: '111111' }, null)
+check('5 wrong codes use the code up — the right code then fails', afterLock.json.ok !== true && !afterLock.json.token, { wrongTries, afterLock: afterLock.json })
+
+const INTERNAL = Deno.env.get('ORCH_INTERNAL_SECRET')
+if (INTERNAL) {
+  const internalCall = (secret: string) => fetch(BASE, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-orch-internal': secret }, body: JSON.stringify({ action: 'list_tenants' }) })
+  const okCall = await internalCall(INTERNAL)
+  const okJson = await okCall.json()
+  const wrongCall = await internalCall('wrong-secret')
+  await wrongCall.body?.cancel()
+  check('internal secret header acts as a master caller; a wrong secret → 401', okCall.status === 200 && okJson.ok === true && wrongCall.status === 401, { ok: okCall.status, wrong: wrongCall.status })
+} else {
+  console.log('  (skipped internal-secret test: ORCH_INTERNAL_SECRET not in the test env)')
+}
 
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
@@ -558,6 +639,7 @@ await dbDelete('tenant_users', { email: `like.${MARK}*` })
 await dbDelete('otp_requests', { email: `like.${MARK}*` })
 await dbDelete('tenants', { name: `like.${MARK}*` })
 await dbDelete('tenants', { slug: `like.${MARK}*` })
+await dbDelete('sessions', { email: `like.${MARK}*` })
 await dbDelete('direct_messages', { content: `like.${MARK}*` })   // before staff: messages reference staff
 await dbDelete('staff', { name: `like.${MARK}*` })
 await dbDelete('conversations', { session_id: `eq.${MARK}` })

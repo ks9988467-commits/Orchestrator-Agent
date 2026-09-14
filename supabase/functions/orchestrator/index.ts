@@ -151,7 +151,7 @@ async function executeTaskSteps(taskId: string, providers: ProviderRow[], defaul
     setTimeout(() => {
       fetch(SELF_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: taskId })
       }).catch(() => {})
     }, 1000)
@@ -186,6 +186,9 @@ const CACHE_TTL = 60_000 // 60 s
 // ── Per-request tenant context (reset each request) ──────────────────
 let _reqTenantId: string | null = null
 let _reqIsMaster = false
+let _reqRole = 'member'
+let _reqEmail = ''
+let _reqAuthHash = ''              // SHA-256 of the caller's session token (for logout)
 // ── Per-request LLM context (for use inside executeTool) ─────────────
 let _reqProviders: ProviderRow[] = []
 let _reqAgents: AgentRow[] = []
@@ -199,6 +202,51 @@ let _reqDelegationContext = ''   // accumulated context from previous delegation
 function tenantFilters(extra: Record<string,string> = {}): Record<string,string> {
   if (!_reqIsMaster && _reqTenantId) return { ...extra, tenant_id: `eq.${_reqTenantId}` }
   return extra
+}
+
+// ── Authentication helpers ───────────────────────────────────────────
+const INTERNAL_SECRET = Deno.env.get('ORCH_INTERNAL_SECRET') || ''
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function randomToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
+// Emails that log in as master (MASTER_EMAILS, comma-separated), lower-cased
+function masterEmailList(): string[] {
+  return (Deno.env.get('MASTER_EMAILS') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+}
+
+type AuthContext =
+  | { kind: 'internal' }
+  | { kind: 'session'; email: string; tenantId: string | null; role: string; tokenHash: string }
+
+// Who is calling: a backend-internal caller (x-orch-internal header = ORCH_INTERNAL_SECRET —
+// self-invokes and schedulers) or a logged-in user (Authorization: Bearer <session token>).
+// null = not authenticated.
+async function authenticate(req: Request): Promise<AuthContext | null> {
+  const internal = req.headers.get('x-orch-internal') || ''
+  if (INTERNAL_SECRET && internal && constantTimeEqual(internal, INTERNAL_SECRET)) return { kind: 'internal' }
+  const m = (req.headers.get('authorization') || '').match(/^Bearer\s+(\S+)$/i)
+  if (!m) return null
+  const tokenHash = await sha256Hex(m[1])
+  const rows = await dbGet('sessions', 'email,tenant_id,role',
+    { token_hash: `eq.${tokenHash}`, revoked_at: 'is.null', expires_at: `gt.${new Date().toISOString()}` }, undefined, 1)
+  if (!rows.length) return null
+  return { kind: 'session', email: String(rows[0].email), tenantId: rows[0].tenant_id ?? null, role: String(rows[0].role), tokenHash }
 }
 
 // Search text for an ilike filter, wrapped in `*` wildcards. `"` and `\` are
@@ -2082,6 +2130,7 @@ Deno.serve(async (req: Request) => {
     const decode = (s: string) => { try { return decodeURIComponent(s) } catch { return '' } }
     if (!BUCKETS.includes(bucket)) return json({ error: 'unknown bucket' }, 404)
     if (req.method === 'POST' && !rawName) {
+      if (!await authenticate(req)) return json({ error: 'unauthorized' }, 401)
       const original = decode(req.headers.get('x-file-name') || '')
       if (!original) return json({ error: 'x-file-name header required' }, 400)
       if (Number(req.headers.get('content-length') || 0) > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
@@ -2134,9 +2183,12 @@ Deno.serve(async (req: Request) => {
   try {
     const body = await req.json()
 
-    // Set per-request tenant context
-    _reqTenantId = (body.tenant_id as string) || null
-    _reqIsMaster = (body.role as string) === 'master'
+    // Per-request context. Identity is set by the authentication step below — never read from the body.
+    _reqTenantId = null
+    _reqIsMaster = false
+    _reqRole     = 'member'
+    _reqEmail    = ''
+    _reqAuthHash = ''
     _reqDelegated         = false
     _reqSessionId         = ''
     _reqDelegatedId       = ''
@@ -2172,6 +2224,41 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
+    // ── Authentication ───────────────────────────────────────────────
+    // Public: the OTP login actions (and the WhatsApp webhook above). Everything else needs a
+    // session token, or the internal secret for self-invokes and schedulers.
+    if (body.action !== 'send_otp' && body.action !== 'verify_otp') {
+      const auth = await authenticate(req)
+      if (!auth) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (auth.kind === 'internal') {
+        // Internal callers act across tenants unless they name one
+        _reqIsMaster = true
+        _reqRole     = 'master'
+        _reqTenantId = body.tenant_id ? String(body.tenant_id) : null
+      } else {
+        _reqTenantId = auth.tenantId
+        _reqRole     = auth.role
+        _reqIsMaster = auth.role === 'master'
+        _reqEmail    = auth.email
+        _reqAuthHash = auth.tokenHash
+        // Code that reads the session fields from the body sees the verified values. A
+        // non-master is pinned to its own tenant; a master may name the tenant it acts on
+        // (update_tenant / add_tenant_user use tenant_id for the target tenant).
+        if (auth.role !== 'master') body.tenant_id = auth.tenantId ?? undefined
+        body.role = auth.role
+      }
+    }
+
+    // ── Session: who am I / logout ───────────────────────────────────
+    if (body.action === 'whoami') {
+      const tRows = _reqTenantId ? await dbGet('tenants', 'name', { id: `eq.${_reqTenantId}` }, undefined, 1) : []
+      return new Response(JSON.stringify({ ok: true, email: _reqEmail, role: _reqRole, tenant_id: _reqTenantId, tenant_name: tRows[0]?.name ?? '' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    if (body.action === 'logout') {
+      if (_reqAuthHash) await dbPatchWhere('sessions', { token_hash: `eq.${_reqAuthHash}` }, { revoked_at: new Date().toISOString() })
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+
     // \u2500\u2500 List models action \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_models') {
       const { provider } = body
@@ -2192,11 +2279,26 @@ Deno.serve(async (req: Request) => {
 
     // \u2500\u2500 OTP: send \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'send_otp') {
-      const { email } = body
-      if (!email) return new Response(JSON.stringify({ error: 'email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const code = String(Math.floor(100000 + Math.random() * 900000))
-      // Store OTP (service key bypasses RLS)
-      await dbInsert('otp_requests', { email, code })
+      const email = String(body.email || '').trim().toLowerCase()
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return new Response(JSON.stringify({ error: 'valid email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Only emails that can log in get a code. The response is the same either way, so
+      // this cannot be used to find out which emails are registered.
+      const canLogIn = masterEmailList().includes(email) || (await dbGet('tenant_users', 'id', { email: `eq.${email}` }, undefined, 1)).length > 0
+      if (!canLogIn) return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Rate limit per email: one code a minute, five an hour
+      const hourAgo = new Date(Date.now() - 3600_000).toISOString()
+      const recent = await dbGet('otp_requests', 'created_at', { email: `eq.${email}`, created_at: `gte.${hourAgo}` }, 'created_at.desc', 5) as { created_at: string }[]
+      if (recent.length >= 5 || (recent[0] && Date.now() - Date.parse(recent[0].created_at) < 60_000)) {
+        return new Response(JSON.stringify({ error: '请求太频繁，请稍后再试' }), { status: 429, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0')
+      // Only a hash of the code is stored
+      await dbInsert('otp_requests', { email, code: await sha256Hex(`${email}:${code}`) })
+      if (Deno.env.get('OTP_DEV_ECHO') === 'true') {
+        // Local development only: print the code instead of emailing it
+        console.log(`[OTP_DEV_ECHO] ${email}: ${code}`)
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
       // Send email via Gmail SMTP using fetch to SMTP2Go-like approach \u2014 use denomailer
       try {
         const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
@@ -2217,19 +2319,25 @@ Deno.serve(async (req: Request) => {
 
     // \u2500\u2500 OTP: verify \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'verify_otp') {
-      const { email, code } = body
+      const email = String(body.email || '').trim().toLowerCase()
+      const code = String(body.code || '').trim()
       if (!email || !code) return new Response(JSON.stringify({ error: 'email and code required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rows = await dbGet('otp_requests', '*', {
-        email: `eq.${email}`, code: `eq.${code}`, used: 'eq.false',
-        expires_at: `gte.${new Date().toISOString()}`,
-      }, 'id.desc', 1)
-      if (!rows?.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      // Mark used
-      await dbPatch('otp_requests', String(rows[0].id), { used: true })
+      // Only the newest unused, unexpired code for this email counts
+      const rows = await dbGet('otp_requests', 'id,code,attempts', {
+        email: `eq.${email}`, used: 'eq.false', expires_at: `gte.${new Date().toISOString()}`,
+      }, 'id.desc', 1) as { id: number; code: string; attempts: number }[]
+      if (!rows.length) return new Response(JSON.stringify({ ok: false, error: '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const otp = rows[0]
+      if (!constantTimeEqual(otp.code, await sha256Hex(`${email}:${code}`))) {
+        // Five wrong guesses use the code up
+        const attempts = (otp.attempts || 0) + 1
+        await dbPatch('otp_requests', String(otp.id), attempts >= 5 ? { attempts, used: true } : { attempts })
+        return new Response(JSON.stringify({ ok: false, error: attempts >= 5 ? '\u9519\u8BEF\u6B21\u6570\u8FC7\u591A\uFF0C\u8BF7\u91CD\u65B0\u83B7\u53D6\u9A8C\u8BC1\u7801' : '\u9A8C\u8BC1\u7801\u65E0\u6548\u6216\u5DF2\u8FC7\u671F' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
+      await dbPatch('otp_requests', String(otp.id), { used: true })
       // Master = an email listed in MASTER_EMAILS (comma-separated). Everyone else needs a
       // tenant_users row — an unknown email is refused, never treated as master.
-      const masterEmails = (Deno.env.get('MASTER_EMAILS') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
-      const isMasterEmail = masterEmails.includes(String(email).trim().toLowerCase())
+      const isMasterEmail = masterEmailList().includes(email)
       const tuRows = await dbGet('tenant_users', 'tenant_id,role', { email: `eq.${email}` })
       let tenantId: string|null = tuRows[0]?.tenant_id ?? null
       let role: string = tuRows[0]?.role === 'admin' ? 'admin' : 'member'
@@ -2244,12 +2352,17 @@ Deno.serve(async (req: Request) => {
         const tRows = await dbGet('tenants', 'name', { id: `eq.${tenantId}` })
         tenantName = tRows[0]?.name ?? ''
       }
-      return new Response(JSON.stringify({ ok: true, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Issue a session: the token goes to the browser once, only its hash is kept
+      const token = randomToken()
+      const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString()
+      const sIns = await dbInsert('sessions', { token_hash: await sha256Hex(token), email, tenant_id: tenantId, role, expires_at: expiresAt })
+      if (!sIns.ok) return new Response(JSON.stringify({ ok: false, error: '登录失败，请重试' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ ok: true, token, expires_at: expiresAt, tenant_id: tenantId, role, tenant_name: tenantName, email }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_tenants') {
-      // Master check. _reqIsMaster still comes from the request body until backend session auth lands.
+      // Master check (_reqIsMaster comes from the authenticated session)
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.asc')
       const result = await Promise.all((tenants as Record<string,unknown>[]).map(async t => {
@@ -2468,7 +2581,7 @@ Return ONLY a valid JSON array, no markdown:
       // Kick off step execution immediately (fire-and-forget self-invoke)
       fetch(SELF_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute_task_step', task_id: String(task.id) })
       }).catch(() => {})
       return new Response(JSON.stringify({ ok:true, task }), { headers:{...CORS,'Content-Type':'application/json'} })
@@ -3542,7 +3655,8 @@ Return ONLY a valid JSON array, no markdown:
       if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       // The new user's role is `user_role`: `role` is the caller's own session role.
       // master is granted only through MASTER_EMAILS, never stored here.
-      const { tenant_id, email } = body
+      const tenant_id = body.tenant_id
+      const email = String(body.email || '').trim().toLowerCase()   // login lookups are lower-case
       const userRole = String(body.user_role || 'member')
       if (!tenant_id || !email) return new Response(JSON.stringify({ error: 'tenant_id and email required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       if (!['admin', 'member'].includes(userRole)) return new Response(JSON.stringify({ error: 'user_role must be admin or member' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
