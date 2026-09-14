@@ -260,7 +260,8 @@ function testComingSoon(service) {
 }
 
 function copyWAUrl(btn) {
-  const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook'
+  // The orchestrator itself handles WhatsApp webhooks (GET verification + POST messages)
+  const url = EDGE_URL
   navigator.clipboard.writeText(url)
     .then(() => {
       const orig = btn.textContent
@@ -371,7 +372,8 @@ async function testLarkWebhook() {
   else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'Lark 测试失败', 'error') }
 }
 function copyLarkWebhook(btn) {
-  const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/lark-webhook'
+  const url = siblingFunctionUrl('lark-webhook')
+  if (!url) { toast('当前后端没有 Lark 接收地址（lark-webhook 是单独部署的 Edge Function）', 'error'); return }
   navigator.clipboard?.writeText(url).then(() => { btn.textContent='✓ 已复制'; setTimeout(()=>btn.textContent='复制接收 URL',2000) })
     .catch(() => prompt('请手动复制 Lark 接收 URL：', url))
 }
@@ -470,7 +472,7 @@ function ugcShowTab(tab, el) {
 // ── Settings ──
 function ugcBuildSettings(el) {
   var html = '<div class="ugc-section-title">⚙️ 平台设定</div>'
-    + '<div class="ugc-section-sub">每个平台的写作规则存入 Supabase，多人共用。</div>'
+    + '<div class="ugc-section-sub">每个平台的写作规则存入数据库，多人共用。</div>'
   UGC_PLATFORMS.forEach(function(p) {
     var r = (_ugcRules && _ugcRules[p.v]) || UGC_DEFAULT_RULES[p.v] || {}
     html += '<div class="ugc-rule-card" id="ugcr-'+p.v+'">'

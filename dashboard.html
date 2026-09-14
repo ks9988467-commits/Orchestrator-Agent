@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -210,7 +209,7 @@
   '0 3 * * *',
   $$
     select net.http_post(
-      url := 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator',
+      url := '<span class="js-backend-url"></span>',
       headers := '{"Content-Type":"application/json"}'::jsonb,
       body := '{"action":"learn_gaps"}'::jsonb
     );
@@ -752,7 +751,7 @@
           <div class="chk-row"><input type="checkbox" id="iactive-whatsapp" onchange="toggleIntegration('whatsapp',this.checked)"><span>启用</span></div>
           <label class="lbl">Webhook URL（填入 Meta 后台）</label>
           <div class="irow">
-            <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:var(--ink-2);background:var(--bg-1)" value="https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator">
+            <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:var(--ink-2);background:var(--bg-1)" value="">
             <button class="show-btn" onclick="copyWAUrl(this)" style="white-space:nowrap">复制</button>
           </div>
           <label class="lbl">Phone Number ID</label>
@@ -843,7 +842,7 @@
           <p style="font-size:11px;color:var(--ink-5);margin:3px 0 12px;line-height:1.6">
             在 <a href="https://open.feishu.cn/app" target="_blank" style="color:#da0d15">飞书开放平台</a> 创建企业自建应用，将本系统的 Webhook URL 填入事件订阅：<br>
             <code style="font-size:10px;background:#f5f5f5;padding:2px 6px;border-radius:3px;color:#555">
-              https://ontumerafhimxvqtsijr.supabase.co/functions/v1/lark-webhook
+              <span class="js-lark-webhook-url"></span>
             </code>
           </p>
           <div style="display:flex;gap:8px;margin-bottom:8px">

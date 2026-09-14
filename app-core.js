@@ -47,26 +47,42 @@ async function verifyOtp() {
 }
 // ─────────────────────────────────────────────────────────────────────
 
-// ── Backend config (portable — decoupled from hardcoded Supabase) ──────
-// Default backend = Supabase Edge Function. To point at a LOCAL or self-hosted
-// server WITHOUT editing code, use either (checked in this order):
-//   1. window.ORCH_CONFIG = { backendUrl: 'http://localhost:8787/orchestrator' }
+// ── Backend config (portable) ─────────────────────────────────────────
+// The dashboard talks only to the backend — no direct database or storage access.
+// Default backend = the hosted Supabase Edge Function. To use a local or
+// self-hosted backend WITHOUT editing code, set either (checked in this order):
+//   1. window.ORCH_CONFIG = { backendUrl: 'http://localhost:8000' }
 //      (define it before app-core.js loads)
-//   2. localStorage.setItem('_orch_backend', 'http://localhost:8787/orchestrator')
-// Leave both unset to keep the current Supabase backend.
-const SUPABASE_URL  = 'https://ontumerafhimxvqtsijr.supabase.co'
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
-const DEFAULT_EDGE_URL = `${SUPABASE_URL}/functions/v1/orchestrator`
+//   2. localStorage.setItem('_orch_backend', 'http://localhost:8000')
+const DEFAULT_BACKEND_URL  = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator'
+// Public anon key the hosted Edge Function requires (Supabase checks it as a JWT).
+// Sent only to that default backend, never to a local or custom one.
+const DEFAULT_BACKEND_AUTH = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9udHVtZXJhZmhpbXh2cXRzaWpyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDA3MzksImV4cCI6MjA5MjYxNjczOX0.wkUyEzOd-9y1hOTg1ZMRE908IvzsT2O4qvDT_vg1UcI'
 function resolveBackendUrl() {
   try {
     if (window.ORCH_CONFIG && window.ORCH_CONFIG.backendUrl) return window.ORCH_CONFIG.backendUrl
     const override = localStorage.getItem('_orch_backend')
     if (override) return override
   } catch {}
-  return DEFAULT_EDGE_URL
+  return DEFAULT_BACKEND_URL
 }
 const EDGE_URL      = resolveBackendUrl()
-const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON)
+function backendAuthHeaders() {
+  return EDGE_URL === DEFAULT_BACKEND_URL ? { 'Authorization': 'Bearer ' + DEFAULT_BACKEND_AUTH } : {}
+}
+// URL of another function deployed next to the orchestrator (e.g. 'lark-webhook').
+// Only Edge Function style URLs (…/orchestrator) have siblings; null otherwise.
+function siblingFunctionUrl(name) {
+  return /\/orchestrator\/?$/.test(EDGE_URL) ? EDGE_URL.replace(/\/orchestrator\/?$/, '/' + name) : null
+}
+// Show the backend actually in use wherever the page displays its URL
+;(function fillBackendUrls() {
+  const wa = document.getElementById('wa-webhook-url')
+  if (wa) wa.value = EDGE_URL
+  document.querySelectorAll('.js-backend-url').forEach(el => { el.textContent = EDGE_URL })
+  const lark = siblingFunctionUrl('lark-webhook')
+  document.querySelectorAll('.js-lark-webhook-url').forEach(el => { el.textContent = lark || '（当前后端没有部署 lark-webhook）' })
+})()
 const AGENT_ICONS   = {chat:'💬', crm:'🤝', account:'📊', code:'💻', cpl:'💰', cpr:'🎯', frequency:'🔁', marketing:'📣'}
 const PROVIDER_LABELS = {anthropic:'Anthropic · Claude', openai:'OpenAI · GPT', google:'Google · Gemini'}
 
@@ -99,7 +115,7 @@ async function apiCall(action, payload = {}, options = {}) {
   try {
     const res = await fetch(EDGE_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
+      headers: { 'Content-Type': 'application/json', ...backendAuthHeaders() },
       body: JSON.stringify(body),
       signal: ctrl.signal
     });
@@ -125,7 +141,7 @@ async function apiCall(action, payload = {}, options = {}) {
 function apiRaw(payload) {
   return fetch(EDGE_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
+    headers: { 'Content-Type': 'application/json', ...backendAuthHeaders() },
     body: JSON.stringify(orchBody(payload)),
   })
 }
@@ -136,7 +152,7 @@ function apiRaw(payload) {
 async function uploadFile(bucket, file) {
   const res = await fetch(EDGE_URL.replace(/\/+$/, '') + '/files/' + bucket, {
     method: 'POST',
-    headers: { 'Content-Type': file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name), 'Authorization': 'Bearer ' + SUPABASE_ANON },
+    headers: { 'Content-Type': file.type || 'application/octet-stream', 'x-file-name': encodeURIComponent(file.name), ...backendAuthHeaders() },
     body: file,
   })
   const data = await res.json().catch(() => ({}))
