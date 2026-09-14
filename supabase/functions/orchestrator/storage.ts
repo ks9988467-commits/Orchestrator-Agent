@@ -22,6 +22,11 @@ if (DRIVER !== 'supabase' && DRIVER !== 'local') {
 if (DRIVER === 'local' && !SELF_URL) {
   throw new Error('STORAGE_DRIVER=local needs ORCH_SELF_URL (the URL file links are built from)')
 }
+// Download links are time-limited and HMAC-signed with the backend's internal secret
+const URL_SECRET = Deno.env.get('ORCH_INTERNAL_SECRET') || ''
+if (DRIVER === 'local' && !URL_SECRET) {
+  throw new Error('STORAGE_DRIVER=local needs ORCH_INTERNAL_SECRET (download links are signed with it)')
+}
 
 export const USE_LOCAL_STORAGE = DRIVER === 'local'
 export const BUCKETS = ['documents', 'review-files']
@@ -91,6 +96,47 @@ export async function readFile(bucket: string, name: string): Promise<Uint8Array
     if (e instanceof Deno.errors.NotFound) return null
     throw e
   }
+}
+
+async function hmacHex(message: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(URL_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message))
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// A time-limited download link for a stored file URL (as built by publicUrl).
+// Local driver: an HMAC-signed query the download route checks. Supabase driver:
+// Supabase's own signed URL — it only protects files if the bucket is private.
+// A URL that is not one of ours is returned unchanged.
+export async function signedUrl(url: string | null | undefined, ttlSeconds: number): Promise<string | null> {
+  if (!url) return url ?? null
+  for (const bucket of BUCKETS) {
+    const name = nameFromUrl(bucket, url)
+    if (!name) continue
+    if (USE_LOCAL_STORAGE) {
+      const exp = Math.floor(Date.now() / 1000) + ttlSeconds
+      return `${publicUrl(bucket, name)}?exp=${exp}&sig=${await hmacHex(`${bucket}/${name}:${exp}`)}`
+    }
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${bucket}/${name}`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: ttlSeconds }),
+    })
+    if (!r.ok) return url
+    const { signedURL } = await r.json() as { signedURL?: string }
+    return signedURL ? `${SUPABASE_URL}/storage/v1${signedURL}` : url
+  }
+  return url
+}
+
+// Local driver: is this download link's signature valid and unexpired?
+export async function verifySignedDownload(bucket: string, name: string, exp: string | null, sig: string | null): Promise<boolean> {
+  if (!URL_SECRET || !exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now() / 1000) return false
+  const expected = await hmacHex(`${bucket}/${name}:${exp}`)
+  if (expected.length !== sig.length) return false
+  let diff = 0
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i)
+  return diff === 0
 }
 
 // A missing file is not an error

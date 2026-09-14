@@ -2,7 +2,7 @@
 // Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
 // old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
-import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile } from './storage.ts'
+import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -247,6 +247,41 @@ async function authenticate(req: Request): Promise<AuthContext | null> {
     { token_hash: `eq.${tokenHash}`, revoked_at: 'is.null', expires_at: `gt.${new Date().toISOString()}` }, undefined, 1)
   if (!rows.length) return null
   return { kind: 'session', email: String(rows[0].email), tenantId: rows[0].tenant_id ?? null, role: String(rows[0].role), tokenHash }
+}
+
+// ── Role requirements ────────────────────────────────────────────────
+// Minimum role per action, or per action + method ('*' = any other method). Actions not
+// listed — including everything the dashboard never calls — need admin. Internal callers
+// count as master; chat messages (no action) are open to every logged-in user.
+const ROLE_RANK: Record<string, number> = { member: 1, admin: 2, master: 3 }
+const ACTION_ROLES: Record<string, string | Record<string, string>> = {
+  // everyday use
+  whoami: 'member', logout: 'member', home_summary: 'member', channel_metrics: 'member',
+  account_crud: 'member', lead_crud: 'member', ad_report_crud: 'member', data_entry_crud: 'member', analytics_crud: 'member',
+  staff_task_crud: 'member', direct_message_crud: 'member',
+  document_crud: 'member',                       // decide / delete / get also check the member's own rows
+  notify_doc_reviewers: 'member', notify_doc_decision: 'member',
+  list_kbs: 'member', count_kb_chunks: 'member', kb_ingest: 'member', kb_search: 'member',
+  list_workflows: 'member', list_workflow_runs: 'member', run_workflow: 'member',
+  list_agent_versions: 'member', learn: 'member', ugc_generate: 'member', ugc_get_rules: 'member',
+  // everyone reads, admins change
+  agent_crud: { list: 'member', '*': 'admin' },
+  agent_skill_crud: { list: 'member', '*': 'admin' },
+  agent_suggestion_crud: { list: 'member', mark_handled: 'member', '*': 'admin' },
+  staff_crud: { list: 'member', '*': 'admin' },
+  provider_config_crud: { list: 'member', '*': 'admin' },   // list returns no keys (sidebar status dots)
+  automation_crud: { list: 'member', get_logs: 'member', mark_read: 'member', unread_count: 'member', '*': 'admin' },
+  conversation_crud: { list: 'member', set_feedback: 'member', '*': 'admin' },
+  booking_crud: { list: 'member', create: 'member', '*': 'admin' },
+  // client (tenant) management
+  list_tenants: 'master', create_tenant: 'master', update_tenant: 'master', add_tenant_user: 'master', get_master_summary: 'master',
+}
+function requiredRole(action: string, method: string): string {
+  if (!action) return 'member'
+  const rule = ACTION_ROLES[action]
+  if (rule === undefined) return 'admin'
+  if (typeof rule === 'string') return rule
+  return rule[method] ?? rule['*'] ?? 'admin'
 }
 
 // Search text for an ilike filter, wrapped in `*` wildcards. `"` and `\` are
@@ -1836,7 +1871,7 @@ async function extractFileData(
   } else {
     // Excel / CSV: fetch raw text
     try {
-      const r = await fetch(fileUrl)
+      const r = await fetch(await signedUrl(fileUrl, 300) || fileUrl)   // our own files need a signed link
       const raw = await r.text()
       content.push({ type: 'text', text: `文件内容（${fileName}）：\n${raw.slice(0, 8000)}` })
     } catch { content.push({ type: 'text', text: `文件：${fileName}（无法读取内容）` }) }
@@ -2150,6 +2185,9 @@ Deno.serve(async (req: Request) => {
     if (req.method === 'GET' && rawName && USE_LOCAL_STORAGE) {
       const name = decode(rawName)
       if (!isValidName(name)) return json({ error: 'not found' }, 404)
+      // Only signed, unexpired links (the backend signs file_url when it returns one)
+      const q = new URL(req.url).searchParams
+      if (!await verifySignedDownload(bucket, name, q.get('exp'), q.get('sig'))) return json({ error: '链接无效或已过期' }, 403)
       const data = await readFile(bucket, name)
       if (!data) return json({ error: 'not found' }, 404)
       const type = contentTypeFor(name)
@@ -2246,6 +2284,11 @@ Deno.serve(async (req: Request) => {
         // (update_tenant / add_tenant_user use tenant_id for the target tenant).
         if (auth.role !== 'master') body.tenant_id = auth.tenantId ?? undefined
         body.role = auth.role
+      }
+      // Minimum role for this action (ACTION_ROLES)
+      const need = requiredRole(body.action ? String(body.action) : '', String(body.method || 'list'))
+      if ((ROLE_RANK[_reqRole] ?? 0) < ROLE_RANK[need]) {
+        return new Response(JSON.stringify({ error: '没有权限执行此操作' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
     }
 
@@ -3216,6 +3259,7 @@ Return ONLY a valid JSON array, no markdown:
         if (body.search)    filt['file_name'] = `ilike.${likePattern(body.search)}`
         if (body.file_type) filt['file_type'] = `eq.${String(body.file_type)}`
         const { rows, count } = await dbGetPage('data_entries', '*', tenantFilters(filt), 'created_at.desc', 50, 0)
+        for (const r of rows) r.file_url = await signedUrl(r.file_url, 3600)
         return new Response(JSON.stringify({ ok: true, rows, count }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3377,16 +3421,19 @@ Return ONLY a valid JSON array, no markdown:
         const filt: Record<string, string> = {}
         if (body.status) filt['status'] = `eq.${String(body.status)}`
         let docs = await dbGet('documents', DOC_COLS, tenantFilters(filt), 'created_at.desc', 100) as Record<string, unknown>[]
-        // Members see only documents they uploaded or review (viewer_email = the session email)
-        const viewer = String(body.viewer_email || '').trim()
-        if (body.role === 'member' && viewer) {
+        // Members see only documents they uploaded or review
+        const viewer = _reqEmail
+        if (_reqRole === 'member') {
           const mine = await dbGet('document_reviewers', 'document_id', { contact: `eq.${viewer}` }) as { document_id: string }[]
           const reviewing = new Set(mine.map(r => r.document_id))
           docs = docs.filter(d => d.uploaded_by === viewer || reviewing.has(String(d.id)))
         }
         const ids = docs.map(d => String(d.id))
         const revs = ids.length ? await dbGet('document_reviewers', 'document_id,decision', { document_id: `in.(${ids.join(',')})` }) as { document_id: string; decision: string | null }[] : []
-        for (const d of docs) d.decisions = revs.filter(r => r.document_id === d.id).map(r => r.decision)
+        for (const d of docs) {
+          d.decisions = revs.filter(r => r.document_id === d.id).map(r => r.decision)
+          d.file_url = await signedUrl(d.file_url as string | null, 3600)
+        }
         return new Response(JSON.stringify({ ok: true, documents: docs }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'get') {
@@ -3395,6 +3442,12 @@ Return ONLY a valid JSON array, no markdown:
         const [doc] = await dbGet('documents', DOC_COLS, tenantFilters({ id: `eq.${id}` }), undefined, 1)
         if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
         const reviewers = await dbGet('document_reviewers', 'id,document_id,name,contact,decision,comment,decided_at,created_at', { document_id: `eq.${id}` }, 'created_at.asc')
+        // Same rule as list: a member sees only documents they uploaded or review
+        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail
+            && !reviewers.some((r: { contact: string | null }) => String(r.contact || '').trim().toLowerCase() === _reqEmail)) {
+          return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        doc.file_url = await signedUrl(doc.file_url, 3600)
         return new Response(JSON.stringify({ ok: true, document: doc, reviewers }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'create') {
@@ -3409,7 +3462,8 @@ Return ONLY a valid JSON array, no markdown:
           title, notes: String(d.notes ?? '').trim() || null,
           file_url: d.file_url || null, file_name: d.file_name || null, file_type: d.file_type || null,
           file_size: d.file_size ? Number(d.file_size) : null, status: 'pending',
-          tenant_id: _reqTenantId, uploaded_by: d.uploaded_by || null,
+          // the uploader is the logged-in user; only internal callers may name one
+          tenant_id: _reqTenantId, uploaded_by: _reqEmail || d.uploaded_by || null,
         })
         const ins = await dbInsert('document_reviewers', reviewers.map(r => ({ document_id: doc.id, ...r })))
         if (!ins.ok) {
@@ -3422,8 +3476,14 @@ Return ONLY a valid JSON array, no markdown:
         const reviewerId = String(body.reviewer_id || '')
         const decision = String(body.decision || '')
         if (!reviewerId || !['approved', 'rejected'].includes(decision)) return new Response(JSON.stringify({ error: 'reviewer_id and decision (approved | rejected) required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        const [rev] = await dbGet('document_reviewers', 'id,document_id', { id: `eq.${reviewerId}` }, undefined, 1)
+        const [rev] = await dbGet('document_reviewers', 'id,document_id,contact', { id: `eq.${reviewerId}` }, undefined, 1)
         if (!rev) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        const [revDoc] = await dbGet('documents', 'id', tenantFilters({ id: `eq.${rev.document_id}` }), undefined, 1)
+        if (!revDoc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        // A member may only record the decision on their own reviewer row
+        if (_reqRole === 'member' && String(rev.contact || '').trim().toLowerCase() !== _reqEmail) {
+          return new Response(JSON.stringify({ error: '只能填写你自己的审批' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
         await dbPatch('document_reviewers', reviewerId, { decision, comment: String(body.comment ?? '').trim() || null, decided_at: new Date().toISOString() })
         const all = await dbGet('document_reviewers', 'decision', { document_id: `eq.${rev.document_id}` }) as { decision: string | null }[]
         const approved = all.filter(r => r.decision === 'approved').length
@@ -3435,8 +3495,12 @@ Return ONLY a valid JSON array, no markdown:
       if (m === 'delete') {
         const id = String(body.id || '')
         if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        const [doc] = await dbGet('documents', 'id,file_url', tenantFilters({ id: `eq.${id}` }), undefined, 1)
+        const [doc] = await dbGet('documents', 'id,file_url,uploaded_by', tenantFilters({ id: `eq.${id}` }), undefined, 1)
         if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        // A member may only delete documents they uploaded
+        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail) {
+          return new Response(JSON.stringify({ error: '只能删除你自己上传的文件' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
         await dbDelete('documents', { id: `eq.${id}` })   // reviewers go with it (ON DELETE CASCADE)
         // Best effort: the record is already gone, and a leftover file is harmless
         const name = doc.file_url ? nameFromUrl('documents', String(doc.file_url)) : null
@@ -3749,6 +3813,8 @@ Return ONLY a valid JSON array, no markdown:
           status: 'pending',
         })
 
+        // Reviewers open the file without logging in: a signed link valid for 7 days
+        const reviewLink = file_url ? await signedUrl(String(file_url), 7 * 24 * 3600) : null
         // Email notification if reviewer has email
         let notified = false
         if (route?.reviewer_email) {
@@ -3756,7 +3822,7 @@ Return ONLY a valid JSON array, no markdown:
             const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
             const client = new SmtpClient()
             await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
-            const fileInfo = file_url ? `\n文件链接：${file_url}` : ''
+            const fileInfo = reviewLink ? `\n文件链接：${reviewLink}` : ''
             await client.send({
               from: 'Orchestrator Agent <ks9988467@gmail.com>',
               to: route.reviewer_email,
@@ -3775,7 +3841,7 @@ Return ONLY a valid JSON array, no markdown:
             await sendLarkWebhook(lark.webhook_url,
               `📋 新文件审核请求 — ${department}`,
               `**文件：** ${file_name}\n**提交人：** ${submitted_by || 'unknown'}\n${summary ? '**摘要：** ' + summary : ''}`,
-              file_url as string|undefined)
+              reviewLink ?? undefined)
             if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
           }
         } catch { /* non-fatal */ }
@@ -3985,6 +4051,7 @@ Return ONLY a valid JSON array, no markdown:
       if (sf) filters['status'] = `eq.${sf}`
       if (df) filters['department'] = `eq.${df}`
       const rows = await dbGet('reviews', 'id,file_name,file_type,file_url,department,status,submitted_by,summary,classification_reason,key_info,review_notes,created_at,reviewed_at,notified_at', filters, 'created_at.desc', 50)
+      for (const r of rows) r.file_url = await signedUrl(r.file_url, 3600)
       return new Response(JSON.stringify({ reviews: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -4411,6 +4478,8 @@ Return ONLY a valid JSON array, no markdown:
               submitted_by, submitted_by_staff_id, reviewer_route_id: route?.id ?? null, status: 'pending',
             })
 
+            // Reviewers open the file without logging in: a signed link valid for 7 days
+            const reviewLink = await signedUrl(file_url, 7 * 24 * 3600) ?? file_url
             // Send email notification
             let notified = false
             if (route?.reviewer_email) {
@@ -4422,7 +4491,7 @@ Return ONLY a valid JSON array, no markdown:
                   from: 'Orchestrator Agent <ks9988467@gmail.com>',
                   to: route.reviewer_email,
                   subject: `[审核请求] ${department} - ${file_name}`,
-                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${file_url}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
+                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${reviewLink}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
                 })
                 await client.close()
                 await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
@@ -4436,7 +4505,7 @@ Return ONLY a valid JSON array, no markdown:
                 await sendLarkWebhook(lark.webhook_url,
                   `📋 新文件审核请求 — ${department}`,
                   `**文件：** ${file_name}\n**提交人：** ${submitted_by}\n${summary ? '**摘要：** ' + summary : ''}${note ? '\n**备注：** ' + note : ''}`,
-                  String(file_url))
+                  reviewLink)
                 if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
               }
             } catch { /* non-fatal */ }

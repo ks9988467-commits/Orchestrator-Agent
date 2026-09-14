@@ -36,10 +36,11 @@ async function sha256Hex(s: string): Promise<string> {
 // Every request needs a session token. Test sessions are inserted directly, one per role;
 // a payload's `role` picks the token to use. The backend ignores `role` in the body — the
 // body still carries role:'member' like the dashboard used to, to show that.
+// ('other' is a second member, for "someone else's" checks)
 const TOKENS: Record<string, string> = {}
-for (const r of ['member', 'admin', 'master']) {
-  TOKENS[r] = `${MARK}-${r}-${crypto.randomUUID()}`
-  await dbInsert('sessions', { token_hash: await sha256Hex(TOKENS[r]), email: `${MARK}-${r}@session.test`, role: r, expires_at: new Date(Date.now() + 3600_000).toISOString() })
+for (const [who, r] of [['member', 'member'], ['admin', 'admin'], ['master', 'master'], ['other', 'member']]) {
+  TOKENS[who] = `${MARK}-${who}-${crypto.randomUUID()}`
+  await dbInsert('sessions', { token_hash: await sha256Hex(TOKENS[who]), email: `${MARK}-${who}@session.test`, role: r, expires_at: new Date(Date.now() + 3600_000).toISOString() })
 }
 
 // token: the session token to send (null = none); defaults to the one for payload.role
@@ -59,16 +60,16 @@ async function api(action: string, payload: Record<string, unknown> = {}, token:
 // ── 1. agent_crud ──────────────────────────────────────────────────────
 console.log('\n[1] agent_crud')
 await dbInsert('agents', { id: `${MARK}_a`, name: 'Smoke Agent', active: true })
-const al = await api('agent_crud', { method: 'list' })
+const al = await api('agent_crud', { role: 'admin', method: 'list' })
 check('list includes the agent', al.status === 200 && al.json.agents?.some((a: { id: string }) => a.id === `${MARK}_a`), al.json)
-const au = await api('agent_crud', { method: 'update', id: `${MARK}_a`, data: { provider: 'openai', model: '', uses_tools: 1, bogus: 'x' } })
+const au = await api('agent_crud', { role: 'admin', method: 'update', id: `${MARK}_a`, data: { provider: 'openai', model: '', uses_tools: 1, bogus: 'x' } })
 check('update returns ok', au.status === 200 && au.json.ok === true, au.json)
 const ag = await dbGet('agents', 'provider,model,uses_tools,updated_at', { id: `eq.${MARK}_a` })
 check("update: provider set, '' model → null, uses_tools → boolean, updated_at set, unknown field ignored",
   ag[0]?.provider === 'openai' && ag[0]?.model === null && ag[0]?.uses_tools === true && !!ag[0]?.updated_at, ag)
-const an = await api('agent_crud', { method: 'update', data: { name: 'x' } })
+const an = await api('agent_crud', { role: 'admin', method: 'update', data: { name: 'x' } })
 check('update without id → 400', an.status === 400, an.json)
-const ae = await api('agent_crud', { method: 'update', id: `${MARK}_a`, data: { bogus: 1 } })
+const ae = await api('agent_crud', { role: 'admin', method: 'update', id: `${MARK}_a`, data: { bogus: 1 } })
 check('update with no allowed fields → 400', ae.status === 400, ae.json)
 
 // ── 2. provider_config_crud ────────────────────────────────────────────
@@ -78,19 +79,19 @@ if (existingProvider.length) {
   console.log('  (skipped key tests: a real openrouter row exists)')
 } else {
   const FAKE_KEY = 'sk-smoke-0123456789abcd'
-  const ps = await api('provider_config_crud', { method: 'save', provider: 'openrouter', api_key: FAKE_KEY, model: ' m1 ', active: true })
+  const ps = await api('provider_config_crud', { role: 'admin', method: 'save', provider: 'openrouter', api_key: FAKE_KEY, model: ' m1 ', active: true })
   check('save returns ok', ps.status === 200 && ps.json.ok === true, ps.json)
-  const pl = await api('provider_config_crud', { method: 'list' })
+  const pl = await api('provider_config_crud', { role: 'admin', method: 'list' })
   const row = pl.json.providers?.find((p: { provider: string }) => p.provider === 'openrouter')
   check('list: has_key true, key_hint = last 4 chars, model trimmed', row?.has_key === true && row?.key_hint === 'abcd' && row?.model === 'm1', row)
   check('list response never contains the raw key', !pl.text.includes(FAKE_KEY), '(raw key present in response)')
-  await api('provider_config_crud', { method: 'save', provider: 'openrouter', active: false })
+  await api('provider_config_crud', { role: 'admin', method: 'save', provider: 'openrouter', active: false })
   const s1 = await dbGet('provider_config', 'api_key,active,model', { provider: 'eq.openrouter' })
   check('partial save (active only) keeps api_key and model', s1[0]?.api_key === FAKE_KEY && s1[0]?.active === false && s1[0]?.model === 'm1', s1)
-  await api('provider_config_crud', { method: 'save', provider: 'openrouter', api_key: '   ' })
+  await api('provider_config_crud', { role: 'admin', method: 'save', provider: 'openrouter', api_key: '   ' })
   const s2 = await dbGet('provider_config', 'api_key', { provider: 'eq.openrouter' })
   check('blank api_key keeps the stored key', s2[0]?.api_key === FAKE_KEY, s2)
-  const bad = await api('provider_config_crud', { method: 'save', provider: 'nope' })
+  const bad = await api('provider_config_crud', { role: 'admin', method: 'save', provider: 'nope' })
   check('unknown provider → 400', bad.status === 400, bad.json)
   await dbDelete('provider_config', { provider: 'eq.openrouter' })
 }
@@ -98,10 +99,10 @@ const existingDefault = await dbGet('user_prefs', 'value', { key: 'eq.default_pr
 if (existingDefault.length) {
   console.log('  (skipped set_default: a real default_provider exists)')
 } else {
-  const sd = await api('provider_config_crud', { method: 'set_default', provider: 'google' })
-  const pl2 = await api('provider_config_crud', { method: 'list' })
+  const sd = await api('provider_config_crud', { role: 'admin', method: 'set_default', provider: 'google' })
+  const pl2 = await api('provider_config_crud', { role: 'admin', method: 'list' })
   check('set_default, then list returns it', sd.status === 200 && pl2.json.default_provider === 'google', pl2.json)
-  const sdBad = await api('provider_config_crud', { method: 'set_default', provider: 'x' })
+  const sdBad = await api('provider_config_crud', { role: 'admin', method: 'set_default', provider: 'x' })
   check('set_default with unknown provider → 400', sdBad.status === 400, sdBad.json)
   await dbDelete('user_prefs', { key: 'eq.default_provider' })
 }
@@ -111,22 +112,22 @@ console.log('\n[3] integration_crud')
 const svc = `${MARK}_svc`
 const SECRET = 'supersecret-token-9876'
 await api('integration_crud', {
-  method: 'save', service: svc, active: true,
+  role: 'admin', method: 'save', service: svc, active: true,
   credentials: { api_key: SECRET, password: 'pw123', host: 'smtp.example.com', webhook_url: 'https://hooks.example/abc' },
 })
-const il = await api('integration_crud', { method: 'list' })
+const il = await api('integration_crud', { role: 'admin', method: 'list' })
 const creds = (il.json.integrations?.find((i: { service: string }) => i.service === svc)?.credentials || {}) as Record<string, string>
 check('list masks long secrets, keeping the last 4 chars', creds.api_key === '••••••••9876', creds)
 check('list fully masks short secrets', creds.password === '••••••••', creds)
 check('list leaves non-secret fields and webhook_url visible', creds.host === 'smtp.example.com' && creds.webhook_url === 'https://hooks.example/abc', creds)
 check('list response never contains the raw secrets', !il.text.includes(SECRET) && !il.text.includes('pw123'), '(secret present in response)')
 // the dashboard re-submits every input, masked values included
-await api('integration_crud', { method: 'save', service: svc, credentials: { ...creds, host: 'smtp.changed.com' } })
+await api('integration_crud', { role: 'admin', method: 'save', service: svc, credentials: { ...creds, host: 'smtp.changed.com' } })
 const st = await dbGet('api_integrations', 'credentials,active', { service: `eq.${svc}` })
 const sc = (st[0]?.credentials || {}) as Record<string, string>
 check('re-saving masked values keeps stored secrets and applies real edits',
   sc.api_key === SECRET && sc.password === 'pw123' && sc.host === 'smtp.changed.com' && st[0]?.active === true, st)
-const noSvc = await api('integration_crud', { method: 'save' })
+const noSvc = await api('integration_crud', { role: 'admin', method: 'save' })
 check('save without service → 400', noSvc.status === 400, noSvc.json)
 await dbDelete('api_integrations', { service: `eq.${svc}` })
 
@@ -138,48 +139,48 @@ await dbInsert('conversations', [
   { session_id: MARK, role: 'assistant', content: 'a1', agent: agentId, cost_usd: 0.0012, tokens_in: 10, tokens_out: 20 },
   { session_id: MARK, role: 'assistant', content: 'a2', agent: agentId },
 ])
-const cl = await api('conversation_crud', { method: 'list', agent: agentId, limit: 2 })
+const cl = await api('conversation_crud', { role: 'admin', method: 'list', agent: agentId, limit: 2 })
 check('list: page of 2 rows, total count 3', cl.status === 200 && cl.json.rows?.length === 2 && cl.json.count === 3, cl.json)
 check('ids and cost_usd are JSON numbers',
   cl.json.rows?.every((r: { id: unknown }) => typeof r.id === 'number') &&
   cl.json.rows?.some((r: { cost_usd: unknown }) => r.cost_usd === null || typeof r.cost_usd === 'number'), cl.json.rows)
-const clr = await api('conversation_crud', { method: 'list', agent: agentId, log_role: 'assistant' })
+const clr = await api('conversation_crud', { role: 'admin', method: 'list', agent: agentId, log_role: 'assistant' })
 check('log_role filter works while the body also carries role:"member"', clr.json.count === 2, clr.json)
 const target = clr.json.rows?.find((r: { content: string }) => r.content === 'a1')
-await api('conversation_crud', { method: 'set_feedback', id: target?.id, feedback: 'good' })
-const good = await api('conversation_crud', { method: 'list', agent: agentId, feedback: 'good' })
-const none = await api('conversation_crud', { method: 'list', agent: agentId, feedback: 'none' })
+await api('conversation_crud', { role: 'admin', method: 'set_feedback', id: target?.id, feedback: 'good' })
+const good = await api('conversation_crud', { role: 'admin', method: 'list', agent: agentId, feedback: 'good' })
+const none = await api('conversation_crud', { role: 'admin', method: 'list', agent: agentId, feedback: 'none' })
 check('set_feedback + feedback filters (good / none)', good.json.count === 1 && none.json.count === 2, { good: good.json.count, none: none.json.count })
-await api('conversation_crud', { method: 'set_feedback', id: target?.id, feedback: null })
-const cleared = await api('conversation_crud', { method: 'list', agent: agentId, feedback: 'good' })
+await api('conversation_crud', { role: 'admin', method: 'set_feedback', id: target?.id, feedback: null })
+const cleared = await api('conversation_crud', { role: 'admin', method: 'list', agent: agentId, feedback: 'good' })
 check('feedback null clears it', cleared.json.count === 0, cleared.json)
-const noId = await api('conversation_crud', { method: 'set_feedback', feedback: 'good' })
+const noId = await api('conversation_crud', { role: 'admin', method: 'set_feedback', feedback: 'good' })
 check('set_feedback without id → 400', noId.status === 400, noId.json)
 const otherAgent = `${MARK}_other`
 await dbInsert('conversations', { session_id: MARK, role: 'user', content: 'keep me', agent: otherAgent })
-await api('conversation_crud', { method: 'delete_all', agent: agentId })
+await api('conversation_crud', { role: 'admin', method: 'delete_all', agent: agentId })
 const left = await dbGet('conversations', 'agent', { session_id: `eq.${MARK}` })
 check('delete_all with agent removes only that agent', left.length === 1 && left[0].agent === otherAgent, left)
-const badMethod = await api('conversation_crud', { method: 'nope' })
+const badMethod = await api('conversation_crud', { role: 'admin', method: 'nope' })
 check('unknown method → 400', badMethod.status === 400, badMethod.json)
 
 // ── 5. agent_crud create / delete ──────────────────────────────────────
 console.log('\n[5] agent_crud create / delete')
 const newId = `${MARK}_new`
-const cr = await api('agent_crud', { method: 'create', data: { id: newId, name: '新 Agent', provider: '', uses_tools: 0, bogus: 'x' } })
+const cr = await api('agent_crud', { role: 'admin', method: 'create', data: { id: newId, name: '新 Agent', provider: '', uses_tools: 0, bogus: 'x' } })
 check('create returns ok with the id', cr.status === 200 && cr.json.ok === true && cr.json.id === newId, cr.json)
 const cg = await dbGet('agents', 'name,active,provider,uses_tools', { id: `eq.${newId}` })
 check("create: active defaults true, '' provider → null, uses_tools boolean",
   cg[0]?.name === '新 Agent' && cg[0]?.active === true && cg[0]?.provider === null && cg[0]?.uses_tools === false, cg)
-const dup = await api('agent_crud', { method: 'create', data: { id: newId, name: 'overwrite attempt' } })
+const dup = await api('agent_crud', { role: 'admin', method: 'create', data: { id: newId, name: 'overwrite attempt' } })
 const cg2 = await dbGet('agents', 'name', { id: `eq.${newId}` })
 check('create with an existing id → 409 and the row is untouched', dup.status === 409 && cg2[0]?.name === '新 Agent', { dup: dup.json, row: cg2 })
-const noCid = await api('agent_crud', { method: 'create', data: { name: 'x' } })
+const noCid = await api('agent_crud', { role: 'admin', method: 'create', data: { name: 'x' } })
 check('create without id → 400', noCid.status === 400, noCid.json)
-const del = await api('agent_crud', { method: 'delete', id: newId })
+const del = await api('agent_crud', { role: 'admin', method: 'delete', id: newId })
 const gone = await dbGet('agents', 'id', { id: `eq.${newId}` })
 check('delete removes the agent', del.status === 200 && gone.length === 0, gone)
-const noDid = await api('agent_crud', { method: 'delete' })
+const noDid = await api('agent_crud', { role: 'admin', method: 'delete' })
 check('delete without id → 400', noDid.status === 400, noDid.json)
 
 // ── 6. agent_skill_crud ────────────────────────────────────────────────
@@ -188,29 +189,29 @@ const skA = `${MARK}_skA`, skB = `${MARK}_skB`
 await dbInsert('agent_skills', [
   { agent: skA, skill: 'skill one' }, { agent: skA, skill: 'skill two' }, { agent: skB, skill: 'keep me' },
 ])
-const sl = await api('agent_skill_crud', { method: 'list' })
+const sl = await api('agent_skill_crud', { role: 'admin', method: 'list' })
 const mine = (sl.json.skills || []).filter((s: { agent: string }) => s.agent === skA)
 check('list returns the skills with numeric ids', sl.status === 200 && mine.length === 2 && typeof mine[0]?.id === 'number', mine)
-await api('agent_skill_crud', { method: 'delete', id: mine[0]?.id })
+await api('agent_skill_crud', { role: 'admin', method: 'delete', id: mine[0]?.id })
 const afterOne = await dbGet('agent_skills', 'id', { agent: `eq.${skA}` })
 check('delete removes one skill', afterOne.length === 1, afterOne)
-await api('agent_skill_crud', { method: 'delete_agent', agent: skA })
+await api('agent_skill_crud', { role: 'admin', method: 'delete_agent', agent: skA })
 const afterA = await dbGet('agent_skills', 'agent', { agent: `in.(${skA},${skB})` })
 check('delete_agent removes only that agent’s skills', afterA.length === 1 && afterA[0].agent === skB, afterA)
-const noAgent = await api('agent_skill_crud', { method: 'delete_agent' })
+const noAgent = await api('agent_skill_crud', { role: 'admin', method: 'delete_agent' })
 check('delete_agent without agent → 400 (never deletes everything)', noAgent.status === 400, noAgent.json)
 
 // ── 7. agent_suggestion_crud ───────────────────────────────────────────
 console.log('\n[7] agent_suggestion_crud')
 await dbInsert('agent_suggestions', [{ message: `${MARK} gap 1`, session_id: MARK }, { message: `${MARK} gap 2`, session_id: MARK }])
-const gl = await api('agent_suggestion_crud', { method: 'list', limit: 500 })
+const gl = await api('agent_suggestion_crud', { role: 'admin', method: 'list', limit: 500 })
 const gaps = (gl.json.suggestions || []).filter((s: { session_id: string }) => s.session_id === MARK)
 check('list returns the suggestions, unhandled', gl.status === 200 && gaps.length === 2 && gaps.every((g: { handled: boolean }) => g.handled === false), gaps)
-await api('agent_suggestion_crud', { method: 'mark_handled', id: gaps[0]?.id })
-await api('agent_suggestion_crud', { method: 'delete', id: gaps[1]?.id })
+await api('agent_suggestion_crud', { role: 'admin', method: 'mark_handled', id: gaps[0]?.id })
+await api('agent_suggestion_crud', { role: 'admin', method: 'delete', id: gaps[1]?.id })
 const gRows = await dbGet('agent_suggestions', 'id,handled', { session_id: `eq.${MARK}` })
 check('mark_handled sets handled; delete removes the other', gRows.length === 1 && gRows[0].handled === true && gRows[0].id === gaps[0]?.id, gRows)
-const noGid = await api('agent_suggestion_crud', { method: 'mark_handled' })
+const noGid = await api('agent_suggestion_crud', { role: 'admin', method: 'mark_handled' })
 check('mark_handled without id → 400', noGid.status === 400, noGid.json)
 
 // ── 8. home_summary ────────────────────────────────────────────────────
@@ -336,18 +337,18 @@ check('analytics list: date range', anl.status === 200 && anMine.length === 1 &&
 console.log('\n[10] staff / tasks')
 // deno-lint-ignore no-explicit-any
 type R = Record<string, any>
-await api('staff_crud', { method: 'save', data: { name: `${MARK} Alice`, avatar: '🦊', role: ' PM ', department: '' } })
-await api('staff_crud', { method: 'save', data: { name: `${MARK} Bob` } })
-const sAll = (await api('staff_crud', { method: 'list' })).json.staff as R[]
+await api('staff_crud', { role: 'admin', method: 'save', data: { name: `${MARK} Alice`, avatar: '🦊', role: ' PM ', department: '' } })
+await api('staff_crud', { role: 'admin', method: 'save', data: { name: `${MARK} Bob` } })
+const sAll = (await api('staff_crud', { role: 'admin', method: 'list' })).json.staff as R[]
 const alice = sAll.find(s => s.name === `${MARK} Alice`), bob = sAll.find(s => s.name === `${MARK} Bob`)
 check('staff save creates; role trimmed, blank department → null, active by default',
   !!alice && !!bob && alice.role === 'PM' && alice.department === null && alice.active === true, { alice, bob })
-const noName = await api('staff_crud', { method: 'save', data: { name: ' ' } })
+const noName = await api('staff_crud', { role: 'admin', method: 'save', data: { name: ' ' } })
 check('staff save without name → 400', noName.status === 400, noName.json)
-await api('staff_crud', { method: 'save', id: bob?.id, data: { name: `${MARK} Bobby`, role: 'Dev' } })
-await api('staff_crud', { method: 'set_active', id: bob?.id, active: false })
-const bobRow = ((await api('staff_crud', { method: 'list' })).json.staff as R[]).find(s => s.id === bob?.id)
-const activeOnly = (await api('staff_crud', { method: 'list', active_only: true })).json.staff as R[]
+await api('staff_crud', { role: 'admin', method: 'save', id: bob?.id, data: { name: `${MARK} Bobby`, role: 'Dev' } })
+await api('staff_crud', { role: 'admin', method: 'set_active', id: bob?.id, active: false })
+const bobRow = ((await api('staff_crud', { role: 'admin', method: 'list' })).json.staff as R[]).find(s => s.id === bob?.id)
+const activeOnly = (await api('staff_crud', { role: 'admin', method: 'list', active_only: true })).json.staff as R[]
 check('staff update + set_active; active_only hides inactive staff',
   bobRow?.name === `${MARK} Bobby` && bobRow?.active === false && !activeOnly.some(s => s.id === bob?.id) && activeOnly.some(s => s.id === alice?.id), bobRow)
 
@@ -408,10 +409,10 @@ check('list without peer → 400', noPeer.status === 400, noPeer.json)
 
 // ── 12. file storage + document approval ───────────────────────────────
 console.log('\n[12] file storage / documents')
-// With the local driver a missing file is a 404; the Supabase driver has no GET route (405)
+// With the local driver an unsigned download is refused (403); the Supabase driver has no GET route (405)
 const probe = await fetch(`${BASE}/files/documents/apismoke_probe_missing.txt`)
 await probe.body?.cancel()
-const storageIsLocal = probe.status === 404
+const storageIsLocal = probe.status === 403
 let docFileUrl = '', htmlFileUrl = ''
 if (!storageIsLocal) {
   console.log(`  (skipped file storage tests: backend is not on STORAGE_DRIVER=local — probe returned ${probe.status})`)
@@ -423,13 +424,35 @@ if (!storageIsLocal) {
   const upj = await up.json()
   check('upload: backend URL, sanitized object name, byte size', up.status === 200 && String(upj.url).startsWith(`${BASE}/files/documents/`) &&
     /^[A-Za-z0-9._-]+$/.test(upj.name) && upj.size === new TextEncoder().encode('hello 文件').length, upj)
-  const dl = await fetch(upj.url)
+  // Downloads need a signed link; the backend signs file_url whenever it returns a document
+  const signedFor = async (fileUrl: string) => {
+    const d = await api('document_crud', { method: 'create', data: { title: `${MARK} signed`, file_url: fileUrl }, reviewers: [{ name: 'x' }] })
+    return String((await api('document_crud', { method: 'get', id: d.json.id })).json.document?.file_url)
+  }
+  const signedTxt = await signedFor(upj.url)
+  const unsigned = await fetch(upj.url)
+  await unsigned.body?.cancel()
+  const tampered = await fetch(signedTxt.replace(/sig=([0-9a-f])/, (_m, c) => `sig=${c === '0' ? '1' : '0'}`))
+  await tampered.body?.cancel()
+  check('download: document returns a signed link; unsigned → 403; tampered signature → 403',
+    /[?&]exp=\d+&sig=[0-9a-f]{64}$/.test(signedTxt) && unsigned.status === 403 && tampered.status === 403, { signedTxt, unsigned: unsigned.status, tampered: tampered.status })
+  const INTERNAL_KEY = Deno.env.get('ORCH_INTERNAL_SECRET')
+  if (INTERNAL_KEY) {
+    const pastExp = Math.floor(Date.now() / 1000) - 10
+    const hkey = await crypto.subtle.importKey('raw', new TextEncoder().encode(INTERNAL_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+    const pastSig = [...new Uint8Array(await crypto.subtle.sign('HMAC', hkey, new TextEncoder().encode(`documents/${upj.name}:${pastExp}`)))]
+      .map(b => b.toString(16).padStart(2, '0')).join('')
+    const expired = await fetch(`${upj.url}?exp=${pastExp}&sig=${pastSig}`)
+    await expired.body?.cancel()
+    check('download: a correctly signed but expired link → 403', expired.status === 403, expired.status)
+  }
+  const dl = await fetch(signedTxt)
   const dlText = await dl.text()
   check('download: same content, text/plain inline, nosniff + sandbox CSP', dl.status === 200 && dlText === 'hello 文件' &&
     (dl.headers.get('content-type') || '').startsWith('text/plain') && dl.headers.get('x-content-type-options') === 'nosniff' &&
     dl.headers.get('content-security-policy') === 'sandbox' && (dl.headers.get('content-disposition') || '').startsWith('inline'), Object.fromEntries(dl.headers))
   const upHtml = await (await upload('documents', `${MARK}.html`, '<script>alert(1)</script>', 'text/html')).json()
-  const dlHtml = await fetch(upHtml.url)
+  const dlHtml = await fetch(await signedFor(upHtml.url))
   await dlHtml.body?.cancel()
   check('download: an HTML upload is served as an attachment, never inline', dlHtml.status === 200 &&
     (dlHtml.headers.get('content-disposition') || '').startsWith('attachment') && dlHtml.headers.get('content-type') === 'application/octet-stream', Object.fromEntries(dlHtml.headers))
@@ -450,32 +473,39 @@ check('document create without a named reviewer → 400', noReviewer.status === 
 const dc = await api('document_crud', {
   method: 'create',
   data: { title: `${MARK} 合同`, notes: '  ', file_url: docFileUrl || null, file_name: 'x.txt', file_type: 'text/plain', file_size: 12, uploaded_by: 'up@example.com' },
-  reviewers: [{ name: 'Rev A', contact: 'a@example.com' }, { name: 'Rev B', contact: '' }],
+  reviewers: [{ name: 'Rev A', contact: `${MARK}-member@session.test` }, { name: 'Rev B', contact: '' }],
 })
 const docId = dc.json.id
 check('document create → id', dc.status === 200 && !!docId, dc.json)
 const listed = ((await api('document_crud', { method: 'list' })).json.documents as R[]).find(x => x.id === docId)
-check('document list: pending, blank notes → null, one decision per reviewer', listed?.status === 'pending' && listed?.notes === null && listed?.decisions?.length === 2, listed)
-const sees = async (email: string) => ((await api('document_crud', { method: 'list', viewer_email: email })).json.documents as R[]).some(x => x.id === docId)
-const [asReviewer, asUploader, asOther] = [await sees('a@example.com'), await sees('up@example.com'), await sees('nobody@example.com')]
-check('document list for a member: reviewer and uploader see it, others do not', asReviewer && asUploader && !asOther, { asReviewer, asUploader, asOther })
+check('document list: pending, blank notes → null, one decision per reviewer, uploader taken from the session (not the body)',
+  listed?.status === 'pending' && listed?.notes === null && listed?.decisions?.length === 2 && listed?.uploaded_by === `${MARK}-member@session.test`, listed)
+const sees = async (who: string) => ((await api('document_crud', { method: 'list', role: who })).json.documents as R[]).some(x => x.id === docId)
+const [uploaderSees, otherMemberSees, adminSees] = [await sees('member'), await sees('other'), await sees('admin')]
+const otherGet = await api('document_crud', { method: 'get', id: docId, role: 'other' })
+check("document visibility: the uploading member and admins see it; another member neither lists nor opens it",
+  uploaderSees && adminSees && !otherMemberSees && otherGet.status === 404, { uploaderSees, otherMemberSees, adminSees, otherGet: otherGet.status })
 const dg = await api('document_crud', { method: 'get', id: docId })
 const docRevs = (dg.json.reviewers || []) as R[]
 check('document get: document + reviewers in order, blank contact → null',
   dg.json.document?.title === `${MARK} 合同` && docRevs.length === 2 && docRevs[0].name === 'Rev A' && docRevs[1].contact === null, dg.json)
 const dec1 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[0]?.id, decision: 'approved', comment: ' ok ' })
 check('decide: 1 of 2 approved → partial', dec1.json.status === 'partial', dec1.json)
-const dec2 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected' })
+const dec2member = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected' })
+check("decide: a member cannot decide someone else's reviewer row (403)", dec2member.status === 403, dec2member.json)
+const dec2 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected', role: 'admin' })
 const decided = await dbGet('document_reviewers', 'decision,comment,decided_at', { document_id: `eq.${docId}` }, 'created_at.asc')
 check('decide: any rejection → rejected; comment trimmed; decided_at set', dec2.json.status === 'rejected' && decided[0]?.comment === 'ok' && !!decided[1]?.decided_at, decided)
 const decBad = await api('document_crud', { method: 'decide', reviewer_id: docRevs[0]?.id, decision: 'maybe' })
 check('decide with an unknown decision → 400', decBad.status === 400, decBad.json)
+const ddOther = await api('document_crud', { method: 'delete', id: docId, role: 'other' })
+check('document delete: another member cannot delete it (403)', ddOther.status === 403, ddOther.json)
 const dd = await api('document_crud', { method: 'delete', id: docId })
 const docLeft = await dbGet('documents', 'id', { id: `eq.${docId}` })
 const revLeft = await dbGet('document_reviewers', 'id', { document_id: `eq.${docId}` })
 check('document delete: record and its reviewers removed', dd.status === 200 && docLeft.length === 0 && revLeft.length === 0, { dd: dd.json, docLeft, revLeft })
 if (storageIsLocal) {
-  const afterDelete = await fetch(docFileUrl)
+  const afterDelete = await fetch(String(dg.json.document?.file_url))   // signed, so a 404 means the file is gone
   await afterDelete.body?.cancel()
   check('document delete: attached file removed as well', dd.json.file_deleted === true && afterDelete.status === 404, { file_deleted: dd.json.file_deleted, status: afterDelete.status })
   // remove the HTML test upload the same way
@@ -495,17 +525,17 @@ check('list_workflow_runs: the 10 newest, newest first', wr.json.runs?.length ==
 const wrNoId = await api('list_workflow_runs', {})
 check('list_workflow_runs without id → 400', wrNoId.status === 400, wrNoId.json)
 
-const kbc = await api('create_kb', { name: `${MARK} kb`, description: 'd' })
+const kbc = await api('create_kb', { role: 'admin', name: `${MARK} kb`, description: 'd' })
 const kbId = kbc.json.kb?.id
 check('create_kb → id; list_kbs includes it', !!kbId && ((await api('list_kbs')).json.kbs as R[]).some(k => k.id === kbId), kbc.json)
 await dbInsert('kb_chunks', [0, 1, 2].map(i => ({ kb_id: kbId, source_name: MARK, chunk_index: i, content: `${MARK} chunk ${i}` })))
 const kcount = await api('count_kb_chunks', { kb_id: kbId })
 check('count_kb_chunks', kcount.json.count === 3, kcount.json)
-const kdel = await api('delete_kb', { kb_id: kbId })
+const kdel = await api('delete_kb', { role: 'admin', kb_id: kbId })
 const chunksLeft = await dbGet('kb_chunks', 'id', { kb_id: `eq.${kbId}` })
 const kbLeft = await dbGet('knowledge_bases', 'id', { id: `eq.${kbId}` })
 check('delete_kb removes the knowledge base and all its chunks', kdel.status === 200 && kbLeft.length === 0 && chunksLeft.length === 0, { kdel: kdel.json, kbLeft, chunksLeft })
-const kdelMissing = await api('delete_kb', { kb_id: crypto.randomUUID() })
+const kdelMissing = await api('delete_kb', { role: 'admin', kb_id: crypto.randomUUID() })
 check('delete_kb for an unknown id → 404', kdelMissing.status === 404, kdelMissing.json)
 
 const unread0 = (await api('automation_crud', { method: 'unread_count' })).json.count
@@ -570,8 +600,8 @@ check("add_tenant_user: defaults to member (not the caller's role), repeat call 
 
 // ── 15. authentication ─────────────────────────────────────────────────
 console.log('\n[15] authentication')
-const noTok = await api('agent_crud', { method: 'list' }, null)
-const badTok = await api('agent_crud', { method: 'list' }, 'not-a-real-token')
+const noTok = await api('agent_crud', { role: 'admin', method: 'list' }, null)
+const badTok = await api('agent_crud', { role: 'admin', method: 'list' }, 'not-a-real-token')
 check('no token → 401; unknown token → 401', noTok.status === 401 && badTok.status === 401, { noTok: noTok.status, badTok: badTok.status })
 const forged = await api('list_tenants', { role: 'master' }, TOKENS.member)
 check('member token with role:"master" in the body → still 403', forged.status === 403, forged.json)
@@ -582,7 +612,7 @@ check('verify_otp returns a session token that works', typeof vKnown.json.token 
 
 const expTok = `${MARK}-expired-${crypto.randomUUID()}`
 await dbInsert('sessions', { token_hash: await sha256Hex(expTok), email: `${MARK}-exp@session.test`, role: 'master', expires_at: new Date(Date.now() - 1000).toISOString() })
-check('expired session → 401', (await api('agent_crud', { method: 'list' }, expTok)).status === 401)
+check('expired session → 401', (await api('agent_crud', { role: 'admin', method: 'list' }, expTok)).status === 401)
 const outTok = `${MARK}-logout-${crypto.randomUUID()}`
 await dbInsert('sessions', { token_hash: await sha256Hex(outTok), email: `${MARK}-out@session.test`, role: 'member', expires_at: new Date(Date.now() + 3600_000).toISOString() })
 const whoBefore = (await api('whoami', {}, outTok)).status
@@ -626,6 +656,33 @@ if (INTERNAL) {
 } else {
   console.log('  (skipped internal-secret test: ORCH_INTERNAL_SECRET not in the test env)')
 }
+
+// ── 16. role requirements ──────────────────────────────────────────────
+console.log('\n[16] role requirements')
+const statusAs = async (who: string, action: string, payload: Record<string, unknown> = {}) => (await api(action, { ...payload, role: who })).status
+// Each admin-only call is invalid on purpose: an admin gets past the role check to a 400, nothing changes
+const adminCalls: [string, Record<string, unknown>][] = [
+  ['integration_crud', { method: 'save' }], ['provider_config_crud', { method: 'save', provider: 'nope' }],
+  ['agent_crud', { method: 'create', data: {} }], ['staff_crud', { method: 'save', data: {} }],
+  ['create_kb', {}], ['list_models', {}], ['automation_crud', { method: 'update' }],
+]
+const memberSt: Record<string, number> = {}, adminSt: Record<string, number> = {}
+for (const [action, payload] of adminCalls) {
+  memberSt[action] = await statusAs('member', action, payload)
+  adminSt[action] = await statusAs('admin', action, payload)
+}
+check('configuration changes: member → 403', Object.values(memberSt).every(s => s === 403), memberSt)
+check('configuration changes: admin passes the role check (400 from the handler for the invalid payload)', Object.values(adminSt).every(s => s === 400), adminSt)
+const readSt: Record<string, number> = {}
+for (const [action, payload] of [
+  ['agent_crud', { method: 'list' }], ['staff_crud', { method: 'list' }], ['provider_config_crud', { method: 'list' }],
+  ['automation_crud', { method: 'unread_count' }], ['list_kbs', {}],
+  ['home_summary', { month_start: '2026-09-01', today_start: new Date().toISOString() }],
+] as [string, Record<string, unknown>][]) readSt[action] = await statusAs('member', action, payload)
+check('everyday reads work for a member', Object.values(readSt).every(s => s === 200), readSt)
+const unlisted = { member: await statusAs('member', 'cost_summary'), admin: await statusAs('admin', 'cost_summary') }
+check('an action the dashboard never calls needs admin', unlisted.member === 403 && unlisted.admin === 200, unlisted)
+check('tenant management needs master, not admin', (await statusAs('admin', 'list_tenants')) === 403)
 
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')

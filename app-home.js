@@ -263,6 +263,10 @@ function applySessionUI() {
   document.querySelectorAll('.master-only').forEach(el => {
     el.style.display = _session.role === 'master' ? '' : 'none'
   })
+  // Configuration pages are for admins and masters (the backend enforces it too)
+  document.querySelectorAll('.admin-only').forEach(el => {
+    el.style.display = _session.role === 'admin' || _session.role === 'master' ? '' : 'none'
+  })
   // Show tenant name in sidebar footer
   const tnEl = document.getElementById('tenantNameBadge')
   if (tnEl) tnEl.textContent = _session.tenant_name || (_session.role === 'master' ? '✦ Master' : '')
