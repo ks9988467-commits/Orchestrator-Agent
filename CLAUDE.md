@@ -89,6 +89,24 @@ Before implementing:
 - No "flexibility" that wasn't requested.
 - If you write 200 lines and it could be 50, rewrite it.
 
+**Before writing code, climb this ladder. Stop at the first rung that holds:**
+
+1. **Does this need to exist at all?** Speculative need → skip it, say so in one line.
+2. **Does this codebase already have it?** A helper, pattern or backend action that already exists → reuse it. Re-implementing what lives a few files over is the most common waste.
+3. **Does the standard library do it?**
+4. **Does a native platform feature cover it?** DB constraint over app code, CSS over JS, `<input type="date">` over a picker library.
+5. **Does an already-installed dependency solve it?** Never add a dependency for what a few lines can do.
+6. **Can it be one line?**
+7. **Only then:** the minimum code that works.
+
+The ladder shortens the solution, never the reading — trace the whole flow the change touches first. The smallest change in the wrong place is a second bug, not a lazy win.
+
+**Fix bugs at the root, not the symptom.** Before editing, check every caller of the function being changed: one guard in the shared function is smaller than a guard in each caller, and patching only the reported path leaves every sibling caller broken.
+
+**Never simplify away:** input validation at trust boundaries, error handling that prevents data loss, security measures, accessibility basics, or anything explicitly requested.
+
+**No padding.** No unrequested prose, no essay defending a simplification, no comment restating the code. Requested reporting — what changed, what was verified, what is still open — is not padding.
+
 ## 3. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
