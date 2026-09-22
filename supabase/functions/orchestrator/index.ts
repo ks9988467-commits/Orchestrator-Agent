@@ -4,13 +4,6 @@
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
 import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
-const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-// URL this function uses to invoke itself (task-step chaining). Defaults to the
-// deployed Supabase Edge Function; set ORCH_SELF_URL when running locally,
-// e.g. ORCH_SELF_URL=http://localhost:8000
-const SELF_URL = Deno.env.get('ORCH_SELF_URL') || `${SUPABASE_URL}/functions/v1/orchestrator`
-
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-file-name',
@@ -52,110 +45,12 @@ function calcCost(model: string, tokensIn: number, tokensOut: number): number {
 let _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: '' }
 function resetUsage(model='') { _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: model } }
 
-// ── Agent Task tools ─────────────────────────────────────────────────
-// web_search: handled inline in executeTaskSteps via perplexity/sonar on OpenRouter
-async function fetchUrl(url: string): Promise<string> {
-  const res = await fetch(`https://r.jina.ai/${url}`, {
-    headers: { 'Accept': 'text/plain', 'X-Retain-Images': 'none' }
-  })
-  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
-  return (await res.text()).slice(0, 6000)
-}
-
-type TaskStep = { id:string; desc:string; tool:string; params:Record<string,string>; status:string; result:string|null }
-type AgentTask = { id:string; goal:string; plan:TaskStep[]; current_step:number; status:string; output:Record<string,string>; final_output:string|null; session_id:string|null; tenant_id:string|null }
-
-// 20s timeout wrapper — prevents any single step from hanging
+// Timeout wrapper for a single LLM call inside a workflow step
 function withTimeout<T>(p: Promise<T>, ms = 20_000): Promise<T> {
   return Promise.race([
     p,
     new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`步骤超时 (${ms/1000}s)`)), ms))
   ])
-}
-
-// Execute exactly ONE step per call, then self-chain to next step (fire-and-forget)
-async function executeTaskSteps(taskId: string, providers: ProviderRow[], defaultProvider: string, agents: AgentRow[]) {
-  const rows = await dbGet('agent_tasks','*',{ id:`eq.${taskId}` })
-  const task = rows[0] as AgentTask
-  if (!task || task.status === 'cancelled' || task.status === 'failed' || task.status === 'done') return
-
-  const plan = task.plan as TaskStep[]
-  const idx = task.current_step as number
-
-  // All steps complete
-  if (idx >= plan.length) {
-    const finalOutput = plan.filter(s=>s.status==='done').slice(-1)[0]?.result || ''
-    await dbPatch('agent_tasks', taskId, { status:'done', final_output:finalOutput, updated_at:new Date().toISOString() })
-    return
-  }
-
-  const step = plan[idx]
-  // Concurrency guard: skip if another invocation already picked up this step
-  if (step.status === 'running') return
-
-  await dbPatch('agent_tasks', taskId, { status:'running', updated_at:new Date().toISOString() })
-  plan[idx] = { ...step, status:'running' }
-  await dbPatch('agent_tasks', taskId, { plan, updated_at:new Date().toISOString() })
-
-  let result = '', stepError = ''
-  try {
-    const prevOutput = task.output as Record<string,string>
-    const fillRef = (s:string) => s.replace(/\{\{(step_\d+)\}\}/g, (_:string,k:string) => prevOutput[k] || '')
-
-    if (step.tool === 'web_search') {
-      const query = fillRef(step.params.query || '')
-      resetUsage('perplexity/sonar')
-      const { text } = await withTimeout(callLLM(
-        providers, 'openrouter', 'perplexity/sonar',
-        '你是联网搜索助手。用中文返回详细、准确、最新的搜索结果，包含关键事实和来源。',
-        [{ role: 'user', content: `搜索：${query}` }]
-      ), 50_000)
-      result = text
-      const _sc = calcCost(_lastUsage.used_model||'perplexity/sonar', _lastUsage.tokens_in, _lastUsage.tokens_out)
-      dbInsert('conversations', { session_id:`task_${taskId}`, role:'assistant', content:result.slice(0,200), agent:'task_search', tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_sc }).catch(()=>{})
-    } else if (step.tool === 'fetch_url') {
-      result = await withTimeout(fetchUrl(step.params.url || ''), 15_000)
-    } else if (step.tool === 'call_agent') {
-      const agent = agents.find(a=>a.id===step.params.agent_id) ?? agents.find(a=>a.id==='chat') ?? agents[0]
-      const prompt = fillRef(step.params.prompt || step.params.q || '')
-      const skillText = await loadAgentSkills(agent?.id || '')
-      const system = (agent?.system_prompt||'You are a helpful assistant.')+'\n\n'+SOUL+skillText
-      resetUsage(agent?.model || '')
-      const { text } = await withTimeout(callLLM(providers, agent?.provider||defaultProvider, agent?.model, system, [{ role:'user', content:prompt }]), 50_000)
-      result = text
-      const _ac = calcCost(_lastUsage.used_model||agent?.model||'', _lastUsage.tokens_in, _lastUsage.tokens_out)
-      dbInsert('conversations', { session_id:`task_${taskId}`, role:'assistant', content:result.slice(0,200), agent:`task_${agent?.id||'chat'}`, tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_ac }).catch(()=>{})
-    } else if (step.tool === 'send_notification') {
-      const msg = fillRef(step.params.message || '')
-      await sendNotification(step.params.channel||'slack', msg, step.params.to)
-      result = `通知已发送 (${step.params.channel||'slack'})`
-    } else {
-      result = `(跳过：未知工具 ${step.tool})`
-    }
-  } catch(e) { stepError = (e as Error).message }
-
-  plan[idx] = { ...plan[idx], status:stepError?'failed':'done', result:result||stepError }
-  const newOutput = { ...(task.output as Record<string,string>), [step.id]: result }
-  const nextIdx = idx + 1
-  const allDone = nextIdx >= plan.length
-
-  await dbPatch('agent_tasks', taskId, {
-    plan, current_step:nextIdx, output:newOutput,
-    status: stepError?'failed': allDone?'done':'running',
-    final_output: allDone ? (result||'') : null,
-    updated_at: new Date().toISOString()
-  })
-
-  // Chain: trigger next step after 1s delay (prevents request storm)
-  if (!stepError && !allDone) {
-    setTimeout(() => {
-      fetch(SELF_URL, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'execute_task_step', task_id: taskId })
-      }).catch(() => {})
-    }, 1000)
-  }
 }
 
 // ── Slack webhook ─────────────────────────────────────────────────────
@@ -168,14 +63,6 @@ async function sendSlackWebhook(webhookUrl: string, text: string, mrkdwn?: strin
     body: JSON.stringify(payload),
   })
 }
-async function notifySlack(title: string, body: string) {
-  try {
-    const rows = await dbGet('api_integrations','credentials,active',{service:'eq.slack',active:'eq.true'},undefined,1)
-    const url = (rows[0] as {credentials:Record<string,string>}|undefined)?.credentials?.webhook_url
-    if (url) await sendSlackWebhook(url, title, `*${title}*\n${body}`)
-  } catch { /* non-fatal */ }
-}
-
 // ── Module-level cache (reused across requests in same isolate) ──────
 interface CacheEntry<T> { data: T; expires: number }
 let _cacheProviders: CacheEntry<ProviderRow[]> | null = null
@@ -322,14 +209,6 @@ async function insertInChunks(table: string, rows: Record<string, unknown>[]): P
 //    Imported at top. Same signatures; backend switched by env DB_DRIVER.
 
 // ── Lark helpers ────────────────────────────────────────────────────
-async function getLarkConfig(): Promise<{webhook_url?:string;app_id?:string;app_secret?:string}|null> {
-  try {
-    const rows = await dbGet('api_integrations', 'credentials,active', { service: 'eq.lark', active: 'eq.true' }, undefined, 1)
-    const row = (rows as {credentials:Record<string,string>;active:boolean}[])[0]
-    return row?.credentials ?? null
-  } catch { return null }
-}
-
 async function sendLarkWebhook(webhookUrl: string, title: string, bodyMd: string, fileUrl?: string) {
   const elements: unknown[] = [{ tag: 'div', text: { tag: 'lark_md', content: bodyMd } }]
   if (fileUrl) elements.push({ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '查看文件' }, type: 'primary', url: fileUrl }] })
@@ -338,39 +217,6 @@ async function sendLarkWebhook(webhookUrl: string, title: string, bodyMd: string
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ msg_type: 'interactive', card: { header: { title: { tag: 'plain_text', content: title }, template: 'red' }, elements } }),
   })
-}
-
-async function getLarkToken(appId: string, appSecret: string): Promise<string|null> {
-  try {
-    const r = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-    })
-    const d = await r.json() as {tenant_access_token?:string}
-    return d.tenant_access_token ?? null
-  } catch { return null }
-}
-
-async function sendLarkMessage(token: string, receiveId: string, receiveIdType: string, text: string) {
-  await fetch(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ receive_id: receiveId, msg_type: 'text', content: JSON.stringify({ text }) }),
-  })
-}
-
-async function createLarkTask(token: string, title: string, desc: string, dueMs?: number): Promise<string|null> {
-  try {
-    const payload: Record<string,unknown> = { summary: title, description: desc }
-    if (dueMs) payload.due = { timestamp: String(Math.floor(dueMs / 1000)) }
-    const r = await fetch('https://open.feishu.cn/open-apis/task/v2/tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(payload),
-    })
-    const d = await r.json() as {data?:{task?:{guid?:string}}}
-    return d.data?.task?.guid ?? null
-  } catch { return null }
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────
@@ -2430,7 +2276,7 @@ Deno.serve(async (req: Request) => {
         const [analRows, leadRows, alertRows] = await Promise.all([
           dbGet('analytics_daily', 'spend_myr,new_contacts', { tenant_id: `eq.${tid}`, date: `gte.${monthStart}` }, undefined, 1000),
           dbGet('leads', 'id', { tenant_id: `eq.${tid}`, date: `gte.${monthStart}` }, undefined, 500),
-          dbGet('alerts', 'id', { tenant_id: `eq.${tid}` }, 'triggered_at.desc', 10),
+          dbGet('automation_logs', 'id', { tenant_id: `eq.${tid}`, read: 'eq.false' }, 'triggered_at.desc', 10),
         ])
         let spend = 0, contacts = 0
         for (const r of analRows as Record<string,number>[]) { spend += Number(r.spend_myr)||0; contacts += Number(r.new_contacts)||0 }
@@ -2505,88 +2351,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // \u2500\u2500 Check alerts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-    // ── Alert Rules CRUD ────────────────────────────────────────────
-    if (body.action === 'list_alert_rules') {
-      const rows = await dbGet('alert_rules', 'id,name,metric,threshold,operator,campaign_filter,active,created_at', tenantFilters(), 'created_at.desc', 50)
-      return new Response(JSON.stringify({ rules: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-    if (body.action === 'save_alert_rule') {
-      const { name: rname, metric: rmetric, threshold: rthreshold, operator: rop, campaign_filter: rcf } = body
-      if (!rname || !rmetric || rthreshold === undefined)
-        return new Response(JSON.stringify({ error: 'name, metric, threshold required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const row = await dbInsertReturning('alert_rules', { name: rname, metric: rmetric, threshold: +rthreshold, operator: rop || 'gt', campaign_filter: rcf || null, active: true, tenant_id: _reqTenantId })
-      return new Response(JSON.stringify({ ok: true, rule: row }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-    if (body.action === 'delete_alert_rule') {
-      const { rule_id } = body
-      if (!rule_id) return new Response(JSON.stringify({ error: 'rule_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbDelete('alert_rules', tenantFilters({ id: `eq.${rule_id}` }))
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'check_alerts') {
-      try {
-        const alertFilters = { ...tenantFilters(), active: 'eq.true' }
-        const rules = await dbGet('alert_rules', 'id,name,metric,threshold,operator,campaign_filter', alertFilters) as Record<string,unknown>[]
-        if (!rules.length) return new Response(JSON.stringify({ ok: true, triggered: 0, checked: 0 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-        const weekAgo = new Date(Date.now() - 7*24*3600*1000).toISOString().slice(0,10)
-        const analyticsFilters = { ...tenantFilters(), date: `gte.${weekAgo}` }
-        const rows = await dbGet('analytics_daily',
-          'campaign_name,date,spend_myr,cpl,cpr,frequency',
-          analyticsFilters, 'date.desc', 500) as Record<string,unknown>[]
-        // Roll up by campaign
-        const byCamp: Record<string,{spend:number;cpl:number;cpr:number;freqSum:number;freqCnt:number}> = {}
-        for (const r of rows) {
-          const c = String(r.campaign_name)
-          if (!byCamp[c]) byCamp[c] = {spend:0,cpl:0,cpr:0,freqSum:0,freqCnt:0}
-          byCamp[c].spend += Number(r.spend_myr) || 0
-          if (r.cpl) byCamp[c].cpl = Number(r.cpl)
-          if (r.cpr) byCamp[c].cpr = Number(r.cpr)
-          if (r.frequency) { byCamp[c].freqSum += Number(r.frequency); byCamp[c].freqCnt++ }
-        }
-        let triggered = 0
-        for (const rule of rules) {
-          const camps = rule.campaign_filter ? [String(rule.campaign_filter)] : Object.keys(byCamp)
-          for (const camp of camps) {
-            const d = byCamp[camp]
-            if (!d) continue
-            const avgFreq = d.freqCnt > 0 ? d.freqSum / d.freqCnt : 0
-            const valueMap: Record<string,number> = { frequency: avgFreq, cpl: d.cpl, cpr: d.cpr, spend: d.spend }
-            const value = valueMap[String(rule.metric)]
-            if (value === undefined || value === 0) continue
-            const fires = String(rule.operator) === 'gt' ? value > Number(rule.threshold) : value < Number(rule.threshold)
-            if (fires) {
-              await dbInsert('alerts', { rule_id: rule.id, rule_name: rule.name, campaign_name: camp, metric: rule.metric, value: +value.toFixed(4), threshold: rule.threshold, tenant_id: _reqTenantId })
-              triggered++
-            }
-          }
-        }
-        return new Response(JSON.stringify({ ok: true, triggered, checked: Object.keys(byCamp).length }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      } catch(e) {
-        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      }
-    }
-
     // \u2500\u2500 Workflow CRUD (from dashboard) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-    if (body.action === 'create_workflow') {
-      const { name, description, agent_id, prompt, schedule, notification_channel, notify_to } = body
-      if (!name || !agent_id || !prompt || !schedule)
-        return new Response(JSON.stringify({ error: 'name, agent_id, prompt, schedule required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const next_run = calcNextRun(schedule).toISOString()
-      const row = await dbInsertReturning('workflows', { name, description: description||'', agent_id, prompt, schedule, active: true, next_run, notification_channel: notification_channel||null, notify_to: notify_to||null })
-      return new Response(JSON.stringify({ ok: true, workflow: row }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'update_workflow') {
-      const { id, ...fields } = body
-      if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      // Recalculate next_run if schedule changed
-      if (fields.schedule) fields.next_run = calcNextRun(String(fields.schedule)).toISOString()
-      delete fields.action
-      await dbPatch('workflows', String(id), fields)
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
     if (body.action === 'delete_workflow') {
       const { id } = body
       if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2596,76 +2361,6 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === 'run_workflows') {
-      await runWorkflows()
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    // ── Agent Task actions ────────────────────────────────────────────
-    if (body.action === 'start_task') {
-      const { goal, session_id } = body
-      if (!goal) return new Response(JSON.stringify({ error:'goal required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
-      const { text } = await callLLM(providers, defaultProvider, undefined,
-        `You are Hermes task planner. Break the user goal into 3-6 concrete steps.
-Available tools:
-- web_search: params {"query":"..."} — search the web
-- fetch_url: params {"url":"..."} — read a webpage
-- call_agent: params {"agent_id":"chat|code|crm|account","prompt":"... use {{step_N}} to reference previous step results"}
-- send_notification: params {"channel":"slack","message":"... use {{step_N}}"}
-Return ONLY a valid JSON array, no markdown:
-[{"id":"step_1","desc":"...","tool":"...","params":{...}},...]`,
-        [{ role:'user', content:`Goal: ${goal}` }], false)
-      let plan: TaskStep[] = []
-      try {
-        const m = text.match(/\[[\s\S]*?\]/)
-        if (m) plan = (JSON.parse(m[0]) as TaskStep[]).map((s,i) => ({ ...s, id:`step_${i+1}`, status:'pending', result:null }))
-      } catch { plan = [{ id:'step_1', desc:goal, tool:'call_agent', params:{ agent_id:'chat', prompt:goal }, status:'pending', result:null }] }
-      const task = await dbInsertReturning('agent_tasks', { goal, plan, status:'pending', session_id:session_id||null, tenant_id:_reqTenantId }) as AgentTask
-      // Kick off step execution immediately (fire-and-forget self-invoke)
-      fetch(SELF_URL, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'x-orch-internal': INTERNAL_SECRET, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'execute_task_step', task_id: String(task.id) })
-      }).catch(() => {})
-      return new Response(JSON.stringify({ ok:true, task }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
-    if (body.action === 'execute_task_step') {
-      const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
-      if (body.task_id) {
-        // Targeted: chain-triggered for a specific task
-        await executeTaskSteps(String(body.task_id), providers, defaultProvider, agents).catch(()=>{})
-      } else {
-        // pg_cron safety net: rescue any stuck running/pending tasks
-        const running = await dbGet('agent_tasks','id',{ status:'eq.running' },'updated_at.asc',3) as {id:string}[]
-        const pending = await dbGet('agent_tasks','id',{ status:'eq.pending' },'created_at.asc',2) as {id:string}[]
-        const ids = [...running,...pending].map(t=>t.id).slice(0,3)
-        await Promise.all(ids.map(id => executeTaskSteps(id, providers, defaultProvider, agents).catch(()=>{})))
-      }
-      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
-    if (body.action === 'list_tasks') {
-      const rows = await dbGet('agent_tasks','id,goal,status,current_step,plan,created_at',{},'created_at.desc',30)
-      return new Response(JSON.stringify({ ok:true, tasks:rows }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
-    if (body.action === 'get_task') {
-      const rows = await dbGet('agent_tasks','*',{ id:`eq.${body.id}` })
-      if (!rows[0]) return new Response(JSON.stringify({ error:'not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
-      return new Response(JSON.stringify({ ok:true, task:rows[0] }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
-    if (body.action === 'cancel_task') {
-      await dbPatch('agent_tasks', String(body.id), { status:'cancelled', updated_at:new Date().toISOString() })
-      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
-    if (body.action === 'run_workflow_now') {
-      const { id } = body
-      if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      // Force next_run to now so runWorkflows picks it up
-      await dbPatch('workflows', String(id), { next_run: new Date().toISOString() })
       await runWorkflows()
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
@@ -3132,7 +2827,7 @@ Return ONLY a valid JSON array, no markdown:
       const [analytics, leads, alerts, recent_convs, active_agents, gaps, skills, today] = await Promise.all([
         dbGet('analytics_daily', 'spend_myr,results,new_contacts,campaign_name', tenantFilters({ date: `gte.${monthStart}` })),
         dbGetPage('leads', 'id', tenantFilters({ date: `gte.${monthStart}` }), undefined, 0),
-        dbGet('alerts', 'id,rule_name,campaign_name,metric,value,triggered_at', tenantFilters(), 'triggered_at.desc', 10),
+        dbGet('automation_logs', 'id,message,action_taken,status,read,triggered_at', tenantFilters(), 'triggered_at.desc', 10),
         dbGet('conversations', 'id,role,content,agent,created_at', tenantFilters({ role: 'eq.user' }), 'created_at.desc', 6),
         dbGet('agents', 'id,name', { active: 'eq.true' }, 'id.asc'),
         dbGetPage('agent_suggestions', 'id', tenantFilters({ handled: 'eq.false' }), undefined, 0),
@@ -3728,139 +3423,6 @@ Return ONLY a valid JSON array, no markdown:
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
-    // ── Review agent actions ────────────────────────────────────────
-    if (body.action === 'get_reviewers') {
-      // Flat list of all reviewers (for manual tagging in upload modal)
-      const filters = tenantFilters({ active: 'eq.true' })
-      const rows = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', filters, 'reviewer_name.asc')
-      return new Response(JSON.stringify({ reviewers: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'get_department_routes') {
-      const filters = tenantFilters({ active: 'eq.true' })
-      const rows = await dbGet('department_routes', 'id,department,reviewer_name,reviewer_email,reviewer_company_id', filters, 'department.asc')
-      return new Response(JSON.stringify({ routes: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'save_department_route') {
-      const { id: routeId, department, reviewer_name, reviewer_email, reviewer_company_id } = body
-      if (!department || !reviewer_name || (!reviewer_email && !reviewer_company_id))
-        return new Response(JSON.stringify({ error: 'department, reviewer_name, and reviewer_email or reviewer_company_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const data = { department, reviewer_name, reviewer_email: reviewer_email||null, reviewer_company_id: reviewer_company_id||null }
-      if (routeId) {
-        await dbPatch('department_routes', routeId as string, data)
-      } else {
-        await dbInsert('department_routes', { ...data, tenant_id: _reqTenantId, active: true })
-      }
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'delete_department_route') {
-      const { id: routeId } = body
-      if (!routeId) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbPatch('department_routes', routeId as string, { active: false })
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'submit_review') {
-      const { file_name, file_type, file_content, file_url, reviewer_id, note, submitted_by } = body
-      if (!file_name || !file_type)
-        return new Response(JSON.stringify({ error: 'file_name and file_type required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      try {
-        let route: Record<string,string>|null = null
-        let department = 'Unknown'
-        let summary = ''
-        let key_info: Record<string,unknown> = {}
-        let classification_reason = ''
-
-        if (reviewer_id) {
-          // ── Direct mode: reviewer manually chosen, no AI classification ──
-          const routeRows = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', { id: `eq.${reviewer_id}` }, undefined, 1)
-          route = (routeRows[0] as Record<string,string>|undefined) ?? null
-          department = route?.department || 'Unknown'
-          summary = String(note || '')
-          classification_reason = '手动指定审核人'
-        } else if (file_content) {
-          // ── AI classification mode: paste text, auto-route by department ──
-          const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
-          const classifyPrompt = `Analyze this document and respond with ONLY valid JSON (no markdown):\n{\n  "department": "Finance|HR|IT|Sales|Purchase|Operations|Unknown",\n  "reason": "one sentence why",\n  "key_info": { "extracted key fields": "values" },\n  "summary": "2-3 sentence summary"\n}\nDocument: ${file_name}\nContent:\n${(file_content as string).slice(0, 8000)}`
-          const { text } = await callLLM(providers, defaultProvider, undefined,
-            'You are a document classification expert. Analyze documents and output only valid JSON.',
-            [{ role: 'user', content: classifyPrompt }], false)
-          let cl: Record<string,unknown> = { department: 'Unknown', reason: '', key_info: {}, summary: '' }
-          try { const m = text.match(/\{[\s\S]*\}/); if (m) cl = { ...cl, ...JSON.parse(m[0]) } } catch { /* default */ }
-          department = String(cl.department)
-          summary    = String(cl.summary)
-          key_info   = cl.key_info as Record<string,unknown>
-          classification_reason = String(cl.reason)
-          const routeFilters = tenantFilters({ department: `eq.${department}`, active: 'eq.true' })
-          const routes = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id', routeFilters, undefined, 1)
-          route = (routes[0] as Record<string,string>|undefined) ?? null
-        }
-
-        // Insert review record
-        const review = await dbInsertReturning('reviews', {
-          tenant_id: _reqTenantId,
-          file_name, file_type,
-          file_content: file_content || null,
-          file_url: file_url || null,
-          department,
-          classification_reason,
-          key_info,
-          summary,
-          submitted_by: submitted_by || 'unknown',
-          reviewer_route_id: route?.id ?? null,
-          status: 'pending',
-        })
-
-        // Reviewers open the file without logging in: a signed link valid for 7 days
-        const reviewLink = file_url ? await signedUrl(String(file_url), 7 * 24 * 3600) : null
-        // Email notification if reviewer has email
-        let notified = false
-        if (route?.reviewer_email) {
-          try {
-            const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
-            const client = new SmtpClient()
-            await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
-            const fileInfo = reviewLink ? `\n文件链接：${reviewLink}` : ''
-            await client.send({
-              from: 'Orchestrator Agent <ks9988467@gmail.com>',
-              to: route.reviewer_email,
-              subject: `[审核请求] ${department} - ${file_name}`,
-              content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}${fileInfo}${summary ? '\n说明：' + summary : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by || 'unknown'}`,
-            })
-            await client.close()
-            await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
-            notified = true
-          } catch { /* email failure is non-fatal */ }
-        }
-        // Lark webhook notification
-        try {
-          const lark = await getLarkConfig()
-          if (lark?.webhook_url) {
-            await sendLarkWebhook(lark.webhook_url,
-              `📋 新文件审核请求 — ${department}`,
-              `**文件：** ${file_name}\n**提交人：** ${submitted_by || 'unknown'}\n${summary ? '**摘要：** ' + summary : ''}`,
-              reviewLink ?? undefined)
-            if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
-          }
-        } catch { /* non-fatal */ }
-        // Slack notification
-        await notifySlack(`📋 新审核请求 — ${department}`, `文件：${file_name}\n提交人：${submitted_by||'unknown'}${summary ? '\n摘要：'+summary : ''}`)
-
-        return new Response(JSON.stringify({
-          ok: true,
-          review_id: review.id,
-          department,
-          summary,
-          reviewer: route ? { name: route.reviewer_name, email: route.reviewer_email||null, company_id: route.reviewer_company_id||null } : null,
-          notified,
-        }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      } catch(e) {
-        return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      }
-    }
-
     // ── Document reviewer notifications ──────────────────────────────
     if (body.action === 'notify_doc_reviewers') {
       const { doc_id, doc_title, uploaded_by, reviewers } = body as any
@@ -4033,45 +3595,6 @@ Return ONLY a valid JSON array, no markdown:
       }
     }
 
-    if (body.action === 'create_lark_task') {
-      const { title, description, due_date } = body
-      if (!title) return new Response(JSON.stringify({ error: 'title required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const lark = await getLarkConfig()
-      if (!lark?.app_id || !lark?.app_secret) return new Response(JSON.stringify({ error: '未配置 Lark App ID/Secret，请先在 API 集成页面配置' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const token = await getLarkToken(lark.app_id, lark.app_secret)
-      if (!token) return new Response(JSON.stringify({ error: '获取 Lark token 失败，检查 App ID/Secret' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const dueMs = due_date ? new Date(String(due_date)).getTime() : undefined
-      const taskId = await createLarkTask(token, String(title), String(description || ''), dueMs)
-      return new Response(JSON.stringify({ ok: true, task_id: taskId }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'list_reviews') {
-      const { status: sf, department: df } = body
-      const filters = tenantFilters()
-      if (sf) filters['status'] = `eq.${sf}`
-      if (df) filters['department'] = `eq.${df}`
-      const rows = await dbGet('reviews', 'id,file_name,file_type,file_url,department,status,submitted_by,summary,classification_reason,key_info,review_notes,created_at,reviewed_at,notified_at', filters, 'created_at.desc', 50)
-      for (const r of rows) r.file_url = await signedUrl(r.file_url, 3600)
-      return new Response(JSON.stringify({ reviews: rows }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    if (body.action === 'update_review_status') {
-      const { review_id, status: newStatus, review_notes } = body
-      if (!review_id || !newStatus) return new Response(JSON.stringify({ error: 'review_id and status required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      await dbPatch('reviews', review_id as string, { status: newStatus, review_notes: review_notes||null, reviewed_at: new Date().toISOString() })
-      return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    }
-
-    // ── RAG: embed text ─────────────────────────────────────────────
-    if (body.action === 'embed') {
-      const { text: embedText } = body
-      if (!embedText) return new Response(JSON.stringify({ error: 'text required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const providers = await loadProviders()
-      const er = await getEmbedding(String(embedText), providers)
-      if (!er) return new Response(JSON.stringify({ error: 'Embedding failed: no provider available (OpenAI/Google/OpenRouter)' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
-      return new Response(JSON.stringify({ embedding: er.vector, model: er.model }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-
     // ── RAG: ingest document chunks ─────────────────────────────────
     if (body.action === 'kb_ingest') {
       const { kb_id, source_name, content: rawContent } = body
@@ -4155,12 +3678,6 @@ Return ONLY a valid JSON array, no markdown:
       await dbDelete('knowledge_bases', { id: `eq.${kb_id}` })
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
-    if (body.action === 'list_kb_chunks') {
-      const { kb_id } = body
-      if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const rows = await dbGet('kb_chunks','id,source_name,chunk_index,content,created_at',{ kb_id:`eq.${kb_id}` },'chunk_index.asc',200)
-      return new Response(JSON.stringify({ chunks: rows }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
     if (body.action === 'count_kb_chunks') {
       const { kb_id } = body
       if (!kb_id) return new Response(JSON.stringify({ error:'kb_id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
@@ -4214,12 +3731,6 @@ Return ONLY a valid JSON array, no markdown:
       if (wfId) { await dbPatch('workflows', wfId as string, data); return new Response(JSON.stringify({ ok:true, id:wfId }), { headers:{...CORS,'Content-Type':'application/json'} }) }
       const row = await dbInsertReturning('workflows',{ ...data, tenant_id:_reqTenantId, active:true })
       return new Response(JSON.stringify({ ok:true, id:row.id }), { headers:{...CORS,'Content-Type':'application/json'} })
-    }
-    if (body.action === 'delete_workflow') {
-      const { id: wfId } = body
-      if (!wfId) return new Response(JSON.stringify({ error:'id required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      await dbPatch('workflows', wfId as string, { active:false })
-      return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'run_workflow') {
       const { id: wfId, input: wfInput } = body
@@ -4431,111 +3942,6 @@ Return ONLY a valid JSON array, no markdown:
         return new Response(readable, { headers: { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
       }
 
-      // ── File attached in chat → run review workflow directly ────────
-      if (body.file_url && body.file_name) {
-        const { readable, writable } = new TransformStream()
-        const writer = writable.getWriter()
-        const encoder = new TextEncoder()
-        const sse2 = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
-        ;(async () => {
-          try {
-            const [providers, defaultProvider] = await Promise.all([loadProviders(), getDefaultProvider()])
-            const file_name = String(body.file_name)
-            const file_url  = String(body.file_url)
-            const extMap: Record<string,string> = { pdf:'pdf', doc:'word', docx:'word', xls:'excel', xlsx:'excel', csv:'excel', jpg:'image', jpeg:'image', png:'image', gif:'image', webp:'image' }
-            const ext = file_name.split('.').pop()?.toLowerCase() ?? ''
-            const file_type = extMap[ext] ?? 'pdf'
-            const note = smsg && !smsg.startsWith('请审核这份文件') ? String(smsg) : ''
-            const submitted_by = String(body.submitted_by || 'chat')
-            const submitted_by_staff_id = body.submitted_by_staff_id ? String(body.submitted_by_staff_id) : null
-
-            // AI classify
-            let department = 'General', summary = '', key_info: Record<string,unknown> = {}, classification_reason = ''
-            try {
-              const { text } = await callLLM(providers, defaultProvider, undefined,
-                `You are a document classifier. Analyze the filename and return JSON only:
-{"department":"Finance|HR|Legal|Procurement|General","summary":"one line description in Chinese","key_info":{},"reason":"why this department in Chinese"}`,
-                [{ role:'user', content: `File: ${file_name}${note ? '\nNote: '+note : ''}` }], false)
-              const m = text.match(/\{[\s\S]*\}/)
-              if (m) {
-                const cl = JSON.parse(m[0])
-                department = String(cl.department || 'General')
-                summary = String(cl.summary || '')
-                key_info = cl.key_info || {}
-                classification_reason = String(cl.reason || '')
-              }
-            } catch { /* use defaults */ }
-
-            // Find reviewer by department
-            const routeFilters = tenantFilters({ department: `eq.${department}`, active: 'eq.true' })
-            const routes = await dbGet('department_routes', 'id,reviewer_name,reviewer_email,reviewer_company_id,department', routeFilters, undefined, 1)
-            const route = (routes[0] as Record<string,string>|undefined) ?? null
-
-            // Insert review record
-            const review = await dbInsertReturning('reviews', {
-              tenant_id: _reqTenantId, file_name, file_type, file_url,
-              file_content: null, department, classification_reason, key_info, summary,
-              submitted_by, submitted_by_staff_id, reviewer_route_id: route?.id ?? null, status: 'pending',
-            })
-
-            // Reviewers open the file without logging in: a signed link valid for 7 days
-            const reviewLink = await signedUrl(file_url, 7 * 24 * 3600) ?? file_url
-            // Send email notification
-            let notified = false
-            if (route?.reviewer_email) {
-              try {
-                const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
-                const client = new SmtpClient()
-                await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
-                await client.send({
-                  from: 'Orchestrator Agent <ks9988467@gmail.com>',
-                  to: route.reviewer_email,
-                  subject: `[审核请求] ${department} - ${file_name}`,
-                  content: `您好 ${route.reviewer_name}，\n\n有新文件需要您审核：\n\n文件名：${file_name}\n部门：${department}\n文件链接：${reviewLink}${summary ? '\n摘要：'+summary : ''}${note ? '\n备注：'+note : ''}\n\n请登录系统完成审核。\n\n提交人：${submitted_by}`,
-                })
-                await client.close()
-                await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() })
-                notified = true
-              } catch { /* email failure non-fatal */ }
-            }
-            // Lark webhook notification
-            try {
-              const lark = await getLarkConfig()
-              if (lark?.webhook_url) {
-                await sendLarkWebhook(lark.webhook_url,
-                  `📋 新文件审核请求 — ${department}`,
-                  `**文件：** ${file_name}\n**提交人：** ${submitted_by}\n${summary ? '**摘要：** ' + summary : ''}${note ? '\n**备注：** ' + note : ''}`,
-                  reviewLink)
-                if (!notified) { await dbPatch('reviews', review.id as string, { notified_at: new Date().toISOString() }); notified = true }
-              }
-            } catch { /* non-fatal */ }
-
-            // Build confirmation message
-            let confirmMsg = `✅ 文件已提交审核\n\n📄 **${file_name}**\n🏷️ 部门：${department}`
-            if (summary) confirmMsg += `\n📝 摘要：${summary}`
-            if (route) {
-              confirmMsg += `\n👤 审核人：${route.reviewer_name}`
-              confirmMsg += notified ? `\n📧 已发送邮件通知` : `\n⚠️ 邮件发送失败（检查审核人邮箱配置）`
-            } else {
-              confirmMsg += `\n⚠️ 未找到「${department}」部门审核人，请在文件审核 → 审核路由配置中添加`
-            }
-            confirmMsg += `\n\n可在「📋 文件审核」查看审核进度。`
-
-            // Stream confirmation char by char
-            for (const ch of confirmMsg) { await sse2({ chunk: ch }) }
-
-            // Save to conversation history
-            await dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg || `[文件] ${file_name}`, agent: 'review', tenant_id: _reqTenantId })
-            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: confirmMsg, agent: 'review', tenant_id: _reqTenantId })
-            await sse2({ done: true, agent: 'review', agent_name: '文件审核', session_id: sid2, provider: 'system', conversation_id: aRow.id })
-          } catch(e) {
-            await sse2({ error: (e as Error).message })
-          } finally {
-            await writer.close()
-          }
-        })()
-        return new Response(readable, { headers: { ...CORS, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
-      }
       const [sproviders, sdefProv, sagents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
       _reqProviders = sproviders; _reqAgents = sagents; _reqDefaultProvider = sdefProv
       _reqSessionId = sid2

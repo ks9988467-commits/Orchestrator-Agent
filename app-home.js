@@ -238,8 +238,8 @@ async function renderHome() {
           <div class="home-section-title">近期预警</div>
           ${alerts.length ? alerts.slice(0,6).map(a => `
             <div style="padding:7px 0;border-bottom:1px solid #eee">
-              <div style="font-size:12px;color:#f59e0b;font-weight:600">${esc(a.rule_name||'')}</div>
-              <div style="font-size:11px;color:var(--ink-4);margin-top:2px">${esc(a.campaign_name||'')} · ${esc(a.metric||'')} = ${Number(a.value).toFixed(2)}</div>
+              <div style="font-size:12px;color:${a.read ? 'var(--ink-3)' : '#f59e0b'};font-weight:600;white-space:pre-wrap;word-break:break-word">${esc((a.message||'').slice(0,120))}${(a.message||'').length > 120 ? '…' : ''}</div>
+              <div style="font-size:11px;color:var(--ink-4);margin-top:2px">${fmtTime(a.triggered_at)}${a.read ? '' : ' · 未读'}</div>
             </div>`).join('') : '<div style="color:var(--ink-5);font-size:12px;padding:8px 0">✓ 暂无预警</div>'}
         </div>
       </div>`

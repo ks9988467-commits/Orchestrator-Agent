@@ -191,13 +191,11 @@ async function sendMsg() {
       }
     }
 
-    // Single file → use legacy file_url path (review workflow + data extraction)
+    // Single file → file_url path (data extraction when the message asks for it, else normal chat)
     // Multiple files → use files[] path (joint analysis)
-    const submitter = _msgMyId ? (_msgStaff.find(function(s){return s.id===_msgMyId})?.name||'chat') : 'chat'
     let filePayload = {}
     if (uploadedFiles.length === 1) {
-      filePayload = { file_url: uploadedFiles[0].url, file_name: uploadedFiles[0].name, file_type: uploadedFiles[0].type,
-                      submitted_by: submitter, submitted_by_staff_id: _msgMyId||undefined }
+      filePayload = { file_url: uploadedFiles[0].url, file_name: uploadedFiles[0].name, file_type: uploadedFiles[0].type }
     } else if (uploadedFiles.length > 1) {
       filePayload = { files: uploadedFiles }
     }

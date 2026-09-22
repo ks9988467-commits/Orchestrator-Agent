@@ -239,7 +239,7 @@ await dbInsert('analytics_daily', [
   { campaign_name: MARK, date: monthStart, spend_myr: 12.5 },
   { campaign_name: MARK, date: dayBefore, spend_myr: 99 },
 ])
-await dbInsert('alerts', { rule_name: MARK, campaign_name: MARK, metric: 'cpl', value: 1.5 })
+await dbInsert('automation_logs', { message: `${MARK} home alert`, action_taken: 'dashboard_alert', read: false })
 const h1 = await api('home_summary', hs)
 const d = (k: string) => h1.json[k] - h0.json[k]
 check('lead_count counts only leads from month_start on', d('lead_count') === 2, { delta: d('lead_count') })
@@ -250,7 +250,7 @@ const agentIds = (h1.json.active_agents || []).map((a: { id: string }) => a.id)
 check('active_agents includes active and excludes inactive', agentIds.includes(`${MARK}_on`) && !agentIds.includes(`${MARK}_off`), agentIds)
 const hsAnal = (h1.json.analytics || []).filter((r: { campaign_name: string }) => r.campaign_name === MARK)
 check('analytics: only this month, spend_myr as a number', hsAnal.length === 1 && hsAnal[0].spend_myr === 12.5, hsAnal)
-check('alerts: newest first, value as a number', h1.json.alerts?.[0]?.rule_name === MARK && h1.json.alerts[0].value === 1.5, h1.json.alerts?.[0])
+check('alerts: newest automation log first, with message and read flag', h1.json.alerts?.[0]?.message === `${MARK} home alert` && h1.json.alerts[0].read === false, h1.json.alerts?.[0])
 check('recent_convs: user messages only, newest first', h1.json.recent_convs?.[0]?.content === `${MARK} today` &&
   (h1.json.recent_convs || []).every((c: { role: string }) => c.role === 'user'), h1.json.recent_convs)
 const hBad = await api('home_summary', { month_start: '2026-9-1', today_start: todayStart })
@@ -705,7 +705,7 @@ await dbDelete('agent_skills', { agent: `like.${MARK}*` })
 await dbDelete('agent_suggestions', { session_id: `eq.${MARK}` })
 await dbDelete('leads', { name: `like.${MARK}*` })
 await dbDelete('analytics_daily', { campaign_name: `eq.${MARK}` })
-await dbDelete('alerts', { rule_name: `eq.${MARK}` })
+await dbDelete('automation_logs', { message: `eq.${MARK} home alert` })
 await dbDelete('accounts', { id: `like.${MARK}*` })
 await dbDelete('ad_reports', { campaign_name: `like.${MARK}*` })
 await dbDelete('data_entries', { file_name: `like.${MARK}*` })
@@ -716,7 +716,7 @@ const leftover = [
   ...await dbGet('agent_suggestions', 'id', { session_id: `eq.${MARK}` }),
   ...await dbGet('leads', 'id', { name: `like.${MARK}*` }),
   ...await dbGet('analytics_daily', 'id', { campaign_name: `eq.${MARK}` }),
-  ...await dbGet('alerts', 'id', { rule_name: `eq.${MARK}` }),
+  ...await dbGet('automation_logs', 'id', { message: `eq.${MARK} home alert` }),
   ...await dbGet('accounts', 'id', { id: `like.${MARK}*` }),
   ...await dbGet('ad_reports', 'id', { campaign_name: `like.${MARK}*` }),
   ...await dbGet('data_entries', 'id', { file_name: `like.${MARK}*` }),
