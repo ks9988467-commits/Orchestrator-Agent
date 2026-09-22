@@ -2231,9 +2231,9 @@ Deno.serve(async (req: Request) => {
       // Only a hash of the code is stored
       await dbInsert('otp_requests', { email, code: await sha256Hex(`${email}:${code}`) })
       if (Deno.env.get('OTP_DEV_ECHO') === 'true') {
-        // Local development only: print the code instead of emailing it
+        // Local development only: print the code and hand it back to the login page instead of emailing it
         console.log(`[OTP_DEV_ECHO] ${email}: ${code}`)
-        return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ ok: true, dev_code: code }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       // Send email via Gmail SMTP using fetch to SMTP2Go-like approach \u2014 use denomailer
       try {

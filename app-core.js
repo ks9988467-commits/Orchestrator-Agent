@@ -28,6 +28,12 @@ async function sendOtp() {
       errEl.textContent = ''
       document.getElementById('lockOtpStep1').style.display = 'none'
       document.getElementById('lockOtpStep2').style.display = 'block'
+      // Local backend with OTP_DEV_ECHO: no email is sent, the code comes back with the response
+      const devEl = document.getElementById('lockDevCode')
+      if (d.dev_code) {
+        document.getElementById('lockCodeInput').value = d.dev_code
+        if (devEl) { devEl.textContent = '本机开发模式：验证码 ' + d.dev_code + '（已自动填入，正式环境会发到邮箱）'; devEl.style.display = 'block' }
+      } else if (devEl) devEl.style.display = 'none'
     } else { errEl.textContent = d.error || '发送失败' }
   } catch(e) { clearTimeout(timer); errEl.textContent = e.name === 'AbortError' ? '请求超时，请重试' : '网络错误，请重试' }
 }
