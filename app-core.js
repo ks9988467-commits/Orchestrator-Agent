@@ -219,30 +219,55 @@ function closeSidebar() {
   document.getElementById('sidebarOverlay')?.classList.remove('open')
 }
 
-function showPage(id, btn) {
+// Sections: one sidebar entry that holds several pages, shown as a tab row
+// (#sectionTabs) above the active page. Any page id still works with showPage().
+const SECTIONS = {
+  agents:   ['agents', 'workflow', 'kb'],
+  data:     ['data', 'cac'],
+  logs:     ['logs', 'usage'],
+  settings: ['llm', 'api', 'staff', 'tenants'],
+}
+const PAGE_LABELS = {
+  agents: '🤖 Agents', workflow: '🔁 工作流', kb: '🧠 知识库',
+  data: '📋 数据', cac: '📊 渠道经济',
+  logs: '💬 日志', usage: '📈 用量',
+  llm: '🔑 LLM 配置', api: '🔌 API 对接', staff: '👥 员工', tenants: '🏢 客户管理',
+}
+function sectionOf(pageId) { return Object.keys(SECTIONS).find(s => SECTIONS[s].includes(pageId)) || null }
+function renderSectionTabs(section, pageId) {
+  const bar = document.getElementById('sectionTabs')
+  if (!bar) return
+  if (!section) { bar.classList.remove('on'); bar.innerHTML = ''; return }
+  const pages = SECTIONS[section].filter(p => p !== 'tenants' || _session.role === 'master')
+  bar.innerHTML = pages.map(p => `<button class="data-tab${p === pageId ? ' active' : ''}" onclick="showPage('${p}')">${PAGE_LABELS[p] || p}</button>`).join('')
+  bar.classList.add('on')
+}
+
+// id: a page id, or a section id (opens the section's first page)
+function showPage(id) {
   closeSidebar()  // close mobile drawer on navigation
-  // Skills are embedded inside Agents page — redirect to agents + switch tab
-  if (id === 'skills') {
-    const agentsBtn = document.querySelector('.nav-item[onclick*="agents"]')
-    showPage('agents', agentsBtn || btn)
-    switchAgentTab('skills', null)
-    if (btn && agentsBtn && btn !== agentsBtn) btn.classList.remove('active')
-    return
-  }
+  // Tabs inside the Agents page
+  if (id === 'skills')  { showPage('agents'); switchAgentTab('skills', null); return }
+  if (id === 'routing') { showPage('agents'); switchAgentTab('gaps', null); return }
+  const section = SECTIONS[id] ? id : sectionOf(id)
+  const pageId  = SECTIONS[id] ? SECTIONS[id][0] : id
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
-  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
-  document.getElementById(id+'Page').classList.add('active')
-  btn.classList.add('active')
+  document.getElementById(pageId+'Page').classList.add('active')
+  const navKey = section || pageId
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.section === navKey))
+  renderSectionTabs(section, pageId)
   // Pages that always re-fetch on navigation
   const alwaysReload = new Set(['logs','data','agents','llm','notes','usage','tasks','staff','review','agtask','kb'])
-  if (alwaysReload.has(id)) pageLoaded[id] = false
-  if (!pageLoaded[id]) { pageLoaded[id] = true; loadPage(id) }
+  if (alwaysReload.has(pageId)) pageLoaded[pageId] = false
+  if (!pageLoaded[pageId]) { pageLoaded[pageId] = true; loadPage(pageId) }
   // Auto-refresh logs every 30s; stop when leaving
   if (_logsRefreshTimer) { clearInterval(_logsRefreshTimer); _logsRefreshTimer = null }
-  if (id === 'logs') _logsRefreshTimer = setInterval(loadLogs, 30000)
+  if (pageId === 'logs') _logsRefreshTimer = setInterval(loadLogs, 30000)
   // Direct messages are polled only while the messaging page is open
-  if (id === 'msg') startDmPolling(); else stopDmPolling()
+  if (pageId === 'msg') startDmPolling(); else stopDmPolling()
 }
+// Used by links inside pages (home cards etc.)
+function nav(id) { showPage(id) }
 function loadPage(id) {
   if (id === 'home')      renderHome()
   if (id === 'tenants')   loadTenantsPage()

@@ -50,39 +50,28 @@
     </div>
   </div>
   <nav>
-    <!-- AI Core -->
+    <!-- Sections with several pages (Agents, 数据, 日志, 设置) show them as a tab row
+         at the top of the content area (#sectionTabs); see SECTIONS in app-core.js -->
     <div class="nav-group">
       <span class="nav-group-label">AI 核心</span>
-      <button class="nav-item active" onclick="showPage('chat',this)">对话</button>
-      <button class="nav-item" onclick="showPage('agents',this)">Agents</button>
-      <!-- <button class="nav-item" onclick="showPage('notes',this)">笔记</button> -->
-      <button class="nav-item" onclick="showPage('workflow',this)">工作流</button>
-      <button class="nav-item" onclick="showPage('kb',this)">🧠 知识库</button>
-      <!-- <button class="nav-item" onclick="showPage('agtask',this)">⚡ AI任务</button> -->
+      <button class="nav-item active" data-section="chat" onclick="showPage('chat',this)">对话</button>
+      <button class="nav-item" data-section="agents" onclick="showPage('agents',this)">Agents</button>
     </div>
-    <!-- Analytics -->
     <div class="nav-group">
       <span class="nav-group-label">数据分析</span>
-      <button class="nav-item" onclick="showPage('usage',this)">用量</button>
-      <button class="nav-item" onclick="showPage('logs',this)">日志</button>
-      <button class="nav-item" onclick="showPage('data',this)">数据</button>
-      <button class="nav-item" onclick="showPage('cac',this)">📊 渠道经济</button>
+      <button class="nav-item" data-section="data" onclick="showPage('data',this)">数据</button>
+      <button class="nav-item" data-section="logs" onclick="showPage('logs',this)">日志</button>
     </div>
-    <!-- Operations -->
     <div class="nav-group">
       <span class="nav-group-label">运营</span>
-      <button class="nav-item" onclick="showPage('tasks',this)">任务</button>
-      <button class="nav-item" onclick="showPage('review',this)">文件管理</button>
-      <button class="nav-item" onclick="showPage('staff',this)">员工</button>
-      <button class="nav-item" onclick="showPage('ugc',this)">🎬 UGC Studio</button>
-      <button class="nav-item" onclick="showPage('msg',this)">消息 <span id="msgUnreadBadge" style="display:none;background:#da0d15;color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:auto"></span></button>
+      <button class="nav-item" data-section="tasks" onclick="showPage('tasks',this)">任务</button>
+      <button class="nav-item" data-section="review" onclick="showPage('review',this)">文件</button>
+      <button class="nav-item" data-section="msg" onclick="showPage('msg',this)">消息 <span id="msgUnreadBadge" style="display:none;background:#da0d15;color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:auto"></span></button>
+      <button class="nav-item" data-section="ugc" onclick="showPage('ugc',this)">🎬 UGC Studio</button>
     </div>
-    <!-- Settings -->
     <div class="nav-group" style="margin-top:auto">
       <span class="nav-group-label">系统</span>
-      <button class="nav-item master-only" style="display:none" onclick="showPage('tenants',this)">客户管理</button>
-      <button class="nav-item admin-only" onclick="showPage('llm',this)">LLM 配置</button>
-      <button class="nav-item admin-only" onclick="showPage('api',this)">API 对接</button>
+      <button class="nav-item admin-only" data-section="settings" onclick="showPage('settings',this)">⚙️ 设置</button>
     </div>
   </nav>
   <div class="sidebar-footer">
@@ -122,6 +111,9 @@
     <button id="mobileNavToggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
     <span class="mtb-title">🧠 Orchestrator</span>
   </div>
+
+  <!-- Tab row for sections that hold several pages; filled by showPage() -->
+  <div id="sectionTabs" class="data-tabs"></div>
 
   <!-- Home -->
   <div class="page" id="homePage">

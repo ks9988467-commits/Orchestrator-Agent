@@ -404,6 +404,8 @@ select{background:var(--bg-1);border:1px solid var(--border);color:var(--ink-1);
 /* ── Data page ── */
 .data-page{display:flex;flex-direction:column;flex:1;overflow:hidden}
 .data-tabs{display:flex;gap:4px;padding:var(--sp-4) var(--px) 0;border-bottom:1px solid var(--border);flex-shrink:0}
+#sectionTabs{display:none;padding-top:10px;background:var(--bg-0)}
+#sectionTabs.on{display:flex}
 .data-tab{padding:var(--sp-2) 18px;border-radius:var(--r-sm) var(--r-sm) 0 0;font-size:var(--t-base);cursor:pointer;border:none;background:none;color:var(--ink-3);border-bottom:2px solid transparent;transition:all .15s;-webkit-appearance:none;appearance:none;margin-bottom:-1px}
 .data-tab:hover{color:var(--ink-2)}
 .data-tab.active{color:var(--red);border-bottom-color:var(--red);background:none;font-weight:600}
