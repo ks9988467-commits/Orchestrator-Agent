@@ -4,10 +4,45 @@
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
 import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
+// ── CORS ─────────────────────────────────────────────────────────────
+// Browsers may call the backend only from these origins (ORCH_ALLOWED_ORIGINS,
+// comma-separated). Requests without an Origin header (schedulers, webhooks,
+// curl) are not subject to CORS and are unaffected.
+const ALLOWED_ORIGINS = (Deno.env.get('ORCH_ALLOWED_ORIGINS') || 'https://orchestrator-agent.ks9988467.workers.dev,http://localhost:4444')
+  .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean)
+const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-file-name',
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+  'Vary': 'Origin',
+}
+// Per-request CORS headers: the caller's origin is echoed only when it is allowed
+function corsFor(req: Request): Record<string, string> {
+  const origin = (req.headers.get('origin') || '').replace(/\/+$/, '')
+  return origin && ALLOWED_ORIGINS.includes(origin) ? { ...CORS_HEADERS, 'Access-Control-Allow-Origin': origin } : { ...CORS_HEADERS }
+}
+
+// ── Rate limiting ─────────────────────────────────────────────────────
+// Fixed one-minute windows per key, kept in memory. On Supabase Edge Functions
+// each isolate counts separately, so the effective limit is per isolate — good
+// enough to stop a single client from hammering the API, not a hard global cap.
+const RATE_WINDOW_MS = 60_000
+const _rate = new Map<string, { n: number; reset: number }>()
+// Returns the seconds to wait when `key` has exceeded `limit` requests in the current window, else 0
+function rateLimited(key: string, limit: number): number {
+  const now = Date.now()
+  if (_rate.size > 10_000) for (const [k, v] of _rate) if (v.reset <= now) _rate.delete(k)
+  const cur = _rate.get(key)
+  if (!cur || cur.reset <= now) { _rate.set(key, { n: 1, reset: now + RATE_WINDOW_MS }); return 0 }
+  cur.n++
+  return cur.n > limit ? Math.ceil((cur.reset - now) / 1000) : 0
+}
+function clientIp(req: Request): string {
+  return (req.headers.get('x-forwarded-for') || '').split(',')[0].trim()
+    || req.headers.get('cf-connecting-ip') || req.headers.get('x-real-ip') || 'unknown'
+}
+function tooManyRequests(retryAfter: number, cors: Record<string, string>): Response {
+  return new Response(JSON.stringify({ error: '请求太频繁，请稍后再试' }),
+    { status: 429, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) } })
 }
 
 const SOUL = `
@@ -1999,6 +2034,7 @@ async function extractPrefs(message: string, response: string, providers: Provid
 
 // \u2500\u2500 Main handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 Deno.serve(async (req: Request) => {
+  const CORS = corsFor(req)   // every Response below spreads these headers
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
   // ── File storage ──────────────────────────────────────────────────
@@ -2011,6 +2047,8 @@ Deno.serve(async (req: Request) => {
     const decode = (s: string) => { try { return decodeURIComponent(s) } catch { return '' } }
     if (!BUCKETS.includes(bucket)) return json({ error: 'unknown bucket' }, 404)
     if (req.method === 'POST' && !rawName) {
+      const wait = rateLimited(`upload:${clientIp(req)}`, 30)
+      if (wait) return tooManyRequests(wait, CORS)
       if (!await authenticate(req)) return json({ error: 'unauthorized' }, 401)
       const original = decode(req.headers.get('x-file-name') || '')
       if (!original) return json({ error: 'x-file-name header required' }, 400)
@@ -2111,9 +2149,18 @@ Deno.serve(async (req: Request) => {
     // ── Authentication ───────────────────────────────────────────────
     // Public: the OTP login actions (and the WhatsApp webhook above). Everything else needs a
     // session token, or the internal secret for self-invokes and schedulers.
-    if (body.action !== 'send_otp' && body.action !== 'verify_otp') {
+    if (body.action === 'send_otp' || body.action === 'verify_otp') {
+      // Login attempts: 30 a minute per IP (on top of the per-email limits inside the actions)
+      const wait = rateLimited(`otp:${clientIp(req)}`, 30)
+      if (wait) return tooManyRequests(wait, CORS)
+    } else {
       const auth = await authenticate(req)
       if (!auth) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // 120 requests a minute per session; internal callers (schedulers, self-invokes) are not limited
+      if (auth.kind === 'session') {
+        const wait = rateLimited(`api:${auth.tokenHash}`, 120)
+        if (wait) return tooManyRequests(wait, CORS)
+      }
       if (auth.kind === 'internal') {
         // Internal callers act across tenants unless they name one
         _reqIsMaster = true

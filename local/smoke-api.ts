@@ -684,6 +684,35 @@ const unlisted = { member: await statusAs('member', 'cost_summary'), admin: awai
 check('an action the dashboard never calls needs admin', unlisted.member === 403 && unlisted.admin === 200, unlisted)
 check('tenant management needs master, not admin', (await statusAs('admin', 'list_tenants')) === 403)
 
+// ── 17. CORS + rate limiting ───────────────────────────────────────────
+console.log('\n[17] CORS / rate limiting')
+const withOrigin = async (origin: string) => {
+  const r = await fetch(BASE, { method: 'OPTIONS', headers: { Origin: origin, 'Access-Control-Request-Method': 'POST' } })
+  await r.body?.cancel()
+  return { status: r.status, acao: r.headers.get('access-control-allow-origin'), vary: r.headers.get('vary') }
+}
+const okOrigin = await withOrigin('http://localhost:4444')
+const badOrigin = await withOrigin('https://evil.example')
+check('CORS: an allowed origin is echoed back with Vary: Origin', okOrigin.acao === 'http://localhost:4444' && okOrigin.vary === 'Origin', okOrigin)
+check('CORS: an unknown origin gets no Access-Control-Allow-Origin', badOrigin.status === 200 && badOrigin.acao === null, badOrigin)
+const noOrigin = await fetch(BASE, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKENS.member}` }, body: JSON.stringify({ action: 'whoami' }) })
+await noOrigin.body?.cancel()
+check('a request without an Origin header (scheduler / curl) still works', noOrigin.status === 200, noOrigin.status)
+
+// A throwaway session so the burst does not use up another token's budget
+const burstTok = `${MARK}-burst-${crypto.randomUUID()}`
+await dbInsert('sessions', { token_hash: await sha256Hex(burstTok), email: `${MARK}-burst@session.test`, role: 'member', expires_at: new Date(Date.now() + 3600_000).toISOString() })
+const statuses: number[] = []
+for (let i = 0; i < 122; i++) statuses.push((await api('whoami', {}, burstTok)).status)
+const first120Ok = statuses.slice(0, 120).every(s => s === 200)
+const limited = statuses.slice(120)
+check('rate limit: 120 requests a minute pass, the 121st and 122nd get 429', first120Ok && limited.every(s => s === 429), { first120Ok, limited })
+const retry = await fetch(BASE, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${burstTok}` }, body: JSON.stringify({ action: 'whoami' }) })
+await retry.body?.cancel()
+const retryAfter = Number(retry.headers.get('retry-after'))
+check('429 carries a Retry-After (seconds, ≤ 60)', retry.status === 429 && retryAfter >= 1 && retryAfter <= 60, { status: retry.status, retryAfter })
+check('another session is not affected by the burst', (await api('whoami', {})).status === 200)
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
