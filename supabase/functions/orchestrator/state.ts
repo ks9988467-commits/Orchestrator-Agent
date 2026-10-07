@@ -6,6 +6,10 @@
 export interface ProviderRow { provider: string; api_key: string; model: string; active: boolean }
 export interface AgentRow    { id: string; name: string; system_prompt: string; provider: string|null; model: string|null; active: boolean; uses_tools?: boolean }
 
+// Parsed JSON body of a request: untyped, each action reads its own fields
+// deno-lint-ignore no-explicit-any
+export type Body = Record<string, any>
+
 interface CacheEntry<T> { data: T; expires: number }
 export const CACHE_TTL = 60_000 // 60 s
 
