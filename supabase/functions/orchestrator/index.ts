@@ -2,6 +2,7 @@
 // Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
 // old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
+import { CACHE_TTL, R, llmUsage, shared, tenantFilters, type AgentRow, type ProviderRow } from './state.ts'
 import { SYNC_DIR, SYNC_INTERVAL_DAYS, type SyncResult, summarize, syncFolder, syncKbId } from './kb-sync.ts'
 import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
@@ -71,15 +72,14 @@ const COST_PER_M: Record<string,[number,number]> = {
   'gpt-4o-mini':[0.15,0.6],'gpt-4o':[2.5,10],'gpt-4':[30,60],'o1-mini':[3,12],'o3-mini':[1.1,4.4],
   'gemini-2.0-flash':[0.1,0.4],'gemini-1.5-flash':[0.075,0.3],'gemini-1.5-pro':[3.5,10.5],'gemini-2.5':[1.25,10],
 }
+function resetUsage(model='') { Object.assign(llmUsage, { tokens_in: 0, tokens_out: 0, used_model: model }) }
+
 function calcCost(model: string, tokensIn: number, tokensOut: number): number {
   const key = Object.keys(COST_PER_M).find(k => (model||'').toLowerCase().includes(k)) ?? ''
   const [inP, outP] = COST_PER_M[key] ?? [2.5, 10]
   return Number(((tokensIn * inP + tokensOut * outP) / 1_000_000).toFixed(6))
 }
 
-// ── Per-request token accumulator (reset each request) ───────────────
-let _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: '' }
-function resetUsage(model='') { _lastUsage = { tokens_in: 0, tokens_out: 0, used_model: model } }
 
 // Timeout wrapper for a single LLM call inside a workflow step
 function withTimeout<T>(p: Promise<T>, ms = 20_000): Promise<T> {
@@ -98,33 +98,6 @@ async function sendSlackWebhook(webhookUrl: string, text: string, mrkdwn?: strin
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(payload),
   })
-}
-// ── Module-level cache (reused across requests in same isolate) ──────
-interface CacheEntry<T> { data: T; expires: number }
-let _cacheProviders: CacheEntry<ProviderRow[]> | null = null
-let _cacheAgents:    CacheEntry<AgentRow[]>    | null = null
-let _cacheDefProv:   CacheEntry<string>        | null = null
-const CACHE_TTL = 60_000 // 60 s
-
-// ── Per-request tenant context (reset each request) ──────────────────
-let _reqTenantId: string | null = null
-let _reqIsMaster = false
-let _reqRole = 'member'
-let _reqEmail = ''
-let _reqAuthHash = ''              // SHA-256 of the caller's session token (for logout)
-// ── Per-request LLM context (for use inside executeTool) ─────────────
-let _reqProviders: ProviderRow[] = []
-let _reqAgents: AgentRow[] = []
-let _reqDefaultProvider = ''
-let _reqDelegated = false        // true when delegate_to_agent was called this request
-let _reqSessionId = ''           // current request session_id (for delegate history lookup)
-let _reqDelegatedId   = ''       // agent_id that was delegated to
-let _reqDelegatedName = ''       // agent display name that was delegated to
-let _reqHermesMode = false       // true when calling agent is 'chat' (Hermes) — limits tools to delegation-only
-let _reqDelegationContext = ''   // accumulated context from previous delegations this request
-function tenantFilters(extra: Record<string,string> = {}): Record<string,string> {
-  if (!_reqIsMaster && _reqTenantId) return { ...extra, tenant_id: `eq.${_reqTenantId}` }
-  return extra
 }
 
 // ── Authentication helpers ───────────────────────────────────────────
@@ -637,33 +610,33 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     }
 
     if (name === 'delegate_to_agent') {
-      _reqDelegated = true
+      R.delegated = true
       const targetId     = String(args.agent_id || '').toLowerCase().trim()
       const originalQuery = String(args.query   || '')
-      const target       = _reqAgents.find(a => a.id === targetId && a.active)
-      if (!target) return JSON.stringify({ error: `Agent '${targetId}' not found or inactive. Available: ${_reqAgents.filter(a=>a.active&&a.id!=='chat').map(a=>a.id).join(', ')}` })
-      _reqDelegatedId   = target.id
-      _reqDelegatedName = target.name || target.id
+      const target       = R.agents.find(a => a.id === targetId && a.active)
+      if (!target) return JSON.stringify({ error: `Agent '${targetId}' not found or inactive. Available: ${R.agents.filter(a=>a.active&&a.id!=='chat').map(a=>a.id).join(', ')}` })
+      R.delegatedId   = target.id
+      R.delegatedName = target.name || target.id
       // Load session history + sub-agent skills + KB context in parallel
       const [history, subSkills, subKbCtx] = await Promise.all([
-        _reqSessionId ? loadHistory(_reqSessionId, 10) : Promise.resolve([]),
+        R.sessionId ? loadHistory(R.sessionId, 10) : Promise.resolve([]),
         loadAgentSkills(target.id),
         loadKbContext(),
       ])
       // Build augmented query: if previous delegations have context, pass it along
-      const query = _reqDelegationContext
-        ? `[参考——前步骤已收集信息]\n${_reqDelegationContext}\n\n---\n当前任务：${originalQuery}`
+      const query = R.delegationContext
+        ? `[参考——前步骤已收集信息]\n${R.delegationContext}\n\n---\n当前任务：${originalQuery}`
         : originalQuery
       // Hermes context injected into sub-agent system prompt
       const hermesCtx = `\n\n**[系统上下文]** 你是被 Hermes 调度系统委派的专项 Agent。当前用户问题：${originalQuery}\n请结合对话历史，给出专业回答。`
       const sys      = (target.system_prompt || 'You are a helpful assistant.') + hermesCtx + '\n\n' + SOUL + subSkills + subKbCtx
       const useTools = DATA_AGENTS.has(target.id) || !!target.uses_tools
-      _reqHermesMode = false  // sub-agents get full tool access
+      R.hermesMode = false  // sub-agents get full tool access
       const messages = [...history, { role: 'user', content: query }]
-      const { text } = await callLLM(_reqProviders, target.provider || _reqDefaultProvider, target.model, sys, messages, useTools)
+      const { text } = await callLLM(R.providers, target.provider || R.defaultProvider, target.model, sys, messages, useTools)
       // Accumulate result for subsequent delegations (first 300 chars summary)
       const summary = text.slice(0, 300).replace(/\n+/g, ' ')
-      _reqDelegationContext += (_reqDelegationContext ? '\n' : '') + `[${target.name || targetId}]: ${summary}`
+      R.delegationContext += (R.delegationContext ? '\n' : '') + `[${target.name || targetId}]: ${summary}`
       return text
     }
 
@@ -742,7 +715,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     }
 
     if (name === 'create_automation') {
-      const tid = _reqTenantId || 'default'
+      const tid = R.tenantId || 'default'
       await dbInsert('automation_rules', {
         tenant_id:      tid,
         name:           String(args.name || ''),
@@ -769,7 +742,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     if (name === 'toggle_automation') {
       const ruleId = String(args.rule_id || '')
       if (!ruleId) return JSON.stringify({ error: 'rule_id required' })
-      const tid = _reqTenantId || 'default'
+      const tid = R.tenantId || 'default'
       await dbPatchWhere('automation_rules', { id: `eq.${ruleId}`, tenant_id: `eq.${tid}` },
         { enabled: Boolean(args.enabled), updated_at: new Date().toISOString() })
       return JSON.stringify({ ok: true, message: `规则已${args.enabled ? '启用' : '停用'}` })
@@ -1175,8 +1148,6 @@ async function listModels(provider: string, apiKey: string): Promise<string[]> {
 }
 
 // \u2500\u2500 Types \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-interface ProviderRow { provider: string; api_key: string; model: string; active: boolean }
-interface AgentRow    { id: string; name: string; system_prompt: string; provider: string|null; model: string|null; active: boolean; uses_tools?: boolean }
 
 // \u2500\u2500 Config loaders (with module-level cache) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // ── Embedding helper: OpenAI → Google → OpenRouter fallback ──────────────
@@ -1253,23 +1224,23 @@ function chunkText(text: string, size = 500, overlap = 50): string[] {
 }
 
 async function loadProviders(): Promise<ProviderRow[]> {
-  if (_cacheProviders && Date.now() < _cacheProviders.expires) return _cacheProviders.data
+  if (shared.providers && Date.now() < shared.providers.expires) return shared.providers.data
   const rows = await dbGet('provider_config', 'provider,api_key,model,active')
   const data  = (rows as ProviderRow[]).filter(r => r.active && r.api_key?.trim())
-  _cacheProviders = { data, expires: Date.now() + CACHE_TTL }
+  shared.providers = { data, expires: Date.now() + CACHE_TTL }
   return data
 }
 async function getDefaultProvider(): Promise<string> {
-  if (_cacheDefProv && Date.now() < _cacheDefProv.expires) return _cacheDefProv.data
+  if (shared.defProv && Date.now() < shared.defProv.expires) return shared.defProv.data
   const rows = await dbGet('user_prefs', 'value', { key: 'eq.default_provider' })
   const data  = rows[0]?.value ?? 'anthropic'
-  _cacheDefProv = { data, expires: Date.now() + CACHE_TTL }
+  shared.defProv = { data, expires: Date.now() + CACHE_TTL }
   return data
 }
 async function loadAgents(): Promise<AgentRow[]> {
-  if (_cacheAgents && Date.now() < _cacheAgents.expires) return _cacheAgents.data
+  if (shared.agents && Date.now() < shared.agents.expires) return shared.agents.data
   const data = await dbGet('agents', 'id,name,system_prompt,provider,model,active,description,uses_tools')
-  _cacheAgents = { data: data as AgentRow[], expires: Date.now() + CACHE_TTL }
+  shared.agents = { data: data as AgentRow[], expires: Date.now() + CACHE_TTL }
   return data as AgentRow[]
 }
 async function loadAgentSkills(agentId: string): Promise<string> {
@@ -1304,7 +1275,7 @@ const HERMES_TOOL_NAMES = new Set(['delegate_to_agent', 'remember', 'learn_gaps'
   'create_automation', 'list_automations', 'toggle_automation', 'respond_directly'])
 function getActiveTools() {
   const all = TOOL_DEFS
-  return _reqHermesMode ? all.filter(t => HERMES_TOOL_NAMES.has(t.name)) : all
+  return R.hermesMode ? all.filter(t => HERMES_TOOL_NAMES.has(t.name)) : all
 }
 
 async function callAnthropic(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
@@ -1317,7 +1288,7 @@ async function callAnthropic(apiKey: string, model: string, system: string, mess
   if (useTools) {
     body.tools = getActiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }))
     // Force Hermes to always use a tool — prevents fallback to direct text answer without routing
-    if (_reqHermesMode) body.tool_choice = { type: 'any' }
+    if (R.hermesMode) body.tool_choice = { type: 'any' }
   }
 
   const msgs = [...messages] as Record<string,unknown>[]
@@ -1455,8 +1426,8 @@ async function streamAnthropic(apiKey: string, model: string, system: string, me
       const raw = line.slice(6).trim(); if (!raw || raw === '[DONE]') continue
       try {
         const evt = JSON.parse(raw)
-        if (evt.type === 'message_start')    _lastUsage.tokens_in  += evt.message?.usage?.input_tokens  || 0
-        if (evt.type === 'message_delta')    _lastUsage.tokens_out += evt.usage?.output_tokens           || 0
+        if (evt.type === 'message_start')    llmUsage.tokens_in  += evt.message?.usage?.input_tokens  || 0
+        if (evt.type === 'message_delta')    llmUsage.tokens_out += evt.usage?.output_tokens           || 0
         if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta' && evt.delta.text)
           await onChunk(evt.delta.text)
       } catch { /* skip */ }
@@ -1487,7 +1458,7 @@ async function streamOpenAI(apiKey: string, model: string, system: string, messa
       try {
         const parsed = JSON.parse(raw)
         const chunk = parsed.choices?.[0]?.delta?.content; if (chunk) await onChunk(chunk)
-        if (parsed.usage) { _lastUsage.tokens_in += parsed.usage.prompt_tokens||0; _lastUsage.tokens_out += parsed.usage.completion_tokens||0 }
+        if (parsed.usage) { llmUsage.tokens_in += parsed.usage.prompt_tokens||0; llmUsage.tokens_out += parsed.usage.completion_tokens||0 }
       } catch { /* skip */ }
     }
   }
@@ -1521,7 +1492,7 @@ async function streamOpenRouter(apiKey: string, model: string, system: string, m
       try {
         const parsed = JSON.parse(raw)
         const chunk = parsed.choices?.[0]?.delta?.content; if (chunk) await onChunk(chunk)
-        if (parsed.usage) { _lastUsage.tokens_in += parsed.usage.prompt_tokens||0; _lastUsage.tokens_out += parsed.usage.completion_tokens||0 }
+        if (parsed.usage) { llmUsage.tokens_in += parsed.usage.prompt_tokens||0; llmUsage.tokens_out += parsed.usage.completion_tokens||0 }
       } catch { /* skip */ }
     }
   }
@@ -1543,7 +1514,7 @@ async function callOpenRouter(apiKey: string, model: string, system: string, mes
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: OR_HEADERS, body: JSON.stringify(body) })
     if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${await r.text()}`)
     const resp = await r.json()
-    if (resp.usage) { _lastUsage.tokens_in += resp.usage.prompt_tokens||0; _lastUsage.tokens_out += resp.usage.completion_tokens||0 }
+    if (resp.usage) { llmUsage.tokens_in += resp.usage.prompt_tokens||0; llmUsage.tokens_out += resp.usage.completion_tokens||0 }
     const msg = resp.choices?.[0]?.message
     if (msg?.tool_calls?.length) {
       msgs.push(msg)
@@ -1585,7 +1556,7 @@ async function streamGoogle(apiKey: string, model: string, system: string, messa
         const parsed = JSON.parse(raw)
         const chunk = parsed.candidates?.[0]?.content?.parts?.[0]?.text; if (chunk) await onChunk(chunk)
         const meta = parsed.usageMetadata
-        if (meta) { _lastUsage.tokens_in += meta.promptTokenCount||0; _lastUsage.tokens_out += meta.candidatesTokenCount||0 }
+        if (meta) { llmUsage.tokens_in += meta.promptTokenCount||0; llmUsage.tokens_out += meta.candidatesTokenCount||0 }
       } catch { /* skip */ }
     }
   }
@@ -2067,11 +2038,10 @@ async function ingestText(kbId: string, src: string, text: string, tenantId: str
 }
 
 // ── Folder → knowledge base sync (local backend only, KB_SYNC_DIR) ───
-let _kbSyncRunning = false
 async function runKbSync(): Promise<{ ok: boolean; result?: SyncResult; error?: string }> {
   if (!SYNC_DIR) return { ok: false, error: '未配置 KB_SYNC_DIR' }
-  if (_kbSyncRunning) return { ok: false, error: '同步正在进行中' }
-  _kbSyncRunning = true
+  if (shared.kbSyncRunning) return { ok: false, error: '同步正在进行中' }
+  shared.kbSyncRunning = true
   try {
     const kbId = await syncKbId()
     const now = new Date().toISOString()
@@ -2089,7 +2059,7 @@ async function runKbSync(): Promise<{ ok: boolean; result?: SyncResult; error?: 
       return { ok: false, error: msg }
     }
   } finally {
-    _kbSyncRunning = false
+    shared.kbSyncRunning = false
   }
 }
 if (SYNC_DIR) {
@@ -2179,17 +2149,17 @@ Deno.serve(async (req: Request) => {
     const body = await req.json()
 
     // Per-request context. Identity is set by the authentication step below — never read from the body.
-    _reqTenantId = null
-    _reqIsMaster = false
-    _reqRole     = 'member'
-    _reqEmail    = ''
-    _reqAuthHash = ''
-    _reqDelegated         = false
-    _reqSessionId         = ''
-    _reqDelegatedId       = ''
-    _reqDelegatedName     = ''
-    _reqHermesMode        = false
-    _reqDelegationContext = ''
+    R.tenantId = null
+    R.isMaster = false
+    R.role     = 'member'
+    R.email    = ''
+    R.authHash = ''
+    R.delegated         = false
+    R.sessionId         = ''
+    R.delegatedId       = ''
+    R.delegatedName     = ''
+    R.hermesMode        = false
+    R.delegationContext = ''
 
     // ── WhatsApp incoming messages ─────────────────────────────────
     if (body.object === 'whatsapp_business_account') {
@@ -2208,10 +2178,10 @@ Deno.serve(async (req: Request) => {
           resetUsage(agent.model || '')
           const { text: reply } = await callLLM(providers, agent.provider || defaultProvider, agent.model,
             system, [...history, { role:'user', content:text }], DATA_AGENTS.has(agent.id) || !!agent.uses_tools)
-          const _waCost = calcCost(_lastUsage.used_model || agent.model || '', _lastUsage.tokens_in, _lastUsage.tokens_out)
+          const _waCost = calcCost(llmUsage.used_model || agent.model || '', llmUsage.tokens_in, llmUsage.tokens_out)
           await Promise.all([
             dbInsert('conversations', { session_id:sid, role:'user',      content:text,  agent:agent.id }),
-            dbInsert('conversations', { session_id:sid, role:'assistant', content:reply, agent:agent.id, tokens_in:_lastUsage.tokens_in, tokens_out:_lastUsage.tokens_out, cost_usd:_waCost }),
+            dbInsert('conversations', { session_id:sid, role:'assistant', content:reply, agent:agent.id, tokens_in:llmUsage.tokens_in, tokens_out:llmUsage.tokens_out, cost_usd:_waCost }),
           ])
           await sendNotification('whatsapp', reply, from)
         }
@@ -2236,15 +2206,15 @@ Deno.serve(async (req: Request) => {
       }
       if (auth.kind === 'internal') {
         // Internal callers act across tenants unless they name one
-        _reqIsMaster = true
-        _reqRole     = 'master'
-        _reqTenantId = body.tenant_id ? String(body.tenant_id) : null
+        R.isMaster = true
+        R.role     = 'master'
+        R.tenantId = body.tenant_id ? String(body.tenant_id) : null
       } else {
-        _reqTenantId = auth.tenantId
-        _reqRole     = auth.role
-        _reqIsMaster = auth.role === 'master'
-        _reqEmail    = auth.email
-        _reqAuthHash = auth.tokenHash
+        R.tenantId = auth.tenantId
+        R.role     = auth.role
+        R.isMaster = auth.role === 'master'
+        R.email    = auth.email
+        R.authHash = auth.tokenHash
         // Code that reads the session fields from the body sees the verified values. A
         // non-master is pinned to its own tenant; a master may name the tenant it acts on
         // (update_tenant / add_tenant_user use tenant_id for the target tenant).
@@ -2253,18 +2223,18 @@ Deno.serve(async (req: Request) => {
       }
       // Minimum role for this action (ACTION_ROLES)
       const need = requiredRole(body.action ? String(body.action) : '', String(body.method || 'list'))
-      if ((ROLE_RANK[_reqRole] ?? 0) < ROLE_RANK[need]) {
+      if ((ROLE_RANK[R.role] ?? 0) < ROLE_RANK[need]) {
         return new Response(JSON.stringify({ error: '没有权限执行此操作' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
     }
 
     // ── Session: who am I / logout ───────────────────────────────────
     if (body.action === 'whoami') {
-      const tRows = _reqTenantId ? await dbGet('tenants', 'name', { id: `eq.${_reqTenantId}` }, undefined, 1) : []
-      return new Response(JSON.stringify({ ok: true, email: _reqEmail, role: _reqRole, tenant_id: _reqTenantId, tenant_name: tRows[0]?.name ?? '' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+      const tRows = R.tenantId ? await dbGet('tenants', 'name', { id: `eq.${R.tenantId}` }, undefined, 1) : []
+      return new Response(JSON.stringify({ ok: true, email: R.email, role: R.role, tenant_id: R.tenantId, tenant_name: tRows[0]?.name ?? '' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
     if (body.action === 'logout') {
-      if (_reqAuthHash) await dbPatchWhere('sessions', { token_hash: `eq.${_reqAuthHash}` }, { revoked_at: new Date().toISOString() })
+      if (R.authHash) await dbPatchWhere('sessions', { token_hash: `eq.${R.authHash}` }, { revoked_at: new Date().toISOString() })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     }
 
@@ -2371,8 +2341,8 @@ Deno.serve(async (req: Request) => {
 
     // \u2500\u2500 Tenant management (master only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if (body.action === 'list_tenants') {
-      // Master check (_reqIsMaster comes from the authenticated session)
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      // Master check (R.isMaster comes from the authenticated session)
+      if (!R.isMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,contact_name,contact_email,active,created_at', {}, 'created_at.asc')
       const result = await Promise.all((tenants as Record<string,unknown>[]).map(async t => {
         const tid = String(t.id)
@@ -2387,7 +2357,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === 'get_master_summary') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (!R.isMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const tenants = await dbGet('tenants', 'id,name,slug,active')
       const now = new Date()
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10)
@@ -2456,7 +2426,7 @@ Deno.serve(async (req: Request) => {
             results: resultsVal,
             cost_per_result: cpr ? parseFloat(cpr.value) : null,
             new_messaging_contacts: contactsVal,
-            tenant_id: _reqTenantId,
+            tenant_id: R.tenantId,
           }, 'campaign_name,day')
           upserted++
         }
@@ -2507,7 +2477,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === 'ugc_get_rules') {
-      const tid = _reqTenantId || 'default'
+      const tid = R.tenantId || 'default'
       const rows = await dbGet('ugc_platform_rules', 'platform,max_words,style,special', { tenant_id: `eq.${tid}` })
       const result: Record<string,unknown> = { ...UGC_DEFAULT_RULES }
       for (const r of rows as {platform:string,max_words:string,style:string,special:string}[]) {
@@ -2519,7 +2489,7 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'ugc_save_rule') {
       const { platform, max_words, style, special } = body
       if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tid = _reqTenantId || 'default'
+      const tid = R.tenantId || 'default'
       await dbUpsert('ugc_platform_rules',
         { tenant_id: tid, platform, max_words: max_words||'', style: style||'', special: special||'', updated_at: new Date().toISOString() },
         'tenant_id,platform'
@@ -2530,7 +2500,7 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'ugc_reset_rule') {
       const { platform } = body
       if (!platform) return new Response(JSON.stringify({ error: 'platform required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const tid = _reqTenantId || 'default'
+      const tid = R.tenantId || 'default'
       await dbDelete('ugc_platform_rules', { tenant_id: `eq.${tid}`, platform: `eq.${platform}` })
       const def = UGC_DEFAULT_RULES[platform] || {}
       return new Response(JSON.stringify({ ok: true, rule: def }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2566,7 +2536,7 @@ Deno.serve(async (req: Request) => {
         userMsg = `Product: ${product} | Audience: ${audience}\nScript:\n${content}\n\nOutput JSON with keys zh,en,ms. Each: {"covers":[{"main":"","sub":"","type":"resonance|curiosity|disbelief"},{"main":"","sub":"","type":""}],"hook":"","hookType":"resonance|curiosity|disbelief","hookLabel":"","keywords":[{"word":"","hot":true|false}]}`
       } else if (type === 'post') {
         // Load platform rules for this tenant
-        const tid = _reqTenantId || 'default'
+        const tid = R.tenantId || 'default'
         const ruleRows = await dbGet('ugc_platform_rules', 'platform,max_words,style,special', { tenant_id: `eq.${tid}` })
         const customRules: Record<string,unknown> = {}
         for (const r of ruleRows as {platform:string,max_words:string,style:string}[]) customRules[r.platform] = r
@@ -2737,7 +2707,7 @@ Deno.serve(async (req: Request) => {
 
     // ── Bookings CRUD (成交/营收记录) ───────────────────────────────────
     if (body.action === 'booking_crud') {
-      const tid = _reqTenantId || (body.tenant_id ? String(body.tenant_id) : null)
+      const tid = R.tenantId || (body.tenant_id ? String(body.tenant_id) : null)
       const m = String(body.method || 'list')
 
       if (m === 'create') {
@@ -2772,7 +2742,7 @@ Deno.serve(async (req: Request) => {
     // ── Conversation log (对话日志) ─────────────────────────────────────
     // Replaces the dashboard's direct supabase-js queries on `conversations`.
     // The role filter is `log_role`, not `role`: every request body already
-    // carries `role` (the session role that sets _reqIsMaster).
+    // carries `role` (the session role that sets R.isMaster).
     if (body.action === 'conversation_crud') {
       const m = String(body.method || 'list')
 
@@ -2830,14 +2800,14 @@ Deno.serve(async (req: Request) => {
         // a blank api_key means "keep the stored key"
         if (typeof body.api_key === 'string' && body.api_key.trim()) fields.api_key = body.api_key.trim()
         await dbUpsert('provider_config', fields, 'provider')
-        _cacheProviders = null
+        shared.providers = null
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'set_default') {
         const provider = String(body.provider || '')
         if (!PROVIDERS.includes(provider)) return new Response(JSON.stringify({ error: 'unknown provider' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
         await dbUpsert('user_prefs', { key: 'default_provider', value: provider, confidence: 1.0 }, 'key')
-        _cacheDefProv = null
+        shared.defProv = null
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -2863,7 +2833,7 @@ Deno.serve(async (req: Request) => {
         if (!Object.keys(patch).length) return new Response(JSON.stringify({ error: 'nothing to update' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
         patch.updated_at = new Date().toISOString()
         await dbPatch('agents', id, patch)
-        _cacheAgents = null
+        shared.agents = null
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'create') {
@@ -2880,14 +2850,14 @@ Deno.serve(async (req: Request) => {
         if (existing.length) return new Response(JSON.stringify({ error: `Agent ID "${id}" 已存在` }), { status: 409, headers: { ...CORS, 'Content-Type': 'application/json' } })
         const ins = await dbInsert('agents', row)
         if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        _cacheAgents = null
+        shared.agents = null
         return new Response(JSON.stringify({ ok: true, id }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'delete') {
         const id = String(body.id || '')
         if (!id) return new Response(JSON.stringify({ error: 'id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
         await dbDelete('agents', { id: `eq.${id}` })
-        _cacheAgents = null
+        shared.agents = null
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3027,7 +2997,7 @@ Deno.serve(async (req: Request) => {
             })
           }
         }
-        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        if (R.tenantId) rows.forEach(r => { r.tenant_id = R.tenantId })
         // Insert first, then delete the leads being replaced: a failed insert leaves the old data intact.
         const res = await insertInChunks('leads', rows)
         if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3059,7 +3029,7 @@ Deno.serve(async (req: Request) => {
       if (m === 'import') {
         const rows = normalizeImportRows(body.rows, [...COLS.split(','), 'account_id'])
         if (!rows.length || rows.length > 20000) return new Response(JSON.stringify({ error: 'rows: 1–20000 valid rows required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        if (_reqTenantId) rows.forEach(r => { r.tenant_id = _reqTenantId })
+        if (R.tenantId) rows.forEach(r => { r.tenant_id = R.tenantId })
         const res = await insertInChunks('ad_reports', rows)
         if (res.error) return new Response(JSON.stringify({ error: `${res.error}（已导入 ${res.inserted} 条）`, inserted: res.inserted }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
         return new Response(JSON.stringify({ ok: true, inserted: res.inserted }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3110,7 +3080,7 @@ Deno.serve(async (req: Request) => {
         if (id) {
           await dbPatchWhere('staff', tenantFilters({ id: `eq.${id}` }), fields)
         } else {
-          const ins = await dbInsert('staff', { ...fields, tenant_id: _reqTenantId || 'default' })
+          const ins = await dbInsert('staff', { ...fields, tenant_id: R.tenantId || 'default' })
           if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
         }
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3165,7 +3135,7 @@ Deno.serve(async (req: Request) => {
         if (id) {
           await dbPatchWhere('tasks', tenantFilters({ id: `eq.${id}` }), fields)   // creator is set once, on create
         } else {
-          const ins = await dbInsert('tasks', { ...fields, created_by: d.created_by || null, tenant_id: _reqTenantId || 'default' })
+          const ins = await dbInsert('tasks', { ...fields, created_by: d.created_by || null, tenant_id: R.tenantId || 'default' })
           if (!ins.ok) return new Response(JSON.stringify({ error: ins.error || 'insert failed' }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
         }
         return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -3210,7 +3180,7 @@ Deno.serve(async (req: Request) => {
       if (m === 'send') {
         const content = String(body.content ?? '').trim()
         if (!isId(me) || !isId(peer) || !content) return new Response(JSON.stringify({ error: 'me, peer and content required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
-        const message = await dbInsertReturning('direct_messages', { from_id: me, to_id: peer, content, tenant_id: _reqTenantId || 'default' })
+        const message = await dbInsertReturning('direct_messages', { from_id: me, to_id: peer, content, tenant_id: R.tenantId || 'default' })
         return new Response(JSON.stringify({ ok: true, message }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       }
       if (m === 'poll') {
@@ -3237,8 +3207,8 @@ Deno.serve(async (req: Request) => {
         if (body.status) filt['status'] = `eq.${String(body.status)}`
         let docs = await dbGet('documents', DOC_COLS, tenantFilters(filt), 'created_at.desc', 100) as Record<string, unknown>[]
         // Members see only documents they uploaded or review
-        const viewer = _reqEmail
-        if (_reqRole === 'member') {
+        const viewer = R.email
+        if (R.role === 'member') {
           const mine = await dbGet('document_reviewers', 'document_id', { contact: `eq.${viewer}` }) as { document_id: string }[]
           const reviewing = new Set(mine.map(r => r.document_id))
           docs = docs.filter(d => d.uploaded_by === viewer || reviewing.has(String(d.id)))
@@ -3258,8 +3228,8 @@ Deno.serve(async (req: Request) => {
         if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
         const reviewers = await dbGet('document_reviewers', 'id,document_id,name,contact,decision,comment,decided_at,created_at', { document_id: `eq.${id}` }, 'created_at.asc')
         // Same rule as list: a member sees only documents they uploaded or review
-        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail
-            && !reviewers.some((r: { contact: string | null }) => String(r.contact || '').trim().toLowerCase() === _reqEmail)) {
+        if (R.role === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== R.email
+            && !reviewers.some((r: { contact: string | null }) => String(r.contact || '').trim().toLowerCase() === R.email)) {
           return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
         }
         doc.file_url = await signedUrl(doc.file_url, 3600)
@@ -3278,7 +3248,7 @@ Deno.serve(async (req: Request) => {
           file_url: d.file_url || null, file_name: d.file_name || null, file_type: d.file_type || null,
           file_size: d.file_size ? Number(d.file_size) : null, status: 'pending',
           // the uploader is the logged-in user; only internal callers may name one
-          tenant_id: _reqTenantId, uploaded_by: _reqEmail || d.uploaded_by || null,
+          tenant_id: R.tenantId, uploaded_by: R.email || d.uploaded_by || null,
         })
         const ins = await dbInsert('document_reviewers', reviewers.map(r => ({ document_id: doc.id, ...r })))
         if (!ins.ok) {
@@ -3296,7 +3266,7 @@ Deno.serve(async (req: Request) => {
         const [revDoc] = await dbGet('documents', 'id', tenantFilters({ id: `eq.${rev.document_id}` }), undefined, 1)
         if (!revDoc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
         // A member may only record the decision on their own reviewer row
-        if (_reqRole === 'member' && String(rev.contact || '').trim().toLowerCase() !== _reqEmail) {
+        if (R.role === 'member' && String(rev.contact || '').trim().toLowerCase() !== R.email) {
           return new Response(JSON.stringify({ error: '只能填写你自己的审批' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
         }
         await dbPatch('document_reviewers', reviewerId, { decision, comment: String(body.comment ?? '').trim() || null, decided_at: new Date().toISOString() })
@@ -3313,7 +3283,7 @@ Deno.serve(async (req: Request) => {
         const [doc] = await dbGet('documents', 'id,file_url,uploaded_by', tenantFilters({ id: `eq.${id}` }), undefined, 1)
         if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
         // A member may only delete documents they uploaded
-        if (_reqRole === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== _reqEmail) {
+        if (R.role === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== R.email) {
           return new Response(JSON.stringify({ error: '只能删除你自己上传的文件' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
         }
         await dbDelete('documents', { id: `eq.${id}` })   // reviewers go with it (ON DELETE CASCADE)
@@ -3372,7 +3342,7 @@ Deno.serve(async (req: Request) => {
     // and a gross-margin factor to derive the marketing economics.
     if (body.action === 'channel_metrics') {
       // tenant optional — null aggregates across all data (matches leads/analytics views)
-      const tid = _reqTenantId || (body.tenant_id ? String(body.tenant_id) : null)
+      const tid = R.tenantId || (body.tenant_id ? String(body.tenant_id) : null)
       const p_from = body.from ? String(body.from) : '-infinity'
       const p_to   = body.to   ? String(body.to)   : 'infinity'
 
@@ -3416,7 +3386,7 @@ Deno.serve(async (req: Request) => {
     // ── Automation CRUD (dashboard API) ───────────────────────────────
     if (body.action === 'automation_crud') {
       const { method: crudMethod, rule_id, data: crudData } = body
-      const tid = _reqTenantId || String(body.tenant_id || 'default')
+      const tid = R.tenantId || String(body.tenant_id || 'default')
 
       if (crudMethod === 'list') {
         const rules = await dbGet('automation_rules',
@@ -3510,7 +3480,7 @@ Deno.serve(async (req: Request) => {
 
     // ── Tenant management actions (master only) ─────────────────────
     if (body.action === 'create_tenant') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (!R.isMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const { name, contact_name, contact_email } = body
       if (!name) return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const row = await dbInsertReturning('tenants', { name, contact_name: contact_name||null, contact_email: contact_email||null, active: true })
@@ -3518,7 +3488,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === 'update_tenant') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (!R.isMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const { tenant_id, active, name, contact_name, contact_email } = body
       if (!tenant_id) return new Response(JSON.stringify({ error: 'tenant_id required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const patch: Record<string,unknown> = {}
@@ -3531,7 +3501,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (body.action === 'add_tenant_user') {
-      if (!_reqIsMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      if (!R.isMaster) return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
       // The new user's role is `user_role`: `role` is the caller's own session role.
       // master is granted only through MASTER_EMAILS, never stored here.
       const tenant_id = body.tenant_id
@@ -3720,7 +3690,7 @@ Deno.serve(async (req: Request) => {
       const { kb_id, source_name, content: rawContent } = body
       if (!kb_id || !rawContent) return new Response(JSON.stringify({ error:'kb_id and content required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
       // Re-ingesting the same source replaces its chunks rather than duplicating them
-      const r = await ingestText(String(kb_id), String(source_name || 'upload'), String(rawContent), _reqTenantId)
+      const r = await ingestText(String(kb_id), String(source_name || 'upload'), String(rawContent), R.tenantId)
       if (r.error) return new Response(JSON.stringify({ error: r.error }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
       return new Response(JSON.stringify({ ok:true, chunks: r.chunks, saved: r.saved, model: r.model, errors: r.errors }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
@@ -3734,7 +3704,7 @@ Deno.serve(async (req: Request) => {
         const [kb] = await dbGet('knowledge_bases', 'id,name,synced_at,sync_attempted_at,sync_result', { id: `eq.${kbId}` }, undefined, 1)
         const { count } = await dbGetPage('kb_sync_files', 'path', { kb_id: `eq.${kbId}` }, undefined, 0)
         return new Response(JSON.stringify({
-          ok: true, enabled: true, dir: SYNC_DIR, interval_days: SYNC_INTERVAL_DAYS, running: _kbSyncRunning,
+          ok: true, enabled: true, dir: SYNC_DIR, interval_days: SYNC_INTERVAL_DAYS, running: shared.kbSyncRunning,
           kb_id: kbId, kb_name: kb?.name, synced_at: kb?.synced_at ?? null, attempted_at: kb?.sync_attempted_at ?? null,
           result: kb?.sync_result ?? null, files: count,
         }), { headers:{...CORS,'Content-Type':'application/json'} })
@@ -3769,7 +3739,7 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'create_kb') {
       const { name, description, agent_id } = body
       if (!name) return new Response(JSON.stringify({ error:'name required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const row = await dbInsertReturning('knowledge_bases',{ name, description:description||'', agent_id:agent_id||null, tenant_id:_reqTenantId })
+      const row = await dbInsertReturning('knowledge_bases',{ name, description:description||'', agent_id:agent_id||null, tenant_id:R.tenantId })
       return new Response(JSON.stringify({ ok:true, kb: row }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'delete_kb') {
@@ -3811,7 +3781,7 @@ Deno.serve(async (req: Request) => {
       const v = rows[0] as {system_prompt:string;provider:string;model:string}|undefined
       if (!v) return new Response(JSON.stringify({ error:'Version not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
       await dbPatch('agents', agent_id as string, { system_prompt:v.system_prompt, provider:v.provider||null, model:v.model||null, updated_at:new Date().toISOString() })
-      _cacheAgents = null
+      shared.agents = null
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
 
@@ -3833,7 +3803,7 @@ Deno.serve(async (req: Request) => {
       if (schedule) { data.schedule = schedule; data.next_run = calcNextRun(schedule as string).toISOString() }
       else { data.schedule = null; data.next_run = null }
       if (wfId) { await dbPatch('workflows', wfId as string, data); return new Response(JSON.stringify({ ok:true, id:wfId }), { headers:{...CORS,'Content-Type':'application/json'} }) }
-      const row = await dbInsertReturning('workflows',{ ...data, tenant_id:_reqTenantId, active:true })
+      const row = await dbInsertReturning('workflows',{ ...data, tenant_id:R.tenantId, active:true })
       return new Response(JSON.stringify({ ok:true, id:row.id }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
     if (body.action === 'run_workflow') {
@@ -3975,13 +3945,13 @@ Deno.serve(async (req: Request) => {
             if (!r.ok) throw new Error(`Anthropic ${r.status}: ${await r.text()}`)
             const d = await r.json() as { content: {type:string;text:string}[]; usage?: {input_tokens:number;output_tokens:number} }
             const text = d.content?.find(b => b.type === 'text')?.text || ''
-            if (d.usage) { _lastUsage.tokens_in = d.usage.input_tokens; _lastUsage.tokens_out = d.usage.output_tokens; _lastUsage.used_model = anth.model || '' }
-            const _mc = calcCost(_lastUsage.used_model, _lastUsage.tokens_in, _lastUsage.tokens_out)
+            if (d.usage) { llmUsage.tokens_in = d.usage.input_tokens; llmUsage.tokens_out = d.usage.output_tokens; llmUsage.used_model = anth.model || '' }
+            const _mc = calcCost(llmUsage.used_model, llmUsage.tokens_in, llmUsage.tokens_out)
             const fileNames = reqFiles.map(f => f.name).join('、')
             for (const ch of ('\n\n' + text)) await sseM({ chunk: ch })
-            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[多文件分析] ${fileNames}\n${userMsg}`, agent: 'chat', tenant_id: _reqTenantId })
-            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: text, agent: 'chat', tenant_id: _reqTenantId, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _mc })
-            await sseM({ done: true, agent: 'chat', agent_name: '文件分析', session_id: sid2, provider: 'anthropic', conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _mc })
+            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[多文件分析] ${fileNames}\n${userMsg}`, agent: 'chat', tenant_id: R.tenantId })
+            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: text, agent: 'chat', tenant_id: R.tenantId, tokens_in: llmUsage.tokens_in, tokens_out: llmUsage.tokens_out, cost_usd: _mc })
+            await sseM({ done: true, agent: 'chat', agent_name: '文件分析', session_id: sid2, provider: 'anthropic', conversation_id: aRow.id, tokens_in: llmUsage.tokens_in, tokens_out: llmUsage.tokens_out, cost_usd: _mc })
           } catch(e) {
             await sseM({ error: (e as Error).message })
           } finally {
@@ -4017,7 +3987,7 @@ Deno.serve(async (req: Request) => {
               data_type: dataType,
               structured_data: structured,
               summary,
-              tenant_id: _reqTenantId
+              tenant_id: R.tenantId
             })
 
             // Build result message
@@ -4034,8 +4004,8 @@ Deno.serve(async (req: Request) => {
 
             for (const ch of msg) await ssed({ chunk: ch })
 
-            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[数据录入] ${file_name}`, agent: 'data', tenant_id: _reqTenantId })
-            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: msg, agent: 'data', tenant_id: _reqTenantId })
+            await dbInsert('conversations', { session_id: sid2, role: 'user', content: `[数据录入] ${file_name}`, agent: 'data', tenant_id: R.tenantId })
+            const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: msg, agent: 'data', tenant_id: R.tenantId })
             await ssed({ done: true, agent: 'data', session_id: sid2, conversation_id: aRow.id })
           } catch(e) {
             await ssed({ error: (e as Error).message })
@@ -4047,8 +4017,8 @@ Deno.serve(async (req: Request) => {
       }
 
       const [sproviders, sdefProv, sagents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
-      _reqProviders = sproviders; _reqAgents = sagents; _reqDefaultProvider = sdefProv
-      _reqSessionId = sid2
+      R.providers = sproviders; R.agents = sagents; R.defaultProvider = sdefProv
+      R.sessionId = sid2
       let sagent: AgentRow
       if (sta) sagent = sagents.find((a:AgentRow) => a.id === sta) ?? sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
       else     sagent = sagents.find((a:AgentRow) => a.id === 'chat') ?? sagents[0]
@@ -4060,8 +4030,8 @@ Deno.serve(async (req: Request) => {
         if (skwAgent) {
           sagent = skwAgent
           sroutedDirectly = true
-          _reqDelegatedId = skwAgent.id
-          _reqDelegatedName = skwAgent.name || skwAgent.id
+          R.delegatedId = skwAgent.id
+          R.delegatedName = skwAgent.name || skwAgent.id
         }
       }
 
@@ -4076,7 +4046,7 @@ Deno.serve(async (req: Request) => {
       const sTodayStr = new Date().toISOString().slice(0, 10)
       const ssystem  = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.') + (sPromptOverride ? '' : sHermesInject) + `\n\n**今天日期：${sTodayStr}**（所有查询默认以此为基准）` + (SOUL ? '\n\n' + SOUL : '') + sskillText + skbCtx
       const suseTools = DATA_AGENTS.has(sagent.id) || !!sagent.uses_tools
-      _reqHermesMode = (sagent.id === 'chat')   // restrict Hermes to delegate_to_agent only
+      R.hermesMode = (sagent.id === 'chat')   // restrict Hermes to delegate_to_agent only
       const smessages: {role:string;content:string}[] = [...shistory, { role:'user', content:smsg }]
 
       const { readable, writable } = new TransformStream()
@@ -4115,7 +4085,7 @@ Deno.serve(async (req: Request) => {
                 finalSystem = (sPromptOverride || sagent.system_prompt || 'You are a helpful assistant.')
                   + '\n\n' + SOUL + sskillText
                   + '\n\n[系统指令] 已通过网络搜索获取最新信息。请直接基于上面的 [网络搜索结果] 用中文给出清晰准确的回答。不要委托、不要说不知道。'
-                _reqHermesMode = false  // allow direct answer, skip delegation
+                R.hermesMode = false  // allow direct answer, skip delegation
               } catch(se) {
                 await sse({ chunk: `⚠️ 搜索失败 (${(se as Error).message.slice(0,80)})，基于已有知识回答：\n\n` })
               }
@@ -4128,17 +4098,17 @@ Deno.serve(async (req: Request) => {
             async (chunk) => { fullText += chunk; await sse({ chunk }) }
           )
           // Save to DB with token usage
-          const _cost = calcCost(_lastUsage.used_model || sagent.model || '', _lastUsage.tokens_in, _lastUsage.tokens_out)
+          const _cost = calcCost(llmUsage.used_model || sagent.model || '', llmUsage.tokens_in, llmUsage.tokens_out)
           const sInserts: Promise<unknown>[] = [
-            dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg, agent: sagent.id, tenant_id: _reqTenantId }),
+            dbInsert('conversations', { session_id: sid2, role: 'user', content: smsg, agent: sagent.id, tenant_id: R.tenantId }),
           ]
-          if (sagent.id === 'chat' && !_reqDelegated && smsg.trim().length > 10) {
-            sInserts.push(dbInsert('agent_suggestions', { message: smsg.trim(), session_id: sid2, tenant_id: _reqTenantId }))
+          if (sagent.id === 'chat' && !R.delegated && smsg.trim().length > 10) {
+            sInserts.push(dbInsert('agent_suggestions', { message: smsg.trim(), session_id: sid2, tenant_id: R.tenantId }))
             learnFromGaps().catch(() => {})  // 立即异步学习，不阻塞响应
           }
           await Promise.all(sInserts)
-          const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: fullText, agent: _reqDelegatedId || sagent.id, tenant_id: _reqTenantId, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost })
-          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, delegated_agent: _reqDelegatedId || undefined, delegated_agent_name: _reqDelegatedName || undefined, session_id: sid2, provider: usedProvider, conversation_id: aRow.id, tokens_in: _lastUsage.tokens_in, tokens_out: _lastUsage.tokens_out, cost_usd: _cost, web_searched: webSearched })
+          const aRow = await dbInsertReturning('conversations', { session_id: sid2, role: 'assistant', content: fullText, agent: R.delegatedId || sagent.id, tenant_id: R.tenantId, tokens_in: llmUsage.tokens_in, tokens_out: llmUsage.tokens_out, cost_usd: _cost })
+          await sse({ done: true, agent: sagent.id, agent_name: sagent.name, delegated_agent: R.delegatedId || undefined, delegated_agent_name: R.delegatedName || undefined, session_id: sid2, provider: usedProvider, conversation_id: aRow.id, tokens_in: llmUsage.tokens_in, tokens_out: llmUsage.tokens_out, cost_usd: _cost, web_searched: webSearched })
           extractPrefs(smsg, fullText, sproviders, sdefProv)
         } catch(e) {
           await sse({ error: (e as Error).message })
@@ -4163,10 +4133,10 @@ Deno.serve(async (req: Request) => {
       loadProviders(), getDefaultProvider(), loadAgents()
     ])
     // Expose to executeTool (module-level, reset per request)
-    _reqProviders       = providers
-    _reqAgents          = agents
-    _reqDefaultProvider = defaultProvider
-    _reqSessionId       = sid
+    R.providers       = providers
+    R.agents          = agents
+    R.defaultProvider = defaultProvider
+    R.sessionId       = sid
 
     // Hermes: chat agent is the orchestrator and entry point for all messages.
     // target_agent from UI allows manual override to a specific agent.
@@ -4191,8 +4161,8 @@ Deno.serve(async (req: Request) => {
       if (kwAgent) {
         agent = kwAgent
         routedDirectly = true
-        _reqDelegatedId = kwAgent.id
-        _reqDelegatedName = kwAgent.name || kwAgent.id
+        R.delegatedId = kwAgent.id
+        R.delegatedName = kwAgent.name || kwAgent.id
       }
     }
 
@@ -4221,7 +4191,7 @@ Deno.serve(async (req: Request) => {
       system = (promptOverride || agent.system_prompt || 'You are a helpful assistant.') + hermesCtx + dateInject + (SOUL ? '\n\n' + SOUL : '') + skillText + kbCtx
     }
     const useTools = DATA_AGENTS.has(agent.id) || !!agent.uses_tools
-    _reqHermesMode = (agent.id === 'chat')   // restrict Hermes to delegate_to_agent only
+    R.hermesMode = (agent.id === 'chat')   // restrict Hermes to delegate_to_agent only
 
     // A: build messages with history prefix
     const messages: { role: string; content: string }[] = [
@@ -4234,18 +4204,18 @@ Deno.serve(async (req: Request) => {
     )
 
     const saves: Promise<unknown>[] = [
-      dbInsert('conversations', { session_id:sid, role:'user',      content:message,  agent:agent.id, tenant_id:_reqTenantId }),
-      dbInsert('conversations', { session_id:sid, role:'assistant', content:response, agent: _reqDelegatedId || agent.id, tenant_id:_reqTenantId }),
+      dbInsert('conversations', { session_id:sid, role:'user',      content:message,  agent:agent.id, tenant_id:R.tenantId }),
+      dbInsert('conversations', { session_id:sid, role:'assistant', content:response, agent: R.delegatedId || agent.id, tenant_id:R.tenantId }),
     ]
     // Log uncovered questions (chat answered directly without delegating)
-    if (agent.id === 'chat' && !_reqDelegated && message.trim().length > 10) {
-      saves.push(dbInsert('agent_suggestions', { message: message.trim(), session_id: sid, tenant_id: _reqTenantId }))
+    if (agent.id === 'chat' && !R.delegated && message.trim().length > 10) {
+      saves.push(dbInsert('agent_suggestions', { message: message.trim(), session_id: sid, tenant_id: R.tenantId }))
       learnFromGaps().catch(() => {})  // 立即异步学习，不阻塞响应
     }
     await Promise.all(saves)
     extractPrefs(message, response, providers, defaultProvider)
     return new Response(
-      JSON.stringify({ agent:agent.id, agent_name:agent.name, delegated_agent: _reqDelegatedId||undefined, delegated_agent_name: _reqDelegatedName||undefined, response, session_id:sid, provider:usedProvider }),
+      JSON.stringify({ agent:agent.id, agent_name:agent.name, delegated_agent: R.delegatedId||undefined, delegated_agent_name: R.delegatedName||undefined, response, session_id:sid, provider:usedProvider }),
       { headers: { ...CORS, 'Content-Type': 'application/json' } }
     )
 
