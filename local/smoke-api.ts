@@ -713,6 +713,39 @@ const retryAfter = Number(retry.headers.get('retry-after'))
 check('429 carries a Retry-After (seconds, ≤ 60)', retry.status === 429 && retryAfter >= 1 && retryAfter <= 60, { status: retry.status, retryAfter })
 check('another session is not affected by the burst', (await api('whoami', {})).status === 200)
 
+// ── 18. knowledge base ingest + folder sync ───────────────────────────
+console.log('\n[18] knowledge base ingest / folder sync')
+const embedProviders = await dbGet('provider_config', 'provider', { provider: 'in.(openai,openrouter,google)', active: 'eq.true', api_key: 'neq.' })
+if (embedProviders.length) {
+  console.log('  (skipped "failed ingest keeps old chunks": an embedding provider is configured)')
+} else {
+  const ikb = (await api('create_kb', { role: 'admin', name: `${MARK} ingest kb` })).json.kb?.id
+  await dbInsert('kb_chunks', { kb_id: ikb, source_name: 'doc', chunk_index: 0, content: `${MARK} old version` })
+  const ing = await api('kb_ingest', { kb_id: ikb, source_name: 'doc', content: 'new version of the document' })
+  const kept = await dbGet('kb_chunks', 'content', { kb_id: `eq.${ikb}`, source_name: 'eq.doc' })
+  check('kb_ingest without an embedding provider → 500 and the previous chunks are kept',
+    ing.status === 500 && String(ing.json.error).includes('向量模型') && kept.length === 1 && kept[0].content === `${MARK} old version`, { ing: ing.json, kept })
+  await api('delete_kb', { role: 'admin', kb_id: ikb })
+}
+if (Deno.env.get('KB_SYNC_DIR')) {
+  const st = await api('kb_sync', { method: 'status' })
+  check('kb_sync status (member): enabled, folder, interval and file count', st.status === 200 && st.json.enabled === true &&
+    st.json.dir === Deno.env.get('KB_SYNC_DIR') && typeof st.json.files === 'number' && st.json.interval_days >= 1, st.json)
+  const runMember = await api('kb_sync', { method: 'run' })
+  check('kb_sync run needs admin (member → 403)', runMember.status === 403, runMember.json)
+  const runAdmin = await api('kb_sync', { role: 'admin', method: 'run' }, TOKENS.admin)
+  if (runAdmin.status === 409) console.log('  (sync already running — run result not checked)')
+  else {
+    const rr = runAdmin.json.result || {}
+    check('kb_sync run (admin): counts add up and a summary is recorded',
+      runAdmin.status === 200 && rr.scanned === rr.ingested + rr.unchanged + rr.failed.length && typeof runAdmin.json.summary === 'string', runAdmin.json)
+    const after = (await api('kb_sync', { method: 'status' })).json
+    check('status shows the attempt time and the same summary', !!after.attempted_at && after.result === runAdmin.json.summary, after)
+  }
+} else {
+  console.log('  (skipped kb_sync tests: KB_SYNC_DIR not in the test env)')
+}
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })

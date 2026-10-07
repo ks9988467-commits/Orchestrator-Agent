@@ -1264,9 +1264,37 @@ function renderAnCharts() {
 // ── Knowledge Base ─────────────────────────────────────────────────────
 let _kbSelected = null
 
+// Folder auto-sync panel (only when the backend has KB_SYNC_DIR set)
+async function loadKbSyncStatus() {
+  const box = document.getElementById('kbSyncBox')
+  if (!box) return
+  let s
+  try { s = await apiCall('kb_sync', { method: 'status' }) } catch { box.innerHTML = ''; return }
+  if (!s.enabled) { box.innerHTML = ''; return }
+  const canRun = _session.role === 'admin' || _session.role === 'master'
+  const hasFailures = s.result && /失败/.test(s.result)
+  box.innerHTML = `<div style="padding:12px 14px;border-bottom:1px solid #e5e5e5;font-size:11px;color:var(--ink-3);line-height:1.6;background:#fafafa">
+    <div style="font-size:12px;font-weight:600;color:var(--ink-1)">📁 自动同步 · 每 ${s.interval_days} 天</div>
+    <div style="word-break:break-all">${esc(s.dir)} → ${esc(s.kb_name || '')}（${s.files} 个文件）</div>
+    <div>上次成功：${s.synced_at ? fmtTime(s.synced_at) : '尚未成功'}${s.attempted_at ? ' · 上次尝试：' + fmtTime(s.attempted_at) : ''}</div>
+    ${s.result ? `<div style="margin-top:4px;white-space:pre-wrap;word-break:break-word;color:${hasFailures ? '#b45309' : 'var(--ink-3)'}">${esc(s.result)}</div>` : ''}
+    ${canRun ? `<button onclick="triggerKbSync(this)" ${s.running ? 'disabled' : ''} style="margin-top:8px;background:#fff;border:1px solid #e5e5e5;border-radius:6px;padding:4px 10px;font-size:11px;color:var(--ink-2);cursor:pointer">${s.running ? '同步中…' : '⟳ 立即同步'}</button>` : ''}
+  </div>`
+}
+
+async function triggerKbSync(btn) {
+  btn.disabled = true; btn.textContent = '同步中…'
+  try {
+    const r = await apiCall('kb_sync', { method: 'run' }, { timeout: 600000 })
+    toast(r.result?.failed?.length ? '同步完成，有文件失败' : '同步完成', r.result?.failed?.length ? 'error' : 'success')
+  } catch(e) { toast('同步失败：' + e.message, 'error') }
+  loadKbPage()
+}
+
 async function loadKbPage() {
   const list = document.getElementById('kbList')
   if (!list) return
+  loadKbSyncStatus()
   list.innerHTML = '<p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">加载中…</p>'
   try {
     const { kbs: data } = await apiCall('list_kbs')

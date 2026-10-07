@@ -2,6 +2,7 @@
 // Portable DB layer (Step 1 of Supabase decoupling). Same signatures as the
 // old inline helpers; backend switched by env DB_DRIVER (rest default | postgres).
 import { dbGet, dbGetPage, dbPatch, dbInsert, dbUpsert, dbInsertReturning, dbPatchWhere, dbDelete, dbRpc } from './db.ts'
+import { SYNC_DIR, SYNC_INTERVAL_DAYS, type SyncResult, summarize, syncFolder, syncKbId } from './kb-sync.ts'
 import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, deleteFile, isValidName, nameFromUrl, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
 // ── CORS ─────────────────────────────────────────────────────────────
@@ -184,6 +185,7 @@ const ACTION_ROLES: Record<string, string | Record<string, string>> = {
   document_crud: 'member',                       // decide / delete / get also check the member's own rows
   notify_doc_reviewers: 'member', notify_doc_decision: 'member',
   list_kbs: 'member', count_kb_chunks: 'member', kb_ingest: 'member', kb_search: 'member',
+  kb_sync: { status: 'member', '*': 'admin' },
   list_workflows: 'member', list_workflow_runs: 'member', run_workflow: 'member',
   list_agent_versions: 'member', learn: 'member', ugc_generate: 'member', ugc_get_rules: 'member',
   // everyone reads, admins change
@@ -2032,6 +2034,77 @@ async function extractPrefs(message: string, response: string, providers: Provid
   } catch { /* silent */ }
 }
 
+// ── Knowledge base ingest ────────────────────────────────────────────
+// Splits text into chunks, embeds them, then replaces the source's existing chunks.
+// Embedding happens first, so a failure leaves the previous version in place.
+// error = nothing was written; errors = some chunks failed to insert.
+async function ingestText(kbId: string, src: string, text: string, tenantId: string | null):
+    Promise<{ chunks: number; saved: number; model?: string; errors: string[]; error?: string }> {
+  const chunks = chunkText(text, 500, 50)
+  if (!chunks.length) {
+    await dbDelete('kb_chunks', { kb_id: `eq.${kbId}`, source_name: `eq.${src}` })
+    return { chunks: 0, saved: 0, errors: [] }
+  }
+  // One embedding model per knowledge base, so all chunks (and later queries) share a vector space
+  const providers = await loadProviders()
+  const kbRows = await dbGet('knowledge_bases', 'embed_model', { id: `eq.${kbId}` }) as { embed_model?: string }[]
+  let kbModel = kbRows[0]?.embed_model || ''
+  const vectors: number[][] = []
+  for (const chunk of chunks) {
+    const er = await getEmbedding(chunk, providers, kbModel || undefined)
+    if (!er) return { chunks: chunks.length, saved: 0, errors: [], error: kbModel ? `向量模型 ${kbModel} 不可用` : '没有可用的向量模型（需要 OpenAI / OpenRouter / Google 的 API Key）' }
+    kbModel = er.model
+    vectors.push(er.vector)
+  }
+  await dbDelete('kb_chunks', { kb_id: `eq.${kbId}`, source_name: `eq.${src}` })
+  const errs: string[] = []
+  for (let i = 0; i < chunks.length; i++) {
+    const ir = await dbInsert('kb_chunks', { kb_id: kbId, source_name: src, chunk_index: i, content: chunks[i], embedding: `[${vectors[i].join(',')}]`, tenant_id: tenantId })
+    if (!ir.ok) errs.push(`insert_${i}:${ir.error}`)
+  }
+  if (!kbRows[0]?.embed_model) await dbPatch('knowledge_bases', kbId, { embed_model: kbModel })
+  return { chunks: chunks.length, saved: chunks.length - errs.length, model: kbModel, errors: errs }
+}
+
+// ── Folder → knowledge base sync (local backend only, KB_SYNC_DIR) ───
+let _kbSyncRunning = false
+async function runKbSync(): Promise<{ ok: boolean; result?: SyncResult; error?: string }> {
+  if (!SYNC_DIR) return { ok: false, error: '未配置 KB_SYNC_DIR' }
+  if (_kbSyncRunning) return { ok: false, error: '同步正在进行中' }
+  _kbSyncRunning = true
+  try {
+    const kbId = await syncKbId()
+    const now = new Date().toISOString()
+    try {
+      const result = await syncFolder(SYNC_DIR, kbId, async (id, src, text) => {
+        const r = await ingestText(id, src, text, null)
+        return r.error || r.errors.length ? { ok: false, error: r.error || r.errors[0] } : { ok: true }
+      })
+      // synced_at only moves on a clean run, so failed files are retried at the next hourly check
+      await dbPatch('knowledge_bases', kbId, { sync_attempted_at: now, sync_result: summarize(result), ...(result.failed.length ? {} : { synced_at: now }) })
+      return { ok: true, result }
+    } catch (e) {
+      const msg = (e as Error).message
+      await dbPatch('knowledge_bases', kbId, { sync_attempted_at: now, sync_result: `读取文件夹失败：${msg}` })
+      return { ok: false, error: msg }
+    }
+  } finally {
+    _kbSyncRunning = false
+  }
+}
+if (SYNC_DIR) {
+  // Hourly: sync when the last clean run is older than KB_SYNC_INTERVAL_DAYS (or never happened)
+  const checkKbSync = async () => {
+    try {
+      const [kb] = await dbGet('knowledge_bases', 'synced_at', { id: `eq.${await syncKbId()}` }, undefined, 1)
+      const last = kb?.synced_at ? Date.parse(String(kb.synced_at)) : 0
+      if (Date.now() - last >= SYNC_INTERVAL_DAYS * 86_400_000) await runKbSync()
+    } catch (e) { console.error('kb sync check', e) }
+  }
+  setTimeout(checkKbSync, 60_000)
+  setInterval(checkKbSync, 3_600_000)
+}
+
 // \u2500\u2500 Main handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 Deno.serve(async (req: Request) => {
   const CORS = corsFor(req)   // every Response below spreads these headers
@@ -3646,49 +3719,32 @@ Deno.serve(async (req: Request) => {
     if (body.action === 'kb_ingest') {
       const { kb_id, source_name, content: rawContent } = body
       if (!kb_id || !rawContent) return new Response(JSON.stringify({ error:'kb_id and content required' }), { status:400, headers:{...CORS,'Content-Type':'application/json'} })
-      const providers = await loadProviders()
-      const src = String(source_name || 'upload')
+      // Re-ingesting the same source replaces its chunks rather than duplicating them
+      const r = await ingestText(String(kb_id), String(source_name || 'upload'), String(rawContent), _reqTenantId)
+      if (r.error) return new Response(JSON.stringify({ error: r.error }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
+      return new Response(JSON.stringify({ ok:true, chunks: r.chunks, saved: r.saved, model: r.model, errors: r.errors }), { headers:{...CORS,'Content-Type':'application/json'} })
+    }
 
-      // Dedup: replace any existing chunks for this (kb_id, source) so re-ingesting
-      // the same document updates rather than duplicates.
-      await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}`, source_name: `eq.${src}` })
-
-      // Sentence-aware chunking: pack sentences into ~500-char chunks (50 overlap)
-      // so chunks break on natural boundaries (。！？.!?\n) instead of mid-word.
-      const text = String(rawContent)
-      const chunks: string[] = chunkText(text, 500, 50)
-      if (!chunks.length) return new Response(JSON.stringify({ ok:true, chunks:0, saved:0, errors:[] }), { headers:{...CORS,'Content-Type':'application/json'} })
-
-      // Lock a single embedding model for the whole KB. Use the KB's existing model
-      // if set; otherwise embed chunk 0 to determine it, then pin every chunk to it —
-      // this guarantees all chunks (and later queries) share one vector space.
-      const kbRows = await dbGet('knowledge_bases', 'embed_model', { id: `eq.${kb_id}` }) as {embed_model?:string}[]
-      let kbModel = kbRows[0]?.embed_model || ''
-      let firstVec: number[] | null = null
-      if (!kbModel) {
-        const f = await getEmbedding(chunks[0], providers)
-        if (!f) return new Response(JSON.stringify({ error:'Embedding failed: no provider available' }), { status:500, headers:{...CORS,'Content-Type':'application/json'} })
-        kbModel = f.model; firstVec = f.vector
+    // ── Folder sync status / run now ─────────────────────────────────
+    if (body.action === 'kb_sync') {
+      const m = String(body.method || 'status')
+      if (!SYNC_DIR) return new Response(JSON.stringify({ ok: true, enabled: false }), { headers:{...CORS,'Content-Type':'application/json'} })
+      if (m === 'status') {
+        const kbId = await syncKbId()
+        const [kb] = await dbGet('knowledge_bases', 'id,name,synced_at,sync_attempted_at,sync_result', { id: `eq.${kbId}` }, undefined, 1)
+        const { count } = await dbGetPage('kb_sync_files', 'path', { kb_id: `eq.${kbId}` }, undefined, 0)
+        return new Response(JSON.stringify({
+          ok: true, enabled: true, dir: SYNC_DIR, interval_days: SYNC_INTERVAL_DAYS, running: _kbSyncRunning,
+          kb_id: kbId, kb_name: kb?.name, synced_at: kb?.synced_at ?? null, attempted_at: kb?.sync_attempted_at ?? null,
+          result: kb?.sync_result ?? null, files: count,
+        }), { headers:{...CORS,'Content-Type':'application/json'} })
       }
-
-      const errs: string[] = []
-      const results = await Promise.all(chunks.map(async (chunk, idx) => {
-        let vec: number[]
-        if (idx === 0 && firstVec) { vec = firstVec }
-        else {
-          const er = await getEmbedding(chunk, providers, kbModel)   // pinned model
-          if (!er) { errs.push(`embed_${idx}:failed`); return null }
-          vec = er.vector
-        }
-        const embeddingStr = `[${vec.join(',')}]`
-        const ir = await dbInsert('kb_chunks', { kb_id, source_name: src, chunk_index: idx, content: chunk, embedding: embeddingStr, tenant_id: _reqTenantId })
-        if (!ir.ok) { errs.push(`insert_${idx}:${ir.error}`); return null }
-        return true
-      }))
-      const saved = results.filter(r => r === true).length
-      // Record the locked model on the KB (first ingest)
-      if (!kbRows[0]?.embed_model && kbModel) await dbPatch('knowledge_bases', String(kb_id), { embed_model: kbModel })
-      return new Response(JSON.stringify({ ok:true, chunks: chunks.length, saved, model: kbModel, errors: errs }), { headers:{...CORS,'Content-Type':'application/json'} })
+      if (m === 'run') {
+        const r = await runKbSync()
+        if (!r.ok) return new Response(JSON.stringify({ error: r.error }), { status: r.error === '同步正在进行中' ? 409 : 500, headers:{...CORS,'Content-Type':'application/json'} })
+        return new Response(JSON.stringify({ ok: true, result: r.result, summary: summarize(r.result!) }), { headers:{...CORS,'Content-Type':'application/json'} })
+      }
+      return new Response(JSON.stringify({ error: 'unknown method' }), { status: 400, headers:{...CORS,'Content-Type':'application/json'} })
     }
 
     // ── RAG: semantic search ─────────────────────────────────────────
@@ -3722,6 +3778,7 @@ Deno.serve(async (req: Request) => {
       const own = await dbGet('knowledge_bases','id',tenantFilters({ id: `eq.${kb_id}` }),undefined,1)
       if (!own.length) return new Response(JSON.stringify({ error:'not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
       await dbDelete('kb_chunks', { kb_id: `eq.${kb_id}` })   // kb_chunks has no foreign key to cascade from
+      await dbDelete('kb_sync_files', { kb_id: `eq.${kb_id}` })
       await dbDelete('knowledge_bases', { id: `eq.${kb_id}` })
       return new Response(JSON.stringify({ ok:true }), { headers:{...CORS,'Content-Type':'application/json'} })
     }
