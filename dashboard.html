@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -20,27 +19,21 @@
   <div class="lock-card">
     <div class="lock-logo">🧠</div>
     <div class="lock-title">Orchestrator Agent</div>
-    <div class="lock-sub">请输入访问密码</div>
-    <!-- 密码界面 -->
-    <div id="lockPwdView">
-      <input id="lockInput" type="password" class="lock-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')checkLock()">
-      <button class="lock-btn" onclick="checkLock()">进入</button>
-      <div class="lock-err" id="lockErr"></div>
-      <div style="margin-top:14px"><button onclick="showOtpView()" style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;text-decoration:underline">忘记密码？</button></div>
-    </div>
-    <!-- OTP 界面 -->
-    <div id="lockOtpView" style="display:none">
+    <div class="lock-sub">邮箱验证码登录</div>
+    <!-- 邮箱验证码登录：后端签发会话令牌（app-core.js 的 sendOtp / verifyOtp） -->
+    <div id="lockOtpView">
       <div id="lockOtpStep1">
-        <input id="lockEmailInput" type="email" class="lock-input" placeholder="输入邮箱" style="letter-spacing:0">
+        <input id="lockEmailInput" type="email" class="lock-input" placeholder="输入邮箱" style="letter-spacing:0" onkeydown="if(event.key==='Enter')sendOtp()">
         <button class="lock-btn" onclick="sendOtp()">发送验证码</button>
         <div class="lock-err" id="lockOtpErr"></div>
-        <div style="margin-top:14px"><button onclick="showPwdView()" style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;text-decoration:underline">← 返回</button></div>
       </div>
       <div id="lockOtpStep2" style="display:none">
-        <div style="font-size:12px;color:#555;margin-bottom:16px">验证码已发送，10分钟内有效</div>
+        <div style="font-size:12px;color:#555;margin-bottom:16px">如果该邮箱有登录权限，验证码已发送（10 分钟内有效）</div>
+        <div id="lockDevCode" style="display:none;font-size:12px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;margin-bottom:12px"></div>
         <input id="lockCodeInput" type="text" class="lock-input" placeholder="6位验证码" maxlength="6" onkeydown="if(event.key==='Enter')verifyOtp()">
         <button class="lock-btn" onclick="verifyOtp()">验证进入</button>
         <div class="lock-err" id="lockCodeErr"></div>
+        <button onclick="backToEmailStep()" style="background:none;border:none;color:var(--ink-4);font-size:12px;cursor:pointer;margin-top:6px">← 换一个邮箱</button>
       </div>
     </div>
   </div>
@@ -57,43 +50,33 @@
     </div>
   </div>
   <nav>
-    <!-- AI Core -->
+    <!-- Sections with several pages (Agents, 数据, 日志, 设置) show them as a tab row
+         at the top of the content area (#sectionTabs); see SECTIONS in app-core.js -->
     <div class="nav-group">
       <span class="nav-group-label">AI 核心</span>
-      <button class="nav-item active" onclick="showPage('chat',this)">对话</button>
-      <button class="nav-item" onclick="showPage('agents',this)">Agents</button>
-      <!-- <button class="nav-item" onclick="showPage('notes',this)">笔记</button> -->
-      <button class="nav-item" onclick="showPage('workflow',this)">工作流</button>
-      <button class="nav-item" onclick="showPage('kb',this)">🧠 知识库</button>
-      <!-- <button class="nav-item" onclick="showPage('agtask',this)">⚡ AI任务</button> -->
+      <button class="nav-item active" data-section="chat" onclick="showPage('chat',this)">对话</button>
+      <button class="nav-item" data-section="agents" onclick="showPage('agents',this)">Agents</button>
     </div>
-    <!-- Analytics -->
     <div class="nav-group">
       <span class="nav-group-label">数据分析</span>
-      <button class="nav-item" onclick="showPage('usage',this)">用量</button>
-      <button class="nav-item" onclick="showPage('logs',this)">日志</button>
-      <button class="nav-item" onclick="showPage('data',this)">数据</button>
-      <button class="nav-item" onclick="showPage('cac',this)">📊 渠道经济</button>
+      <button class="nav-item" data-section="data" onclick="showPage('data',this)">数据</button>
+      <button class="nav-item" data-section="logs" onclick="showPage('logs',this)">日志</button>
     </div>
-    <!-- Operations -->
     <div class="nav-group">
       <span class="nav-group-label">运营</span>
-      <button class="nav-item" onclick="showPage('tasks',this)">任务</button>
-      <button class="nav-item" onclick="showPage('review',this)">文件管理</button>
-      <button class="nav-item" onclick="showPage('staff',this)">员工</button>
-      <button class="nav-item" onclick="showPage('ugc',this)">🎬 UGC Studio</button>
-      <button class="nav-item" onclick="showPage('msg',this)">消息 <span id="msgUnreadBadge" style="display:none;background:#da0d15;color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:auto"></span></button>
+      <button class="nav-item" data-section="tasks" onclick="showPage('tasks',this)">任务</button>
+      <button class="nav-item" data-section="review" onclick="showPage('review',this)">文件</button>
+      <button class="nav-item" data-section="msg" onclick="showPage('msg',this)">消息 <span id="msgUnreadBadge" style="display:none;background:#da0d15;color:#fff;border-radius:10px;font-size:10px;padding:1px 6px;margin-left:auto"></span></button>
+      <button class="nav-item" data-section="ugc" onclick="showPage('ugc',this)">🎬 UGC Studio</button>
     </div>
-    <!-- Settings -->
     <div class="nav-group" style="margin-top:auto">
       <span class="nav-group-label">系统</span>
-      <button class="nav-item master-only" style="display:none" onclick="showPage('tenants',this)">客户管理</button>
-      <button class="nav-item" onclick="showPage('llm',this)">LLM 配置</button>
-      <button class="nav-item" onclick="showPage('api',this)">API 对接</button>
+      <button class="nav-item admin-only" data-section="settings" onclick="showPage('settings',this)">⚙️ 设置</button>
     </div>
   </nav>
   <div class="sidebar-footer">
     <div id="tenantNameBadge" style="font-size:11px;color:#555;padding:4px 8px 6px;text-align:center"></div>
+    <button id="logoutBtn" onclick="logout()" style="display:block;margin:0 auto 8px;background:none;border:1px solid var(--border);border-radius:6px;padding:3px 12px;font-size:11px;color:var(--ink-3);cursor:pointer">退出登录</button>
     <div class="provider-badge">
       <div class="dot" id="dot-anthropic"></div>
       <span class="label">Anthropic</span>
@@ -128,6 +111,9 @@
     <button id="mobileNavToggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
     <span class="mtb-title">🧠 Orchestrator</span>
   </div>
+
+  <!-- Tab row for sections that hold several pages; filled by showPage() -->
+  <div id="sectionTabs" class="data-tabs"></div>
 
   <!-- Home -->
   <div class="page" id="homePage">
@@ -218,15 +204,15 @@
   '0 3 * * *',
   $$
     select net.http_post(
-      url := 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator',
-      headers := '{"Content-Type":"application/json"}'::jsonb,
+      url := '<span class="js-backend-url"></span>',
+      headers := '{"Content-Type":"application/json","x-orch-internal":"&lt;ORCH_INTERNAL_SECRET&gt;"}'::jsonb,
       body := '{"action":"learn_gaps"}'::jsonb
     );
   $$
 );</pre>
           <button onclick="copyCronSql()" style="position:absolute;top:8px;right:8px;background:#444;color:#fff;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer">复制</button>
         </div>
-        <p style="color:var(--ink-3);margin:8px 0 0;font-size:11px">需先在 Supabase 启用 pg_cron 和 pg_net 扩展</p>
+        <p style="color:var(--ink-3);margin:8px 0 0;font-size:11px">需先在 Supabase 启用 pg_cron 和 pg_net 扩展，并把 &lt;ORCH_INTERNAL_SECRET&gt; 换成后端配置的内部密钥（不要泄露给他人）</p>
       </div>
       <div id="gapsTableWrap"></div>
     </div>
@@ -760,7 +746,7 @@
           <div class="chk-row"><input type="checkbox" id="iactive-whatsapp" onchange="toggleIntegration('whatsapp',this.checked)"><span>启用</span></div>
           <label class="lbl">Webhook URL（填入 Meta 后台）</label>
           <div class="irow">
-            <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:var(--ink-2);background:var(--bg-1)" value="https://ontumerafhimxvqtsijr.supabase.co/functions/v1/orchestrator">
+            <input type="text" id="wa-webhook-url" readonly style="font-size:11px;font-family:monospace;color:var(--ink-2);background:var(--bg-1)" value="">
             <button class="show-btn" onclick="copyWAUrl(this)" style="white-space:nowrap">复制</button>
           </div>
           <label class="lbl">Phone Number ID</label>
@@ -851,7 +837,7 @@
           <p style="font-size:11px;color:var(--ink-5);margin:3px 0 12px;line-height:1.6">
             在 <a href="https://open.feishu.cn/app" target="_blank" style="color:#da0d15">飞书开放平台</a> 创建企业自建应用，将本系统的 Webhook URL 填入事件订阅：<br>
             <code style="font-size:10px;background:#f5f5f5;padding:2px 6px;border-radius:3px;color:#555">
-              https://ontumerafhimxvqtsijr.supabase.co/functions/v1/lark-webhook
+              <span class="js-lark-webhook-url"></span>
             </code>
           </p>
           <div style="display:flex;gap:8px;margin-bottom:8px">
@@ -1239,6 +1225,7 @@
     <div style="display:flex;flex:1;overflow:hidden">
       <!-- KB list -->
       <div style="width:260px;flex-shrink:0;border-right:1px solid #e5e5e5;display:flex;flex-direction:column;overflow:hidden">
+        <div id="kbSyncBox"></div>
         <div id="kbList" style="flex:1;overflow-y:auto">
           <p style="color:var(--ink-5);font-size:12px;text-align:center;padding-top:40px">加载中…</p>
         </div>

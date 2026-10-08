@@ -404,6 +404,8 @@ select{background:var(--bg-1);border:1px solid var(--border);color:var(--ink-1);
 /* ── Data page ── */
 .data-page{display:flex;flex-direction:column;flex:1;overflow:hidden}
 .data-tabs{display:flex;gap:4px;padding:var(--sp-4) var(--px) 0;border-bottom:1px solid var(--border);flex-shrink:0}
+#sectionTabs{display:none;padding-top:10px;background:var(--bg-0)}
+#sectionTabs.on{display:flex}
 .data-tab{padding:var(--sp-2) 18px;border-radius:var(--r-sm) var(--r-sm) 0 0;font-size:var(--t-base);cursor:pointer;border:none;background:none;color:var(--ink-3);border-bottom:2px solid transparent;transition:all .15s;-webkit-appearance:none;appearance:none;margin-bottom:-1px}
 .data-tab:hover{color:var(--ink-2)}
 .data-tab.active{color:var(--red);border-bottom-color:var(--red);background:none;font-weight:600}
@@ -720,4 +722,40 @@ select{background:var(--bg-1);border:1px solid var(--border);color:var(--ink-1);
   .msg{max-width:94%}
   .data-tab{padding:var(--sp-2) 12px;font-size:var(--t-sm)}
   .metric-card .mc-value{font-size:var(--t-xl)}
+}
+
+/* ── Messaging page (direct messages) ─────────────────────────────── */
+.msg-layout{flex:1;display:flex;min-height:0;background:var(--bg-0)}
+.msg-sidebar{width:260px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.msg-me-bar{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) 12px;border-bottom:1px solid var(--border);font-size:var(--t-sm);color:var(--ink-3);white-space:nowrap}
+.msg-me-bar select{flex:1;min-width:0;padding:6px 10px;font-size:var(--t-base)}
+.msg-contacts{flex:1;overflow-y:auto;padding:var(--sp-2)}
+.msg-contact-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s}
+.msg-contact-item:hover{background:var(--bg-2)}
+.msg-contact-item.active{background:#fff5f5;box-shadow:inset 3px 0 0 var(--red)}
+.msg-contact-item>div:last-child{min-width:0}
+.msg-contact-name{font-size:var(--t-base);font-weight:600;color:var(--ink-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg-contact-sub{font-size:var(--t-sm);color:var(--ink-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg-avatar{width:34px;height:34px;border-radius:50%;background:var(--bg-2);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.msg-thread-wrap{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.msg-no-contact{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp-2);color:var(--ink-5);font-size:var(--t-base)}
+.msg-thread-hd{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--px);border-bottom:1px solid var(--border);font-size:var(--t-base);font-weight:600;color:var(--ink-1);flex-shrink:0}
+.msg-thread{flex:1;overflow-y:auto;padding:var(--sp-4) var(--px);display:flex;flex-direction:column;gap:var(--sp-2);background:var(--bg-3)}
+.msg-empty{margin:auto;color:var(--ink-5);font-size:var(--t-sm);text-align:center}
+.dm-row{display:flex}
+.dm-row.sent{justify-content:flex-end}
+.dm-row.recv{justify-content:flex-start}
+.dm-bubble{max-width:72%;padding:var(--sp-2) var(--sp-3);border-radius:14px;font-size:var(--t-md);line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.dm-row.sent .dm-bubble{background:var(--red);color:#fff;border-bottom-right-radius:4px}
+.dm-row.recv .dm-bubble{background:var(--bg-0);color:var(--ink-1);border:1px solid var(--border);border-bottom-left-radius:4px}
+.dm-time{font-size:var(--t-xs);margin-top:3px;text-align:right;opacity:.7}
+.msg-input-bar{display:flex;align-items:flex-end;gap:var(--sp-2);padding:var(--sp-3) var(--px);border-top:1px solid var(--border);flex-shrink:0;background:var(--bg-0)}
+.msg-input-bar textarea{flex:1;resize:none;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r-md);padding:9px 12px;font-family:inherit;font-size:var(--t-base);line-height:1.5;color:var(--ink-1);outline:none;max-height:100px}
+.msg-input-bar textarea:focus{border-color:var(--red)}
+.msg-send-btn{padding:9px 16px;background:var(--red);border:none;border-radius:var(--r-md);color:#fff;font-size:var(--t-base);font-weight:500;cursor:pointer;flex-shrink:0;transition:background .15s}
+.msg-send-btn:hover{background:var(--red-dk)}
+@media (max-width:768px){
+  .msg-layout{flex-direction:column}
+  .msg-sidebar{width:auto;max-height:40%;border-right:none;border-bottom:1px solid var(--border)}
+  .dm-bubble{max-width:88%}
 }
