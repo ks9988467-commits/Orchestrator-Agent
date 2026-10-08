@@ -14,6 +14,7 @@
 // ══════════════════════════════════════════════════════════════════════
 
 import { dbDelete, dbGet, dbInsert, dbInsertReturning } from '../supabase/functions/orchestrator/db.ts'
+import { matchCronField } from '../supabase/functions/orchestrator/automation.ts'
 
 if (Deno.env.get('DB_DRIVER') !== 'postgres') {
   console.error('Refusing to run: DB_DRIVER must be "postgres" (never run this against production).')
@@ -489,8 +490,23 @@ const dg = await api('document_crud', { method: 'get', id: docId })
 const docRevs = (dg.json.reviewers || []) as R[]
 check('document get: document + reviewers in order, blank contact → null',
   dg.json.document?.title === `${MARK} 合同` && docRevs.length === 2 && docRevs[0].name === 'Rev A' && docRevs[1].contact === null, dg.json)
+// Notifications take their recipients from the stored reviewers, never from the body
+const forgedRevs = [1, 2, 3].map(i => ({ name: `x${i}`, contact: `+1555000000${i}` }))
+const nrOwn   = await api('notify_doc_reviewers', { doc_id: docId, reviewers: forgedRevs, doc_title: 'forgedRevs' })
+const nrOther = await api('notify_doc_reviewers', { doc_id: docId, reviewers: forgedRevs, role: 'other' })
+const nrAdmin = await api('notify_doc_reviewers', { doc_id: docId, role: 'admin' })
+check('notify reviewers: only stored reviewers with a contact (1, body list ignored); another member → 403; admin allowed',
+  nrOwn.status === 200 && nrOwn.json.sent === 1 && nrOwn.json.results?.[0]?.name === 'Rev A' && nrOther.status === 403 && nrAdmin.status === 200,
+  { own: nrOwn.json, other: nrOther.status, admin: nrAdmin.status })
 const dec1 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[0]?.id, decision: 'approved', comment: ' ok ' })
 check('decide: 1 of 2 approved → partial', dec1.json.status === 'partial', dec1.json)
+const ndOwn     = await api('notify_doc_decision', { reviewer_id: docRevs[0]?.id, uploaded_by: '+15550000009' })
+const ndOther   = await api('notify_doc_decision', { reviewer_id: docRevs[0]?.id, role: 'other' })
+const ndPending = await api('notify_doc_decision', { reviewer_id: docRevs[1]?.id, role: 'admin' })
+const nrAfter   = await api('notify_doc_reviewers', { doc_id: docId })
+check("notify decision: the reviewer may (sent to the stored uploader); another member → 403; nothing sent before a decision; decided reviewers are not re-notified",
+  ndOwn.status === 200 && ndOwn.json.sent === 1 && ndOther.status === 403 && ndPending.json.sent === 0 && nrAfter.json.sent === 0,
+  { own: ndOwn.json, other: ndOther.status, pending: ndPending.json, after: nrAfter.json })
 const dec2member = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected' })
 check("decide: a member cannot decide someone else's reviewer row (403)", dec2member.status === 403, dec2member.json)
 const dec2 = await api('document_crud', { method: 'decide', reviewer_id: docRevs[1]?.id, decision: 'rejected', role: 'admin' })
@@ -780,6 +796,14 @@ for (let round = 0; round < 3; round++) {
 check('3 × 40 concurrent requests from two tenants: every reply has its own identity', wrong.length === 0, { wrong: `${wrong.length} / 120`, sample: wrong.slice(0, 2) })
 await dbDelete('sessions', { token_hash: `in.(${await sha256Hex(concTok.A)},${await sha256Hex(concTok.B)})` })
 await dbDelete('tenants', { id: `in.(${tA},${tB})` })
+
+// ── 20. cron field matching (workflow schedules) ───────────────────────
+console.log('\n[20] cron fields')
+{
+  const hits = (field: string) => [...Array(24).keys()].filter(v => matchCronField(field, v)).join(',')
+  check('cron: a stepped range stops at its end; */n and n/m unchanged',
+    hits('1-10/3') === '1,4,7,10' && hits('*/6') === '0,6,12,18' && hits('20/2') === '20,22', { '1-10/3': hits('1-10/3'), '*/6': hits('*/6'), '20/2': hits('20/2') })
+}
 
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')

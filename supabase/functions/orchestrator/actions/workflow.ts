@@ -237,7 +237,7 @@ export async function handleWorkflowActions(body: Body, CORS: Record<string, str
     const wf = wfRows[0] as { nodes:{id:string;type:string;config:Record<string,string>}[]; edges:{from:string;to:string}[] }|undefined
     if (!wf) return new Response(JSON.stringify({ error:'Workflow not found' }), { status:404, headers:{...CORS,'Content-Type':'application/json'} })
     const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
-    let context: Record<string,unknown> = { input: wfInput || {} }
+    const context: Record<string,unknown> = { input: wfInput || {} }
     let errorMsg = ''
     try {
       const incoming = new Set(wf.edges.map((e:{from:string;to:string}) => e.to))

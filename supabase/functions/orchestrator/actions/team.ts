@@ -243,15 +243,23 @@ export async function handleTeamActions(body: Body, CORS: Record<string, string>
   }
 
   // ── Document reviewer notifications ──────────────────────────────
+  // Recipients and message come from the stored document, never from the body,
+  // so these actions cannot be used to message arbitrary contacts.
   if (body.action === 'notify_doc_reviewers') {
-    const { doc_id, doc_title, uploaded_by, reviewers } = body as any
-    const revList: Array<{name:string;contact:string}> = reviewers || []
-    const title    = String(doc_title || '文件')
-    const uploader = String(uploaded_by || '系统')
+    const [doc] = await dbGet('documents', 'id,title,uploaded_by', tenantFilters({ id: `eq.${String(body.doc_id || '')}` }), undefined, 1)
+    if (!doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    // Only the uploader (or an admin) notifies the reviewers
+    if (R.role === 'member' && String(doc.uploaded_by || '').trim().toLowerCase() !== R.email) {
+      return new Response(JSON.stringify({ error: '只能通知你自己上传的文件的审批人' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    // Reviewers who have not decided yet
+    const revList = await dbGet('document_reviewers', 'name,contact', { document_id: `eq.${doc.id}`, decision: 'is.null' }) as { name: string; contact: string | null }[]
+    const title    = String(doc.title || '文件')
+    const uploader = String(doc.uploaded_by || '系统')
     const dashUrl  = 'https://orchestrator-agent.ks9988467.workers.dev'
     const msg = `📋 文件审批请求\n\n文件：${title}\n上传人：${uploader}\n\n请登入系统进行审批。\n${dashUrl}`
     let sent = 0
-    const results: any[] = []
+    const results: Record<string, unknown>[] = []
     for (const rev of revList) {
       const contact = (rev.contact || '').trim()
       if (!contact) continue
@@ -268,10 +276,17 @@ export async function handleTeamActions(body: Body, CORS: Record<string, string>
   }
 
   if (body.action === 'notify_doc_decision') {
-    const { doc_title, decision, reviewer_name, uploaded_by } = body as any
-    if (!uploaded_by) return new Response(JSON.stringify({ ok: true, sent: 0 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-    const decLabel = decision === 'approved' ? '✅ 已批准' : '❌ 已拒绝'
-    const msg = `${decLabel}\n\n文件：${doc_title || '—'}\n审批人：${reviewer_name || '—'}\n\n请登入系统查看详情。`
+    const [rev] = await dbGet('document_reviewers', 'document_id,name,contact,decision', { id: `eq.${String(body.reviewer_id || '')}` }, undefined, 1)
+    const [doc] = rev ? await dbGet('documents', 'title,uploaded_by', tenantFilters({ id: `eq.${rev.document_id}` }), undefined, 1) : []
+    if (!rev || !doc) return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    // Only that reviewer (or an admin) announces their decision
+    if (R.role === 'member' && String(rev.contact || '').trim().toLowerCase() !== R.email) {
+      return new Response(JSON.stringify({ error: '只能通知你自己的审批结果' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+    }
+    const uploaded_by = doc.uploaded_by
+    if (!uploaded_by || !rev.decision) return new Response(JSON.stringify({ ok: true, sent: 0 }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
+    const decLabel = rev.decision === 'approved' ? '✅ 已批准' : '❌ 已拒绝'
+    const msg = `${decLabel}\n\n文件：${doc.title || '—'}\n审批人：${rev.name || '—'}\n\n请登入系统查看详情。`
     const isEmail = String(uploaded_by).includes('@')
     try {
       await sendNotification(isEmail ? 'sendgrid' : 'whatsapp', msg, String(uploaded_by))

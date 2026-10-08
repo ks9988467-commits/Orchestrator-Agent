@@ -1,4 +1,4 @@
-﻿import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+﻿import "jsr:@supabase/functions-js@2.116.0/edge-runtime.d.ts"
 // Orchestrator HTTP handler. Helpers live in sibling modules: db.ts / storage.ts
 // (portable data and files), state.ts (shared mutable state), http.ts (CORS, rate
 // limits), auth.ts (sessions, roles), llm.ts, tools.ts, automation.ts, kb.ts / kb-sync.ts.
@@ -280,10 +280,10 @@ Deno.serve((req: Request) => withRequestContext(async () => {
         const { readable, writable } = new TransformStream()
         const writer = writable.getWriter()
         const encoder = new TextEncoder()
-        const sseM = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        const sseM = (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
         ;(async () => {
           try {
-            const [providers, defaultProvider, agents] = await Promise.all([loadProviders(), getDefaultProvider(), loadAgents()])
+            const providers = await loadProviders()
             const anth = providers.find(p => p.provider === 'anthropic' && p.active)
             if (!anth?.api_key) throw new Error('多文件分析需要 Anthropic API Key')
             const userMsg = smsg || `请分析以下 ${reqFiles.length} 个文件`
@@ -330,7 +330,7 @@ Deno.serve((req: Request) => withRequestContext(async () => {
         const { readable, writable } = new TransformStream()
         const writer = writable.getWriter()
         const encoder = new TextEncoder()
-        const ssed = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        const ssed = (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
         ;(async () => {
           try {
             const [providers] = await Promise.all([loadProviders()])
@@ -416,7 +416,7 @@ Deno.serve((req: Request) => withRequestContext(async () => {
       const { readable, writable } = new TransformStream()
       const writer  = writable.getWriter()
       const encoder = new TextEncoder()
-      const sse = async (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+      const sse = (data: object) => writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
 
       ;(async () => {
         let fullText = ''

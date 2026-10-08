@@ -669,13 +669,7 @@ async function submitDocUpload() {
     pageLoaded['review'] = false
     loadDocs()
     // 异步推送通知（不阻塞主流程）
-    apiRaw({
-        action:'notify_doc_reviewers',
-        doc_id: doc.id,
-        doc_title: title,
-        uploaded_by: _session.email || null,
-        reviewers: _docReviewers
-      }).then(r=>r.json()).then(d=>{
+    apiRaw({ action:'notify_doc_reviewers', doc_id: doc.id }).then(r=>r.json()).then(d=>{
       if (d.sent > 0) toast(`已通知 ${d.sent} 位审批人`, 'info')
     }).catch(()=>{})
   } catch(e) {
@@ -780,15 +774,7 @@ async function makeDocDecision(reviewerId, decision) {
   loadDocs()                   // refresh list
   // 通知上传者（异步，不阻塞）
   if (_currentDoc?.uploaded_by && _currentDoc.uploaded_by !== _session.email) {
-    const revRow = document.querySelector(`[id^="cmt_${reviewerId}"]`)
-    const revName = revRow?.closest('[style*="border:1px solid #e5e5e5"]')?.querySelector('[style*="font-weight:600"]')?.textContent || _session.email || '审批人'
-    apiRaw({
-        action:'notify_doc_decision',
-        doc_title: _currentDoc.title,
-        decision,
-        reviewer_name: revName,
-        uploaded_by: _currentDoc.uploaded_by
-      }).catch(()=>{})
+    apiRaw({ action:'notify_doc_decision', reviewer_id: reviewerId }).catch(()=>{})
   }
 }
 

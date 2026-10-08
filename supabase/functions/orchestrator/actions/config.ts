@@ -416,7 +416,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
   if (body.action === 'test_whatsapp') {
     try {
       const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.whatsapp', active: 'eq.true' })
-      const creds = (rows[0] as any)?.credentials
+      const creds = rows[0]?.credentials
       if (!creds?.phone_number_id || !creds?.access_token)
         return new Response(JSON.stringify({ error: '请先保存 WhatsApp 凭证并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const to = creds.default_recipient
@@ -427,7 +427,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
         headers: { Authorization: `Bearer ${creds.access_token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: '✅ Orchestrator Agent — WhatsApp 连接测试成功！' } }),
       })
-      const rj = await r.json() as any
+      const rj = await r.json()
       if (!r.ok) return new Response(JSON.stringify({ error: rj?.error?.message || `WhatsApp API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     } catch(e) {
@@ -439,7 +439,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
   if (body.action === 'test_sendgrid') {
     try {
       const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.sendgrid', active: 'eq.true' }, undefined, 1)
-      const creds = (rows[0] as any)?.credentials
+      const creds = rows[0]?.credentials
       if (!creds?.api_key)
         return new Response(JSON.stringify({ error: '请先保存 SendGrid API Key 并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const to = creds.from_address
@@ -456,7 +456,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
         })
       })
       if (r.status === 202 || r.ok) return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const rj = await r.json().catch(() => ({})) as any
+      const rj = await r.json().catch(() => ({}))
       return new Response(JSON.stringify({ error: rj?.errors?.[0]?.message || `SendGrid API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
     } catch(e) {
       return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
@@ -467,7 +467,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
   if (body.action === 'test_email_smtp') {
     try {
       const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.email_smtp', active: 'eq.true' }, undefined, 1)
-      const creds = (rows[0] as any)?.credentials
+      const creds = rows[0]?.credentials
       if (!creds?.host || !creds?.username || !creds?.password)
         return new Response(JSON.stringify({ error: '请先保存 SMTP 配置并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const to = creds.from_address || creds.username
@@ -484,7 +484,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
   if (body.action === 'test_telegram') {
     try {
       const rows = await dbGet('api_integrations', 'credentials', { service: 'eq.telegram', active: 'eq.true' }, undefined, 1)
-      const creds = (rows[0] as any)?.credentials
+      const creds = rows[0]?.credentials
       if (!creds?.bot_token)
         return new Response(JSON.stringify({ error: '请先保存 Telegram Bot Token 并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const chatId = creds.chat_id
@@ -495,7 +495,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: '✅ Orchestrator Agent — Telegram 连接测试成功！', parse_mode: 'Markdown' }),
       })
-      const rj = await r.json() as any
+      const rj = await r.json()
       if (!r.ok || !rj.ok) return new Response(JSON.stringify({ error: rj?.description || `Telegram API ${r.status}` }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     } catch(e) {

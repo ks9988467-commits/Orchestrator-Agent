@@ -357,7 +357,7 @@ export async function sendNotification(channel: string, message: string, recipie
     } else if (channel === 'sendgrid' || channel === 'email') {
       // Try SendGrid API key
       const sgRows = await dbGet('api_integrations', 'credentials,active', { service: 'eq.sendgrid', active: 'eq.true' }, undefined, 1)
-      const sgCreds = (sgRows[0] as any)?.credentials
+      const sgCreds = sgRows[0]?.credentials
       if (sgCreds?.api_key && recipient) {
         await fetch('https://api.sendgrid.com/v3/mail/send', {
           method: 'POST',
@@ -386,7 +386,7 @@ export function matchCronField(field: string, value: number): boolean {
         if (range.includes('-')) { const [a, b] = range.split('-').map(Number); start = a; end = b }
         else start = parseInt(range)
       }
-      for (let v = start; v <= value; v += step) { if (v === value) return true }
+      for (let v = start; v <= Math.min(value, end); v += step) { if (v === value) return true }
     } else if (part.includes('-')) {
       const [a, b] = part.split('-').map(Number); if (value >= a && value <= b) return true
     } else { if (parseInt(part) === value) return true }
@@ -492,7 +492,7 @@ export async function runWorkflows() {
     try {
       if (nodes.length > 0) {
         // New nodes/edges style — execute sequentially
-        let context: Record<string,unknown> = { input: {} }
+        const context: Record<string,unknown> = { input: {} }
         const incoming = new Set(edges.map((e:{from:string;to:string}) => e.to))
         const nodeMap  = Object.fromEntries(nodes.map(n => [n.id, n]))
         const start    = nodes.find(n => !incoming.has(n.id))
