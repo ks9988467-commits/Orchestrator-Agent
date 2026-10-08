@@ -15,7 +15,7 @@ import { learnFromGaps, sendNotification, withTimeout } from './automation.ts'
 import { dbGet, dbInsert, dbInsertReturning, dbUpsert } from './db.ts'
 import { clientIp, corsFor, rateLimited, tooManyRequests } from './http.ts'
 import { DATA_AGENTS, SOUL, calcCost, callLLM, getDefaultProvider, keywordRoute, loadAgentSkills, loadAgents, loadHistory, loadKbContext, loadProviders, resetUsage, streamWithFallback } from './llm.ts'
-import { type AgentRow, type ProviderRow, R, llmUsage } from './state.ts'
+import { type AgentRow, type ProviderRow, R, llmUsage, withRequestContext } from './state.ts'
 import { BUCKETS, INLINE_TYPES, MAX_FILE_BYTES, USE_LOCAL_STORAGE, contentTypeFor, isValidName, objectName, publicUrl, putFile, readFile, signedUrl, verifySignedDownload } from './storage.ts'
 
 // ── Data extraction keyword detection ────────────────────────────────
@@ -106,7 +106,8 @@ async function extractPrefs(message: string, response: string, providers: Provid
 }
 
 // \u2500\u2500 Main handler \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-Deno.serve(async (req: Request) => {
+// Each request runs in its own context, so R / llmUsage are never shared between concurrent requests
+Deno.serve((req: Request) => withRequestContext(async () => {
   const CORS = corsFor(req)   // every Response below spreads these headers
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
@@ -585,4 +586,4 @@ Deno.serve(async (req: Request) => {
   } catch(e) {
     return new Response(JSON.stringify({ error: (e as Error).message }), { status:500, headers: { ...CORS, 'Content-Type': 'application/json' } })
   }
-})
+}))

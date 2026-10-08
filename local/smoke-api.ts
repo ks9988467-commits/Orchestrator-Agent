@@ -746,6 +746,41 @@ if (Deno.env.get('KB_SYNC_DIR')) {
   console.log('  (skipped kb_sync tests: KB_SYNC_DIR not in the test env)')
 }
 
+// ── 19. concurrent requests keep their own identity ───────────────────
+// Two sessions in different tenants. whoami awaits a tenant lookup between setting the
+// request context and reading it, so a shared context would let one request see the other's.
+console.log('\n[19] concurrent requests')
+const tA = String((await dbInsertReturning('tenants', { name: `${MARK} conc A`, slug: `${MARK}-conc-a` })).id)
+const tB = String((await dbInsertReturning('tenants', { name: `${MARK} conc B`, slug: `${MARK}-conc-b` })).id)
+const concTok = { A: `${MARK}-concA-${crypto.randomUUID()}`, B: `${MARK}-concB-${crypto.randomUUID()}` }
+await dbInsert('sessions', [
+  { token_hash: await sha256Hex(concTok.A), email: `${MARK}-conca@session.test`, tenant_id: tA, role: 'member', expires_at: new Date(Date.now() + 3600_000).toISOString() },
+  { token_hash: await sha256Hex(concTok.B), email: `${MARK}-concb@session.test`, tenant_id: tB, role: 'admin', expires_at: new Date(Date.now() + 3600_000).toISOString() },
+])
+const expect = { A: { email: `${MARK}-conca@session.test`, tenant_id: tA, role: 'member' }, B: { email: `${MARK}-concb@session.test`, tenant_id: tB, role: 'admin' } }
+// One fresh connection per request: over this process's warm keep-alive pool the requests
+// can queue on a few connections and never overlap on the server, hiding the race.
+// Several rounds, since overlap still depends on timing.
+const whoamiOwnConn = async (token: string) => {
+  const client = Deno.createHttpClient({})
+  try {
+    const r = await fetch(BASE, { method: 'POST', client, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ action: 'whoami' }) })
+    return await r.json()
+  } finally { client.close() }
+}
+const wrong: { sent: string; got: R }[] = []
+for (let round = 0; round < 3; round++) {
+  const who = Array.from({ length: 40 }, (_, i) => (i % 2 ? 'B' : 'A') as 'A' | 'B')
+  const replies = await Promise.all(who.map(w => whoamiOwnConn(concTok[w])))
+  replies.forEach((j, i) => {
+    const e = expect[who[i]]
+    if (j.email !== e.email || j.tenant_id !== e.tenant_id || j.role !== e.role) wrong.push({ sent: who[i], got: j })
+  })
+}
+check('3 × 40 concurrent requests from two tenants: every reply has its own identity', wrong.length === 0, { wrong: `${wrong.length} / 120`, sample: wrong.slice(0, 2) })
+await dbDelete('sessions', { token_hash: `in.(${await sha256Hex(concTok.A)},${await sha256Hex(concTok.B)})` })
+await dbDelete('tenants', { id: `in.(${tA},${tB})` })
+
 // ── cleanup ────────────────────────────────────────────────────────────
 console.log('\n[cleanup]')
 await dbDelete('tasks', { title: `like.${MARK}*` })
