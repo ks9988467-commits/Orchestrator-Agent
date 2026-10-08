@@ -11,6 +11,16 @@ export function withTimeout<T>(p: Promise<T>, ms = 20_000): Promise<T> {
   ])
 }
 
+// ── SMTP email (denomailer) ───────────────────────────────────────────
+// Port 465 uses TLS from the start; other ports (587) upgrade with STARTTLS
+export async function sendSmtpMail(conn: { host: string; port: number; username: string; password: string },
+                                   mail: { from: string; to: string; subject: string; content: string }) {
+  const { SMTPClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
+  const client = new SMTPClient({ connection: { hostname: conn.host, port: conn.port, tls: conn.port === 465,
+    auth: { username: conn.username, password: conn.password } } })
+  try { await client.send(mail) } finally { try { await client.close() } catch { /* keep the send error */ } }
+}
+
 // ── Lark helpers ────────────────────────────────────────────────────
 export async function sendLarkWebhook(webhookUrl: string, title: string, bodyMd: string, fileUrl?: string) {
   const elements: unknown[] = [{ tag: 'div', text: { tag: 'lark_md', content: bodyMd } }]
@@ -341,16 +351,9 @@ export async function sendNotification(channel: string, message: string, recipie
       if (!creds?.host || !creds?.username || !creds?.password) return
       const to = recipient || creds['from_address']
       if (!to) return
-      const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
-      const client = new SmtpClient()
-      const port = parseInt(String(creds['port'] || '587'))
-      if (port === 465) {
-        await client.connectTLS({ hostname: String(creds['host']), port: 465, username: String(creds['username']), password: String(creds['password']) })
-      } else {
-        await client.connect({ hostname: String(creds['host']), port, username: String(creds['username']), password: String(creds['password']) })
-      }
-      await client.send({ from: String(creds['from_address'] || creds['username']), to, subject: '📋 Orchestrator 通知', content: message.slice(0, 4000) })
-      await client.close()
+      await sendSmtpMail(
+        { host: String(creds['host']), port: parseInt(String(creds['port'] || '587')), username: String(creds['username']), password: String(creds['password']) },
+        { from: String(creds['from_address'] || creds['username']), to, subject: '📋 Orchestrator 通知', content: message.slice(0, 4000) })
     } else if (channel === 'sendgrid' || channel === 'email') {
       // Try SendGrid API key
       const sgRows = await dbGet('api_integrations', 'credentials,active', { service: 'eq.sendgrid', active: 'eq.true' }, undefined, 1)

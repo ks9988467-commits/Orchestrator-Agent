@@ -286,7 +286,8 @@ export async function callOpenAI(apiKey: string, model: string, system: string, 
 
 export async function callGoogle(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
   const mdl = model || 'gemini-1.5-flash'
-  const contents = (messages as {role:string,content:string}[]).map(m => ({
+  // parts hold text, or a functionCall / functionResponse during the tool loop
+  const contents: { role: string; parts: Record<string, unknown>[] }[] = (messages as {role:string,content:string}[]).map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }],
   }))

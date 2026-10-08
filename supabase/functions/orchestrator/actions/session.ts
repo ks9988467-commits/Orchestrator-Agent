@@ -1,5 +1,6 @@
 // Login (OTP), session and client (tenant) management actions.
 import { SESSION_TTL_MS, constantTimeEqual, masterEmailList, randomToken, sha256Hex } from '../auth.ts'
+import { sendSmtpMail } from '../automation.ts'
 import { dbGet, dbInsert, dbInsertReturning, dbPatch, dbPatchWhere, dbUpsert } from '../db.ts'
 import { type Body, R } from '../state.ts'
 
@@ -40,16 +41,12 @@ export async function handleSessionActions(body: Body, CORS: Record<string, stri
     }
     // Send email via Gmail SMTP using fetch to SMTP2Go-like approach \u2014 use denomailer
     try {
-      const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
-      const client = new SmtpClient()
-      await client.connectTLS({ hostname: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD')! })
-      await client.send({
+      await sendSmtpMail({ host: 'smtp.gmail.com', port: 465, username: 'ks9988467@gmail.com', password: Deno.env.get('GMAIL_APP_PWD') ?? '' }, {
         from: 'Orchestrator Agent <ks9988467@gmail.com>',
         to: email,
         subject: `\u9A8C\u8BC1\u7801\uFF1A${code}`,
         content: `\u60A8\u7684 Orchestrator Agent \u9A8C\u8BC1\u7801\u662F\uFF1A\n\n${code}\n\n10 \u5206\u949F\u5185\u6709\u6548\uFF0C\u8BF7\u52FF\u5206\u4EAB\u7ED9\u4ED6\u4EBA\u3002`,
       })
-      await client.close()
     } catch(e) {
       return new Response(JSON.stringify({ error: `\u53D1\u9001\u5931\u8D25\uFF1A${(e as Error).message}` }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
     }

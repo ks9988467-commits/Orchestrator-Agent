@@ -1,5 +1,5 @@
 // Configuration actions: LLM providers, API integrations, agents, skills, gaps, logs, UGC rules, connection tests.
-import { learnFromGaps, sendLarkWebhook } from '../automation.ts'
+import { learnFromGaps, sendLarkWebhook, sendSmtpMail } from '../automation.ts'
 import { dbDelete, dbGet, dbGetPage, dbInsert, dbPatch, dbPatchWhere, dbUpsert } from '../db.ts'
 import { callAnthropic, callGoogle, callLLM, callOpenAI, callOpenRouter, getDefaultProvider, listModels, loadAgents, loadProviders } from '../llm.ts'
 import { type AgentRow, type Body, type ProviderRow, R, shared, tenantFilters } from '../state.ts'
@@ -397,7 +397,7 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
       const provRow = allProviders.find(p => p.provider === targetProvider)
       if (!provRow) return new Response(JSON.stringify({ ok: false, error: `Provider "${targetProvider}" 未在数据库配置` }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
       if (!provRow.api_key) return new Response(JSON.stringify({ ok: false, error: 'API Key 为空，请先保存 Key' }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
-      const testModel = provRow.model || undefined
+      const testModel = provRow.model   // empty → each call* uses its default model
       const testMessages = [{ role: 'user', content: 'Reply with exactly one word: ok' }]
       const testSystem = 'You are a test assistant. Follow instructions exactly.'
       let text = ''
@@ -471,16 +471,9 @@ export async function handleConfigActions(body: Body, CORS: Record<string, strin
       if (!creds?.host || !creds?.username || !creds?.password)
         return new Response(JSON.stringify({ error: '请先保存 SMTP 配置并启用' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } })
       const to = creds.from_address || creds.username
-      const { SmtpClient } = await import('https://deno.land/x/denomailer@1.6.0/mod.ts')
-      const client = new SmtpClient()
-      const port = parseInt(String(creds.port || '587'))
-      if (port === 465) {
-        await client.connectTLS({ hostname: String(creds.host), port: 465, username: String(creds.username), password: String(creds.password) })
-      } else {
-        await client.connect({ hostname: String(creds.host), port, username: String(creds.username), password: String(creds.password) })
-      }
-      await client.send({ from: String(creds.from_address || creds.username), to, subject: '✅ Orchestrator Agent — SMTP 连接测试', content: 'SMTP 邮件集成配置正确，连接测试成功！' })
-      await client.close()
+      await sendSmtpMail(
+        { host: String(creds.host), port: parseInt(String(creds.port || '587')), username: String(creds.username), password: String(creds.password) },
+        { from: String(creds.from_address || creds.username), to, subject: '✅ Orchestrator Agent — SMTP 连接测试', content: 'SMTP 邮件集成配置正确，连接测试成功！' })
       return new Response(JSON.stringify({ ok: true }), { headers: { ...CORS, 'Content-Type': 'application/json' } })
     } catch(e) {
       return new Response(JSON.stringify({ error: (e as Error).message }), { status: 500, headers: { ...CORS, 'Content-Type': 'application/json' } })
