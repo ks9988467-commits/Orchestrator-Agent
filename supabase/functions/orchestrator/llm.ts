@@ -544,41 +544,10 @@ export async function callLLM(
   throw new Error('All providers failed:\n' + errors.join('\n'))
 }
 
-// \u2500\u2500 Intent classification \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-export async function classifyIntent(message: string, agents: AgentRow[], providers: ProviderRow[], defaultProvider: string): Promise<AgentRow> {
-  const active = agents.filter(a => a.active)
-  if (active.length === 0) throw new Error('No active agents.')
-  if (active.length === 1) return active[0]
-  const ids = active.map(a => a.id).join(', ')
-  const system = `You are an intent classifier. Reply with ONLY one agent ID from: ${ids}
-
-Rules (user may write Chinese or English \u2014 classify by meaning, not language):
-- customers, leads, contacts, CRM, client list, client source -> crm
-- advertising, campaigns, ad spend, marketing, budget, ad report -> account
-- code, programming, algorithms, bugs, functions, scripts, errors, debug -> code
-- CPL, cost per lead, lead cost -> cpl
-- CPR, cost per result, ROAS -> cpr
-- frequency, ad fatigue, repetition, exposure count -> frequency
-- everything else -> chat
-
-Reply with ONLY the agent ID (lowercase, no other text).`
-  try {
-    const { text } = await callLLM(providers, defaultProvider, undefined, system, [{ role:'user', content:message }], false)
-    const id = text.trim().toLowerCase().replace(/[^a-z_]/g, '')
-    const found = active.find(a => a.id === id)
-    if (found) return found
-    // fallback: try partial match
-    const partial = active.find(a => id.includes(a.id) || a.id.includes(id))
-    return partial ?? active.find(a => a.id === 'chat') ?? active[0]
-  } catch { return active.find(a => a.id === 'chat') ?? active[0] }
-}
-
 // Chinese keyword routing \u2014 strings built at runtime from codepoints (zero non-ASCII in source)
 export const _c = (cps: number[]) => cps.map(c => String.fromCharCode(c)).join('')
 
 export const ZH_CRM1  = _c([23458,25143])                           // ke hu        \u5BA2\u6237
-
-export const ZH_CRM2  = _c([27969,22312,23458,25143])               // qian zai ke hu \u6F5C\u5728\u5BA2\u6237
 
 export const ZH_CRM3  = _c([32852,31995,20154])                     // lian xi ren  \u8054\u7CFB\u4EBA
 

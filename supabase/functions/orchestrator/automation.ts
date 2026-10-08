@@ -11,17 +11,6 @@ export function withTimeout<T>(p: Promise<T>, ms = 20_000): Promise<T> {
   ])
 }
 
-// ── Slack webhook ─────────────────────────────────────────────────────
-export async function sendSlackWebhook(webhookUrl: string, text: string, mrkdwn?: string) {
-  const blocks = mrkdwn ? [{ type:'section', text:{ type:'mrkdwn', text: mrkdwn } }] : undefined
-  const payload: Record<string,unknown> = { text }
-  if (blocks) payload.blocks = blocks
-  await fetch(webhookUrl, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(payload),
-  })
-}
-
 // ── Lark helpers ────────────────────────────────────────────────────
 export async function sendLarkWebhook(webhookUrl: string, title: string, bodyMd: string, fileUrl?: string) {
   const elements: unknown[] = [{ tag: 'div', text: { tag: 'lark_md', content: bodyMd } }]
