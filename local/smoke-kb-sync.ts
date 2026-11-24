@@ -6,7 +6,7 @@
 // ══════════════════════════════════════════════════════════════════════
 
 import { dbDelete, dbGet, dbInsert } from '../supabase/functions/orchestrator/db.ts'
-import { type IngestFn, summarize, syncFolder, syncKbId } from '../supabase/functions/orchestrator/kb-sync.ts'
+import { type IngestFn, parseDirs, summarize, syncFolder, syncFolders, syncKbId } from '../supabase/functions/orchestrator/kb-sync.ts'
 
 if (Deno.env.get('DB_DRIVER') !== 'postgres') {
   console.error('Refusing to run: DB_DRIVER must be "postgres" (never run this against production).')
@@ -41,6 +41,7 @@ const chunkSources = async (kbId: string) =>
   (await dbGet('kb_chunks', 'source_name', { kb_id: `eq.${kbId}` }) as { source_name: string }[]).map(r => r.source_name).sort()
 
 const kbId = await syncKbId(`${MARK} kb`, root)
+const kbId2 = await syncKbId(`${MARK} kb2`, root)
 try {
   console.log('\n[1] first run')
   await write('a.md', '# A\nalpha')
@@ -81,8 +82,36 @@ try {
   try { await syncFolder(`${root}/does-not-exist`, kbId, ingest) } catch { threw = true }
   check('a missing folder throws and deletes nothing', threw && JSON.stringify(await chunkSources(kbId)) === JSON.stringify(before))
   check('syncKbId reuses the knowledge base with the same name', (await syncKbId(`${MARK} kb`, root)) === kbId)
+
+  console.log('\n[5] several folders')
+  check('one folder keeps unprefixed paths', JSON.stringify(parseDirs('C:\\x\\notes\\')) === JSON.stringify([{ dir: 'C:/x/notes', prefix: '' }]), parseDirs('C:\\x\\notes\\'))
+  check('several folders get their folder name as prefix, repeats numbered',
+    JSON.stringify(parseDirs(' C:/a/UCG ; C:/b/04-讨论;C:/c/UCG/ ;').map(r => r.prefix)) === JSON.stringify(['UCG/', '04-讨论/', 'UCG-2/']), parseDirs('C:/a/UCG;C:/b/04-讨论;C:/c/UCG'))
+  failNames = false
+  await write('m/UCG/a.md', 'vault a')
+  await write('m/04-讨论/a.md', 'meeting a')
+  await write('m/04-讨论/sub/b.md', 'meeting b')
+  const roots = parseDirs(`${root}/m/UCG;${root}/m/04-讨论`)
+  const r5 = await syncFolders(roots, kbId2, ingest)
+  check('both folders ingested, same file name kept apart by prefix',
+    r5.ingested === 3 && JSON.stringify(await chunkSources(kbId2)) === JSON.stringify(['04-讨论/a.md', '04-讨论/sub/b.md', 'UCG/a.md']), { r5, src: await chunkSources(kbId2) })
+  const r6 = await syncFolders([...roots, { dir: `${root}/m/missing`, prefix: 'missing/' }], kbId2, ingest)
+  check('an unreadable folder is reported and the others still sync, nothing removed',
+    r6.unchanged === 3 && r6.removed === 0 && r6.failed.some(f => f.startsWith('missing：')), r6)
+  await Deno.remove(`${root}/m/04-讨论/sub/b.md`)
+  const r7 = await syncFolders(roots, kbId2, ingest)
+  check('a deleted file in one folder is removed without touching the other', r7.removed === 1 &&
+    JSON.stringify(await chunkSources(kbId2)) === JSON.stringify(['04-讨论/a.md', 'UCG/a.md']), { r7, src: await chunkSources(kbId2) })
+  const r8 = await syncFolders(parseDirs(`${root}/m/UCG;${root}/m/other`), kbId2, ingest)
+  check('a folder taken out of the list loses its files', JSON.stringify(await chunkSources(kbId2)) === JSON.stringify(['UCG/a.md']), { r8, src: await chunkSources(kbId2) })
+  let threw2 = false
+  try { await syncFolders(parseDirs(`${root}/m/x;${root}/m/y`), kbId2, ingest) } catch { threw2 = true }
+  check('throws when no folder can be read, deleting nothing', threw2 && JSON.stringify(await chunkSources(kbId2)) === JSON.stringify(['UCG/a.md']))
 } finally {
   console.log('\n[cleanup]')
+  await dbDelete('kb_chunks', { kb_id: `eq.${kbId2}` })
+  await dbDelete('kb_sync_files', { kb_id: `eq.${kbId2}` })
+  await dbDelete('knowledge_bases', { id: `eq.${kbId2}` })
   await dbDelete('kb_chunks', { kb_id: `eq.${kbId}` })
   await dbDelete('kb_sync_files', { kb_id: `eq.${kbId}` })
   await dbDelete('knowledge_bases', { id: `eq.${kbId}` })

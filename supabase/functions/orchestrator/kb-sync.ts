@@ -1,6 +1,7 @@
 // ══════════════════════════════════════════════════════════════════════
 // Folder → knowledge base sync. Reads .md / .txt files under KB_SYNC_DIR
-// (e.g. an Obsidian vault folder) and keeps one knowledge base in step:
+// (e.g. an Obsidian vault folder; several folders separated by ";") and keeps
+// one knowledge base in step:
 // new or changed files are ingested, deleted files lose their chunks,
 // unchanged files are skipped. Local backend only — a hosted function cannot
 // see the user's disk, so the feature is off unless KB_SYNC_DIR is set.
@@ -8,7 +9,27 @@
 
 import { dbDelete, dbGet, dbInsertReturning, dbUpsert } from './db.ts'
 
-export const SYNC_DIR = (Deno.env.get('KB_SYNC_DIR') || '').replace(/[\\/]+$/, '')
+// One folder, or several separated by ";" (e.g. a notes vault plus a meeting-notes folder)
+export const SYNC_DIR = (Deno.env.get('KB_SYNC_DIR') || '').trim()
+export const SYNC_DIRS = parseDirs(SYNC_DIR)
+
+export type SyncRoot = { dir: string; prefix: string }
+
+// A single folder keeps its paths as they are; with several, each folder's paths are
+// prefixed by its folder name ("04-讨论/会议.md") so they cannot collide. Repeated
+// folder names get "-2", "-3"…
+export function parseDirs(value: string): SyncRoot[] {
+  const dirs = value.split(';').map(d => d.trim().replace(/\\/g, '/').replace(/\/+$/, '')).filter(Boolean)
+  if (dirs.length <= 1) return dirs.map(dir => ({ dir, prefix: '' }))
+  const used = new Set<string>()
+  return dirs.map(dir => {
+    const base = dir.slice(dir.lastIndexOf('/') + 1) || 'folder'
+    let name = base
+    for (let i = 2; used.has(name); i++) name = `${base}-${i}`
+    used.add(name)
+    return { dir, prefix: `${name}/` }
+  })
+}
 export const SYNC_KB_NAME = Deno.env.get('KB_SYNC_KB') || '笔记同步'
 export const SYNC_INTERVAL_DAYS = Math.max(Number(Deno.env.get('KB_SYNC_INTERVAL_DAYS')) || 7, 1)
 
@@ -47,19 +68,26 @@ export async function syncKbId(name = SYNC_KB_NAME, dir = SYNC_DIR): Promise<str
   return String(kb.id)
 }
 
-// Throws if the folder cannot be read — nothing is removed in that case
-export async function syncFolder(root: string, kbId: string, ingest: IngestFn): Promise<SyncResult> {
+async function removePath(kbId: string, path: string) {
+  await dbDelete('kb_chunks', { kb_id: `eq.${kbId}`, source_name: `eq.${path}` })
+  await dbDelete('kb_sync_files', { kb_id: `eq.${kbId}`, path: `eq.${path}` })
+}
+
+// Throws if the folder cannot be read — nothing is removed in that case.
+// With a prefix, only the rows under that prefix belong to this folder.
+export async function syncFolder(root: string, kbId: string, ingest: IngestFn, prefix = ''): Promise<SyncResult> {
   const res: SyncResult = { scanned: 0, ingested: 0, unchanged: 0, removed: 0, failed: [] }
   const files = await listFiles(root)
   const knownRows = await dbGet('kb_sync_files', 'path,hash', { kb_id: `eq.${kbId}` }) as { path: string; hash: string }[]
-  const known = new Map(knownRows.map(r => [r.path, r.hash]))
+  const known = new Map(knownRows.filter(r => r.path.startsWith(prefix)).map(r => [r.path, r.hash]))
 
-  for (const path of files) {
+  for (const rel of files) {
+    const path = prefix + rel
     res.scanned++
     try {
-      const { size } = await Deno.stat(`${root}/${path}`)
+      const { size } = await Deno.stat(`${root}/${rel}`)
       if (size > MAX_BYTES) { res.failed.push(`${path}：超过 1 MB，未同步`); continue }
-      const text = await Deno.readTextFile(`${root}/${path}`)
+      const text = await Deno.readTextFile(`${root}/${rel}`)
       const hash = await sha256Hex(text)
       if (known.get(path) === hash) { res.unchanged++; continue }
       const r = await ingest(kbId, path, text)
@@ -77,14 +105,40 @@ export async function syncFolder(root: string, kbId: string, ingest: IngestFn): 
     res.failed.push('文件夹为空，已跳过删除（之前同步的内容保留）')
     return res
   }
-  const present = new Set(files)
+  const present = new Set(files.map(f => prefix + f))
   for (const path of known.keys()) {
     if (present.has(path)) continue
-    await dbDelete('kb_chunks', { kb_id: `eq.${kbId}`, source_name: `eq.${path}` })
-    await dbDelete('kb_sync_files', { kb_id: `eq.${kbId}`, path: `eq.${path}` })
+    await removePath(kbId, path)
     res.removed++
   }
   return res
+}
+
+// Syncs every configured folder into one knowledge base. A folder that cannot be read
+// is reported and its files are kept; the call throws only when no folder can be read.
+// Files of a folder that was taken out of the list are removed.
+export async function syncFolders(roots: SyncRoot[], kbId: string, ingest: IngestFn): Promise<SyncResult> {
+  if (roots.length === 1 && !roots[0].prefix) return await syncFolder(roots[0].dir, kbId, ingest)
+  const total: SyncResult = { scanned: 0, ingested: 0, unchanged: 0, removed: 0, failed: [] }
+  const errors: string[] = []
+  for (const { dir, prefix } of roots) {
+    try {
+      const r = await syncFolder(dir, kbId, ingest, prefix)
+      total.scanned += r.scanned; total.ingested += r.ingested; total.unchanged += r.unchanged; total.removed += r.removed
+      total.failed.push(...r.failed.map(f => f.includes('：') ? f : `${prefix.slice(0, -1)}：${f}`))
+    } catch (e) {
+      errors.push(`${dir}：${(e as Error).message}`)
+      total.failed.push(`${prefix.slice(0, -1)}：读取文件夹失败`)
+    }
+  }
+  if (errors.length === roots.length) throw new Error(errors.join('；'))
+  const rows = await dbGet('kb_sync_files', 'path', { kb_id: `eq.${kbId}` }) as { path: string }[]
+  for (const { path } of rows) {
+    if (roots.some(r => path.startsWith(r.prefix))) continue
+    await removePath(kbId, path)
+    total.removed++
+  }
+  return total
 }
 
 // Summary for the dashboard: counts, then one line per distinct failure reason

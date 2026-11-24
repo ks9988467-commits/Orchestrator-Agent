@@ -1,6 +1,6 @@
 // Knowledge base ingest (chunk + embed + replace) and the hourly folder-sync check.
 import { dbDelete, dbGet, dbInsert, dbPatch } from './db.ts'
-import { SYNC_DIR, SYNC_INTERVAL_DAYS, type SyncResult, summarize, syncFolder, syncKbId } from './kb-sync.ts'
+import { SYNC_DIR, SYNC_DIRS, SYNC_INTERVAL_DAYS, type SyncResult, summarize, syncFolders, syncKbId } from './kb-sync.ts'
 import { chunkText, getEmbedding, loadProviders } from './llm.ts'
 import { shared } from './state.ts'
 
@@ -45,7 +45,7 @@ export async function runKbSync(): Promise<{ ok: boolean; result?: SyncResult; e
     const kbId = await syncKbId()
     const now = new Date().toISOString()
     try {
-      const result = await syncFolder(SYNC_DIR, kbId, async (id, src, text) => {
+      const result = await syncFolders(SYNC_DIRS, kbId, async (id, src, text) => {
         const r = await ingestText(id, src, text, null)
         return r.error || r.errors.length ? { ok: false, error: r.error || r.errors[0] } : { ok: true }
       })
