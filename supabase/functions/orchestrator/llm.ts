@@ -313,23 +313,29 @@ export async function callGoogle(apiKey: string, model: string, system: string, 
   let iterations = 0
   while (iterations++ < 8) {
     body.contents = contents
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
     })
     if (!r.ok) throw new Error(`Google ${r.status}: ${await r.text()}`)
     const resp = await r.json()
-    const parts = resp.candidates[0].content.parts as Record<string,unknown>[]
-    const fnCall = parts.find(p => p.functionCall)
+    const parts = (resp.candidates?.[0]?.content?.parts || []) as Record<string,unknown>[]
+    const calls = parts.filter(p => p.functionCall)
 
-    if (fnCall) {
-      const fc = fnCall.functionCall as Record<string,unknown>
-      const result = await executeTool(String(fc.name), (fc.args as Record<string,unknown>) || {})
-      contents.push({ role: 'model', parts: [{ functionCall: fc }] })
-      contents.push({ role: 'user', parts: [{ functionResponse: { name: fc.name, response: { result } } }] })
+    if (calls.length) {
+      // Echo the model turn back unchanged: Gemini 3+ attaches a thoughtSignature to its
+      // function-call parts and rejects the next request (400) if it is missing.
+      // Every call of the turn is answered in one user turn.
+      contents.push({ role: 'model', parts })
+      const responses = []
+      for (const p of calls) {
+        const fc = p.functionCall as Record<string,unknown>
+        const result = await executeTool(String(fc.name), (fc.args as Record<string,unknown>) || {})
+        responses.push({ functionResponse: { name: fc.name, response: { result } } })
+      }
+      contents.push({ role: 'user', parts: responses })
     } else {
-      const text = parts.find(p => p.text)
-      return String(text?.text || '')
+      return parts.filter(p => p.text && !p.thought).map(p => String(p.text)).join('')
     }
   }
   return 'Tool loop limit reached.'
