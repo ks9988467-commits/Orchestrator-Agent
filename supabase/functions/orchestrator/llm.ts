@@ -84,11 +84,11 @@ export async function listModels(provider: string, apiKey: string): Promise<stri
 // ── Embedding helper: OpenAI → Google → OpenRouter fallback ──────────────
 // All providers normalised to 768 dims:
 //   OpenAI  text-embedding-3-small  (dimensions=768 param)
-//   Google  text-embedding-004      (native 768)
+//   Google  gemini-embedding-001    (outputDimensionality=768)
 //   OpenRouter  openai/text-embedding-3-small  (dimensions=768)
 // Embedding result carries the model FAMILY so a KB's chunks and its queries
 // always use the same vector space. Families: 'oai768' (OpenAI + OpenRouter, same
-// underlying text-embedding-3-small@768) and 'goo768' (Google text-embedding-004).
+// underlying text-embedding-3-small@768) and 'gem768' (Google gemini-embedding-001@768).
 // preferModel pins the family (used when querying a KB that was ingested with a
 // specific model) so cross-model fallback can't silently corrupt similarity.
 export interface EmbedResult { vector: number[]; model: string }
@@ -120,15 +120,18 @@ export async function getEmbedding(text: string, providers: ProviderRow[], prefe
     }
   }
 
-  // goo768 family — Google text-embedding-004 (different vector space)
-  if (want('goo768')) {
+  // gem768 family — Google gemini-embedding-001 cut to 768 dims (different vector space).
+  // The old 'goo768' family (text-embedding-004) is gone: Google retired the model
+  // (404 on 2026-11-25), so a KB pinned to goo768 must be re-ingested.
+  if (want('gem768')) {
     const goo = providers.find(p => p.provider === 'google' && p.active && p.api_key?.trim())
     if (goo?.api_key) {
       const r = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${goo.api_key}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT' }) }
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent',
+        { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': goo.api_key.trim() },
+          body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT', outputDimensionality: 768 }) }
       )
-      if (r.ok) { const d = await r.json() as { embedding?: { values: number[] } }; if (d.embedding?.values) return { vector: d.embedding.values, model: 'goo768' } }
+      if (r.ok) { const d = await r.json() as { embedding?: { values: number[] } }; if (d.embedding?.values?.length === 768) return { vector: d.embedding.values, model: 'gem768' } }
     }
   }
 
