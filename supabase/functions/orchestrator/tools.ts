@@ -200,7 +200,34 @@ export const TOOL_DEFS = [
       required: ['response'],
     },
   },
+  {
+    // Offered only when UCG_AGENT_URL is set (see getActiveTools): ucg-agent runs on this PC
+    name: 'query_ucg_business',
+    description: 'Ask the UCG business-data agent (ucg-agent) about ULTRA operations data: jobs and schedules, attendance, ' +
+      'quotations and sales follow-ups, invoices and overdue collections, payment vouchers, purchasing and stock, HR / leave / payroll, ' +
+      'customers and loyalty, and cross-module management summaries. It reads the system data itself, keeps to the caller\'s ' +
+      'company / branch scope, and answers with numbers and their source. Use it for any question about UCG business figures; ' +
+      'use the knowledge base for meeting notes and decisions. Ask one plain question per call, in the user\'s language, ' +
+      'naming the branch and period when the user did.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The business question, e.g. "PUCHONG 这个星期有几个 job？"' },
+        agent: {
+          type: 'string',
+          enum: ['ops-dispatch', 'finance-collections', 'hr-compliance', 'procurement-inventory', 'sales-quotation', 'private-domain', 'executive', 'knowledge', 'data-qa'],
+          description: 'Which specialist answers: ops-dispatch (jobs, schedule, crews, attendance) · finance-collections (invoices, overdue, receipts, payment vouchers) · ' +
+            'hr-compliance (staff, leave, payroll, compliance) · procurement-inventory (PR/PO/GRN, stock) · sales-quotation (quotations, follow-ups) · ' +
+            'private-domain (customers, loyalty, vouchers) · executive (cross-module overview) · knowledge (system definitions, field meanings) · ' +
+            'data-qa (anything else). Leave out to let ucg-agent choose.',
+        },
+      },
+      required: ['question'],
+    },
+  },
 ]
+
+export const UCG_AGENT_URL = (Deno.env.get('UCG_AGENT_URL') || '').replace(/\/+$/, '')
 
 // \u2500\u2500 Tool executor \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 export async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -528,6 +555,28 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       return `__RESPOND_DIRECTLY__${String(args.response || '')}`
     }
 
+    if (name === 'query_ucg_business') {
+      if (!UCG_AGENT_URL) return JSON.stringify({ error: 'ucg-agent is not connected (UCG_AGENT_URL not set)' })
+      const question = String(args.question || '').trim()
+      if (!question) return JSON.stringify({ error: 'question required' })
+      let r: Response
+      try {
+        r = await fetch(`${UCG_AGENT_URL}/api/chat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, ...(args.agent ? { agent: String(args.agent) } : {}), backend: 'local' }),
+          signal: AbortSignal.timeout(90_000),
+        })
+      } catch (e) {
+        return JSON.stringify({ error: `ucg-agent unreachable at ${UCG_AGENT_URL} (start it: node ULTRA/05-AI层/ucg-agent/src/web.mjs): ${(e as Error).message}` })
+      }
+      const d = await r.json().catch(() => ({})) as { error?: string; answer?: string; refused?: boolean; agent?: { id: string; name: string }; calls?: { tool: string }[] }
+      if (!r.ok || d.error) return JSON.stringify({ error: `ucg-agent: ${d.error || r.status}` })
+      return JSON.stringify({
+        agent: d.agent?.name, refused: !!d.refused, tools: (d.calls || []).map(c => c.tool),
+        answer: String(d.answer || '').slice(0, 6000),
+      })
+    }
+
     return JSON.stringify({ error: `Unknown tool: ${name}` })
   } catch (e) {
     return JSON.stringify({ error: (e as Error).message })
@@ -540,6 +589,6 @@ export const HERMES_TOOL_NAMES = new Set(['delegate_to_agent', 'remember', 'lear
   'create_automation', 'list_automations', 'toggle_automation', 'respond_directly'])
 
 export function getActiveTools() {
-  const all = TOOL_DEFS
+  const all = UCG_AGENT_URL ? TOOL_DEFS : TOOL_DEFS.filter(t => t.name !== 'query_ucg_business')
   return R.hermesMode ? all.filter(t => HERMES_TOOL_NAMES.has(t.name)) : all
 }

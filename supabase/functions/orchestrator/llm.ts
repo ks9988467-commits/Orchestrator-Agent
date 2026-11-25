@@ -126,12 +126,22 @@ export async function getEmbedding(text: string, providers: ProviderRow[], prefe
   if (want('gem768')) {
     const goo = providers.find(p => p.provider === 'google' && p.active && p.api_key?.trim())
     if (goo?.api_key) {
-      const r = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent',
-        { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': goo.api_key.trim() },
-          body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT', outputDimensionality: 768 }) }
-      )
-      if (r.ok) { const d = await r.json() as { embedding?: { values: number[] } }; if (d.embedding?.values?.length === 768) return { vector: d.embedding.values, model: 'gem768' } }
+      // The free tier limits requests per minute and a sync sends one request per chunk,
+      // so 429 / 503 wait (Google's retryDelay when given) and retry instead of failing the file
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const r = await fetch(
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent',
+          { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': goo.api_key.trim() },
+            body: JSON.stringify({ content: { parts: [{ text: input }] }, taskType: 'RETRIEVAL_DOCUMENT', outputDimensionality: 768 }) }
+        )
+        if (r.ok) { const d = await r.json() as { embedding?: { values: number[] } }; if (d.embedding?.values?.length === 768) return { vector: d.embedding.values, model: 'gem768' }; break }
+        if (r.status !== 429 && r.status !== 503) { console.error('google embed', r.status, (await r.text()).slice(0, 200)); break }
+        const body = await r.text()
+        // the per-day quota does not come back within a retry window: give up at once
+        if (/per day/i.test(body)) { console.error('google embed: daily free-tier quota used up'); break }
+        const hinted = Number(/"retryDelay":\s*"(\d+(?:\.\d+)?)s"/.exec(body)?.[1])
+        await new Promise(res => setTimeout(res, Math.min(hinted > 0 ? hinted * 1000 + 500 : 5000 * 2 ** attempt, 65_000)))
+      }
     }
   }
 
@@ -288,7 +298,7 @@ export async function callOpenAI(apiKey: string, model: string, system: string, 
 }
 
 export async function callGoogle(apiKey: string, model: string, system: string, messages: object[], useTools = false): Promise<string> {
-  const mdl = model || 'gemini-1.5-flash'
+  const mdl = model || 'gemini-flash-latest'
   // parts hold text, or a functionCall / functionResponse during the tool loop
   const contents: { role: string; parts: Record<string, unknown>[] }[] = (messages as {role:string,content:string}[]).map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -468,7 +478,7 @@ export async function streamGoogle(apiKey: string, model: string, system: string
     const text = await callGoogle(apiKey, model, system, messages, true)
     await streamText(text, onChunk); return
   }
-  const mdl = model || 'gemini-1.5-flash'
+  const mdl = model || 'gemini-flash-latest'
   const contents = (messages as {role:string,content:string}[]).map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }],
   }))

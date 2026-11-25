@@ -10,7 +10,7 @@ import { handleKbActions } from './actions/kb.ts'
 import { handleSessionActions } from './actions/session.ts'
 import { handleTeamActions } from './actions/team.ts'
 import { handleWorkflowActions } from './actions/workflow.ts'
-import { ROLE_RANK, authenticate, requiredRole } from './auth.ts'
+import { KB_READER_ACTIONS, ROLE_RANK, authenticate, requiredRole } from './auth.ts'
 import { learnFromGaps, sendNotification, withTimeout } from './automation.ts'
 import { dbGet, dbInsert, dbInsertReturning, dbUpsert } from './db.ts'
 import { clientIp, corsFor, rateLimited, tooManyRequests } from './http.ts'
@@ -123,7 +123,8 @@ Deno.serve((req: Request) => withRequestContext(async () => {
     if (req.method === 'POST' && !rawName) {
       const wait = rateLimited(`upload:${clientIp(req)}`, 30)
       if (wait) return tooManyRequests(wait, CORS)
-      if (!await authenticate(req)) return json({ error: 'unauthorized' }, 401)
+      const upAuth = await authenticate(req)
+      if (!upAuth || upAuth.kind === 'kb_reader') return json({ error: 'unauthorized' }, 401)
       const original = decode(req.headers.get('x-file-name') || '')
       if (!original) return json({ error: 'x-file-name header required' }, 400)
       if (Number(req.headers.get('content-length') || 0) > MAX_FILE_BYTES) return json({ error: '文件超过 50 MB' }, 413)
@@ -235,7 +236,19 @@ Deno.serve((req: Request) => withRequestContext(async () => {
         const wait = rateLimited(`api:${auth.tokenHash}`, 120)
         if (wait) return tooManyRequests(wait, CORS)
       }
-      if (auth.kind === 'internal') {
+      if (auth.kind === 'kb_reader') {
+        // Knowledge-base search only, as a member of no tenant; 120 a minute like a session
+        if (!KB_READER_ACTIONS.has(String(body.action || ''))) {
+          return new Response(JSON.stringify({ error: '此钥匙只能查知识库' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } })
+        }
+        const wait = rateLimited('api:kb_reader', 120)
+        if (wait) return tooManyRequests(wait, CORS)
+        R.isMaster = false
+        R.role     = 'member'
+        R.tenantId = null
+        body.tenant_id = undefined
+        body.role = 'member'
+      } else if (auth.kind === 'internal') {
         // Internal callers act across tenants unless they name one
         R.isMaster = true
         R.role     = 'master'

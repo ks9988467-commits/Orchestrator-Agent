@@ -28,8 +28,14 @@ export function masterEmailList(): string[] {
   return (Deno.env.get('MASTER_EMAILS') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
 }
 
+// A read-only key for other systems (e.g. ucg-agent behind the POS chat box) that may only
+// list and search the knowledge bases: x-orch-kb-key = ORCH_KB_READ_KEY. Unset = off.
+export const KB_READ_KEY = Deno.env.get('ORCH_KB_READ_KEY') || ''
+export const KB_READER_ACTIONS = new Set(['list_kbs', 'kb_search'])
+
 export type AuthContext =
   | { kind: 'internal' }
+  | { kind: 'kb_reader' }
   | { kind: 'session'; email: string; tenantId: string | null; role: string; tokenHash: string }
 
 // Who is calling: a backend-internal caller (x-orch-internal header = ORCH_INTERNAL_SECRET —
@@ -38,6 +44,8 @@ export type AuthContext =
 export async function authenticate(req: Request): Promise<AuthContext | null> {
   const internal = req.headers.get('x-orch-internal') || ''
   if (INTERNAL_SECRET && internal && constantTimeEqual(internal, INTERNAL_SECRET)) return { kind: 'internal' }
+  const kbKey = req.headers.get('x-orch-kb-key') || ''
+  if (KB_READ_KEY && kbKey && constantTimeEqual(kbKey, KB_READ_KEY)) return { kind: 'kb_reader' }
   const m = (req.headers.get('authorization') || '').match(/^Bearer\s+(\S+)$/i)
   if (!m) return null
   const tokenHash = await sha256Hex(m[1])
