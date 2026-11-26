@@ -10,7 +10,7 @@ import { handleKbActions } from './actions/kb.ts'
 import { handleSessionActions } from './actions/session.ts'
 import { handleTeamActions } from './actions/team.ts'
 import { handleWorkflowActions } from './actions/workflow.ts'
-import { KB_READER_ACTIONS, ROLE_RANK, authenticate, requiredRole } from './auth.ts'
+import { KB_READER_ACTIONS, ROLE_RANK, authenticate, constantTimeEqual, hmacSha256Hex, requiredRole } from './auth.ts'
 import { learnFromGaps, sendNotification, withTimeout } from './automation.ts'
 import { dbGet, dbInsert, dbInsertReturning, dbUpsert } from './db.ts'
 import { clientIp, corsFor, rateLimited, tooManyRequests } from './http.ts'
@@ -178,7 +178,8 @@ Deno.serve((req: Request) => withRequestContext(async () => {
   }
 
   try {
-    const body = await req.json()
+    const raw  = await req.text()   // kept as sent: the WhatsApp signature covers these exact bytes
+    const body = JSON.parse(raw)
 
     // Per-request context. Identity is set by the authentication step below — never read from the body.
     R.tenantId = null
@@ -195,6 +196,15 @@ Deno.serve((req: Request) => withRequestContext(async () => {
 
     // ── WhatsApp incoming messages ─────────────────────────────────
     if (body.object === 'whatsapp_business_account') {
+      // Only Meta may post here: the body must carry its HMAC-SHA256 signature made with the
+      // app's App Secret. Without a configured secret nothing is accepted.
+      const [wa] = await dbGet('api_integrations', 'credentials', { service: 'eq.whatsapp', active: 'eq.true' }, undefined, 1)
+      const appSecret = String(wa?.credentials?.app_secret || '')
+      if (!appSecret) console.warn('WhatsApp webhook rejected: no App Secret in the WhatsApp integration settings')
+      const signature = req.headers.get('x-hub-signature-256') || ''
+      if (!appSecret || !constantTimeEqual(signature, `sha256=${await hmacSha256Hex(appSecret, raw)}`)) {
+        return new Response(JSON.stringify({ error: 'invalid signature' }), { status: 401, headers: { ...CORS, 'Content-Type': 'application/json' } })
+      }
       try {
         const entry   = body.entry?.[0]
         const change  = entry?.changes?.[0]

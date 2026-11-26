@@ -15,6 +15,7 @@
 
 import { dbDelete, dbGet, dbInsert, dbInsertReturning } from '../supabase/functions/orchestrator/db.ts'
 import { matchCronField } from '../supabase/functions/orchestrator/automation.ts'
+import { hmacSha256Hex } from '../supabase/functions/orchestrator/auth.ts'
 
 if (Deno.env.get('DB_DRIVER') !== 'postgres') {
   console.error('Refusing to run: DB_DRIVER must be "postgres" (never run this against production).')
@@ -803,6 +804,45 @@ console.log('\n[20] cron fields')
   const hits = (field: string) => [...Array(24).keys()].filter(v => matchCronField(field, v)).join(',')
   check('cron: a stepped range stops at its end; */n and n/m unchanged',
     hits('1-10/3') === '1,4,7,10' && hits('*/6') === '0,6,12,18' && hits('20/2') === '20,22', { '1-10/3': hits('1-10/3'), '*/6': hits('*/6'), '20/2': hits('20/2') })
+}
+
+// ── 21. WhatsApp webhook: only Meta-signed posts are accepted ──────────
+console.log('\n[21] WhatsApp webhook signature')
+if ((await dbGet('api_integrations', 'id', { service: 'eq.whatsapp' })).length) {
+  console.log('  ⏭  skipped: a WhatsApp integration is already configured (not touching it)')
+} else {
+  const SECRET = `${MARK}-app-secret`
+  const from = String(Date.now())   // fake sender; the AI reply to it fails silently
+  const raw = JSON.stringify({ object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: { messages: [{ from, type: 'text', text: { body: `${MARK} 你好` } }] } }] }] })
+  const post = async (signature?: string) => {
+    const r = await fetch(BASE, { method: 'POST', body: raw,
+      headers: { 'Content-Type': 'application/json', ...(signature ? { 'X-Hub-Signature-256': signature } : {}) } })
+    await r.body?.cancel()
+    return r.status
+  }
+  const stored = async () => (await dbGet('conversations', 'id', { session_id: `eq.wa_${from}` })).length
+  const good = `sha256=${await hmacSha256Hex(SECRET, raw)}`
+
+  let rowId = ''   // the temporary integration row, removed by id
+  const addTestRow = async (credentials: Record<string, string>) => {
+    rowId = String((await dbInsertReturning('api_integrations', { service: 'whatsapp', active: true, credentials })).id)
+  }
+  const removeTestRow = async () => { if (rowId) await dbDelete('api_integrations', { id: `eq.${rowId}` }); rowId = '' }
+  try {
+    await addTestRow({ phone_number_id: MARK, access_token: MARK })
+    const noSecret = await post(`sha256=${'0'.repeat(64)}`)
+    await removeTestRow()
+    await addTestRow({ phone_number_id: MARK, access_token: MARK, app_secret: SECRET })
+    const [unsigned, wrong, tampered] = [await post(), await post(`sha256=${await hmacSha256Hex('wrong', raw)}`), await post(good.replace(/.$/, c => c === '0' ? '1' : '0'))]
+    check('webhook: no App Secret configured, unsigned, wrong secret or altered signature → 401, nothing stored',
+      noSecret === 401 && unsigned === 401 && wrong === 401 && tampered === 401 && await stored() === 0, { noSecret, unsigned, wrong, tampered })
+    const signed = await post(good)
+    check('webhook: a correctly signed post is accepted (200)', signed === 200, signed)
+  } finally {
+    await dbDelete('conversations', { session_id: `eq.wa_${from}` })
+    await removeTestRow()
+  }
 }
 
 // ── cleanup ────────────────────────────────────────────────────────────

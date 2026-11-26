@@ -754,12 +754,14 @@
           <input type="text" id="int-whatsapp-phone_number_id" placeholder="1234567890">
           <label class="lbl">Access Token（永久 Token）</label>
           <input type="password" id="int-whatsapp-access_token" placeholder="EAAx…">
+          <label class="lbl">App Secret（Meta 应用 → 设置 → 基本；用来确认顾客消息真的来自 Meta，不填则不接收顾客消息）</label>
+          <input type="password" id="int-whatsapp-app_secret" placeholder="32 位字母数字">
           <label class="lbl">Webhook Verify Token（自定义，填入 Meta 后台）</label>
           <input type="text" id="int-whatsapp-webhook_verify_token" placeholder="例：my_secret_token_2024">
           <label class="lbl">默认接收号码（接收 AI 通知）</label>
           <input type="text" id="int-whatsapp-default_recipient" placeholder="+60123456789（含国码）">
           <div style="display:flex;gap:8px;margin-bottom:8px">
-            <button class="btn-full btn-primary" style="flex:2" onclick="saveIntegration('whatsapp',['phone_number_id','access_token','webhook_verify_token','default_recipient'])">保存</button>
+            <button class="btn-full btn-primary" style="flex:2" onclick="saveIntegration('whatsapp',['phone_number_id','access_token','app_secret','webhook_verify_token','default_recipient'])">保存</button>
             <button class="show-btn" onclick="testWhatsApp()">测试</button>
           </div>
           <div id="imsg-whatsapp" class="status-txt"></div>

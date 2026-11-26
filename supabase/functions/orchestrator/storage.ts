@@ -10,6 +10,8 @@
 // fetches or links a file_url works the same with either driver.
 // ══════════════════════════════════════════════════════════════════════
 
+import { hmacSha256Hex } from './auth.ts'
+
 const DRIVER       = (Deno.env.get('STORAGE_DRIVER') || 'supabase').toLowerCase()
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -98,11 +100,7 @@ export async function readFile(bucket: string, name: string): Promise<Uint8Array
   }
 }
 
-async function hmacHex(message: string): Promise<string> {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(URL_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message))
-  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('')
-}
+const hmacHex = (message: string) => hmacSha256Hex(URL_SECRET, message)
 
 // A time-limited download link for a stored file URL (as built by publicUrl).
 // Local driver: an HMAC-signed query the download route checks. Supabase driver:
