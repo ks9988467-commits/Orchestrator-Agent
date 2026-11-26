@@ -6,7 +6,7 @@ async function initLogsAgentFilter() {
   const sel = document.getElementById('logsAgentFilter')
   if (!sel) return
   try {
-    const {data:agents} = await db.from('agents').select('id,name').order('id')
+    const {agents} = await apiCall('agent_crud', { method: 'list' })
     const cur = sel.value
     sel.innerHTML = '<option value="">全部 Agent</option>' +
       (agents||[]).map(a => `<option value="${esc(a.id)}"${a.id===cur?' selected':''}>${esc(a.name)}</option>`).join('')
@@ -17,17 +17,13 @@ async function loadLogs() {
   const body = document.getElementById('logsBody')
   body.innerHTML = '<div class="log-empty">加载中…</div>'
   try {
-    let q = db.from('conversations').select('*', { count: 'exact' }).order('created_at', {ascending:false}).limit(200)
     const af = document.getElementById('logsAgentFilter')?.value
     const rf = document.getElementById('logsRoleFilter')?.value
     const ff = document.getElementById('logsFeedbackFilter')?.value
-    if (af) q = q.eq('agent', af)
-    if (rf) q = q.eq('role', rf)
-    if (ff === 'good') q = q.eq('feedback', 'good')
-    else if (ff === 'bad') q = q.eq('feedback', 'bad')
-    else if (ff === 'none') q = q.is('feedback', null)
-    const {data, error, count} = await q
-    if (error) throw error
+    // role filter is sent as log_role: `role` in the body is the session role
+    const {rows: data, count} = await apiCall('conversation_crud', {
+      method: 'list', agent: af || undefined, log_role: rf || undefined, feedback: ff || undefined, limit: 200,
+    })
     if (!data?.length) { body.innerHTML = '<div class="log-empty">暂无记录</div>'; return }
     document.getElementById('logsCount').textContent = data.length + ' / ' + count + ' 条'
     body.innerHTML = data.map(r => {
@@ -65,10 +61,11 @@ async function clearAllLogs() {
   if (!confirm(`确认删除${label}对话记录？此操作不可撤销。`)) return
   const body = document.getElementById('logsBody')
   body.innerHTML = '<div class="log-empty">删除中…</div>'
-  let q = db.from('conversations').delete().neq('id', 0)
-  if (agent) q = q.eq('agent', agent)
-  const { error } = await q
-  if (error) { body.innerHTML = `<div class="log-empty" style="color:#d11a13">删除失败：${esc(error.message)}</div>`; return }
+  try {
+    await apiCall('conversation_crud', { method: 'delete_all', agent: agent || undefined })
+  } catch (e) {
+    body.innerHTML = `<div class="log-empty" style="color:#d11a13">删除失败：${esc(e.message)}</div>`; return
+  }
   document.getElementById('logsCount').textContent = '已清空'
   reloadLogs()
 }
@@ -76,7 +73,11 @@ async function clearAllLogs() {
 async function submitFeedback(id, val, btn) {
   const row = btn.closest('.fb-btns, .chat-fb')
   const current = btn.classList.contains('active') ? null : val
-  await db.from('conversations').update({feedback: current}).eq('id', id)
+  try {
+    await apiCall('conversation_crud', { method: 'set_feedback', id, feedback: current })
+  } catch (e) {
+    toast('反馈保存失败：' + e.message, 'error'); return
+  }
   if (!row) return
   row.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'))
   if (current) {
@@ -89,18 +90,18 @@ async function submitFeedback(id, val, btn) {
 // ── LLM Config ────────────────────────────────────────────────────────
 async function loadLLM() {
   try {
-    const [{data:providers}, {data:pref}, {data:agents}] = await Promise.all([
-      db.from('provider_config').select('*'),
-      db.from('user_prefs').select('value').eq('key','default_provider').maybeSingle(),
-      db.from('agents').select('id,name,provider,model').order('id'),
+    // API keys stay on the server: the backend returns has_key + key_hint (last 4 chars)
+    const [{providers, default_provider}, {agents}] = await Promise.all([
+      apiCall('provider_config_crud', { method: 'list' }),
+      apiCall('agent_crud', { method: 'list' }),
     ])
-    if (pref?.value) document.getElementById('defaultSel').value = pref.value
+    if (default_provider) document.getElementById('defaultSel').value = default_provider
     ;(providers||[]).forEach(r => {
       const p = r.provider
       const keyEl = document.getElementById('key-'+p)
       if (keyEl) {
-        keyEl.value = r.api_key ? '••••••••' + r.api_key.slice(-4) : ''
-        keyEl.dataset.masked = r.api_key ? 'true' : 'false'
+        keyEl.value = r.has_key ? '••••••••' + r.key_hint : ''
+        keyEl.dataset.masked = r.has_key ? 'true' : 'false'
       }
       if (r.model)   document.getElementById('model-'+p).value = r.model
       const cb = document.getElementById('active-'+p)
@@ -125,7 +126,7 @@ async function loadLLM() {
         <td><input type="text" id="amdl-${a.id}" value="${esc(a.model||'')}" placeholder="默认"></td>
         <td><button class="sm-btn" onclick="saveAgentLLM('${a.id}')">保存</button></td>
       </tr>`).join('')
-    document.getElementById('syncMsg').textContent = '✓ 已从 Supabase 同步'
+    document.getElementById('syncMsg').textContent = '✓ 已同步'
     document.getElementById('syncMsg').style.color = '#22c55e'
   } catch(e) {
     document.getElementById('syncMsg').textContent = '⚠ 读取失败（'+e.message+'）— 仍可直接填写保存'
@@ -170,7 +171,8 @@ function selectModel(p, model) {
 }
 async function toggleActive(p, active) {
   ;['cdot-','dot-'].forEach(pre => { const el=document.getElementById(pre+p); if(el) el.className='dot'+(active?' on':'') })
-  await db.from('provider_config').upsert({provider:p,active},{onConflict:'provider'})
+  try { await apiCall('provider_config_crud', { method: 'save', provider: p, active }) }
+  catch (e) { toast('保存失败：' + e.message, 'error') }
   loadSidebarDots()
 }
 async function saveProvider(p) {
@@ -187,13 +189,15 @@ async function saveProvider(p) {
   msgEl.className='status-txt'; msgEl.textContent='保存中…'
   const updateData = { model, active }
   if (key) updateData.api_key = key
-  const {error} = await db.from('provider_config').upsert({provider:p,...updateData},{onConflict:'provider'})
-  msgEl.className = 'status-txt '+(error?'err':'ok')
-  msgEl.textContent = error ? error.message : '✓ 已保存'
-  if (!error) {
-    ;['cdot-','dot-'].forEach(pre => { const el=document.getElementById(pre+p); if(el) el.className='dot'+(active?' on':'') })
-    loadSidebarDots()
+  try {
+    await apiCall('provider_config_crud', { method: 'save', provider: p, ...updateData })
+  } catch (e) {
+    msgEl.className = 'status-txt err'; msgEl.textContent = e.message; return
   }
+  msgEl.className = 'status-txt ok'
+  msgEl.textContent = '✓ 已保存'
+  ;['cdot-','dot-'].forEach(pre => { const el=document.getElementById(pre+p); if(el) el.className='dot'+(active?' on':'') })
+  loadSidebarDots()
 }
 async function testLlm(p) {
   const msgEl = document.getElementById('msg-'+p)
@@ -225,14 +229,18 @@ async function saveAgentLLM(id) {
   const provider = document.getElementById('allm-'+id).value || null
   const model    = document.getElementById('amdl-'+id).value.trim() || null
   const btn = document.querySelector(`#allm-${id}`)?.closest('tr')?.querySelector('.sm-btn')
-  const {error} = await db.from('agents').update({provider,model,updated_at:new Date().toISOString()}).eq('id',id)
+  let error = null
+  try { await apiCall('agent_crud', { method: 'update', id, data: { provider, model } }) }
+  catch (e) { error = e }
   if (btn) { btn.textContent=error?'✗ 失败':'✓ 已保存'; setTimeout(()=>btn.textContent='保存',2000) }
 }
 async function saveDefault() {
   const p = document.getElementById('defaultSel').value
   const m = document.getElementById('defaultMsg')
   m.textContent='保存中…'; m.className='status-txt'
-  const {error} = await db.from('user_prefs').upsert({key:'default_provider',value:p,confidence:1.0},{onConflict:'key'})
+  let error = null
+  try { await apiCall('provider_config_crud', { method: 'set_default', provider: p }) }
+  catch (e) { error = e }
   m.className='status-txt '+(error?'err':'ok')
   m.textContent = error ? error.message : `✓ 已设为 ${PROVIDER_LABELS[p]}`
 }
@@ -252,7 +260,8 @@ function testComingSoon(service) {
 }
 
 function copyWAUrl(btn) {
-  const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/whatsapp-webhook'
+  // The orchestrator itself handles WhatsApp webhooks (GET verification + POST messages)
+  const url = EDGE_URL
   navigator.clipboard.writeText(url)
     .then(() => {
       const orig = btn.textContent
@@ -265,7 +274,8 @@ function copyWAUrl(btn) {
 }
 async function loadIntegrations() {
   try {
-    const {data} = await db.from('api_integrations').select('*')
+    // secret credential values come back masked; re-saving a masked value keeps the stored secret
+    const {integrations: data} = await apiCall('integration_crud', { method: 'list' })
     // Status strip
     const strip = document.getElementById('intStatusStrip')
     if (!data?.length) {
@@ -290,7 +300,8 @@ async function loadIntegrations() {
 async function toggleIntegration(service, active) {
   const dot = document.getElementById('idot-'+service)
   if (dot) dot.className = 'dot'+(active?' on':'')
-  await db.from('api_integrations').upsert({service,active},{onConflict:'service'})
+  try { await apiCall('integration_crud', { method: 'save', service, active }) }
+  catch (e) { toast('保存失败：' + e.message, 'error') }
   await loadIntegrations()
 }
 async function saveIntegration(service, keys) {
@@ -302,10 +313,9 @@ async function saveIntegration(service, keys) {
   const active = document.getElementById('iactive-'+service)?.checked
   const msg = document.getElementById('imsg-'+service)
   msg.className='status-txt'; msg.textContent='保存中…'
-  const {error} = await db.from('api_integrations').upsert(
-    { service, credentials, active, updated_at: new Date().toISOString() },
-    { onConflict: 'service' }
-  )
+  let error = null
+  try { await apiCall('integration_crud', { method: 'save', service, credentials, active }) }
+  catch (e) { error = e }
   msg.className='status-txt '+(error?'err':'ok')
   msg.textContent = error ? error.message : '✓ 已保存'
   if (!error) loadIntegrations()
@@ -362,7 +372,8 @@ async function testLarkWebhook() {
   else { msg.className='status-txt err'; msg.textContent = d.error||'发送失败'; toast(d.error||'Lark 测试失败', 'error') }
 }
 function copyLarkWebhook(btn) {
-  const url = 'https://ontumerafhimxvqtsijr.supabase.co/functions/v1/lark-webhook'
+  const url = siblingFunctionUrl('lark-webhook')
+  if (!url) { toast('当前后端没有 Lark 接收地址（lark-webhook 是单独部署的 Edge Function）', 'error'); return }
   navigator.clipboard?.writeText(url).then(() => { btn.textContent='✓ 已复制'; setTimeout(()=>btn.textContent='复制接收 URL',2000) })
     .catch(() => prompt('请手动复制 Lark 接收 URL：', url))
 }
@@ -374,7 +385,7 @@ async function testSlackWebhook() {
   try {
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: '✅ Orchestrator Agent — Slack 连接测试成功！' })
     })
     if (r.ok) { msg.className='status-txt ok'; msg.textContent='✓ 测试成功，请检查 Slack 频道'; toast('Slack 测试消息已发送', 'success') }
@@ -461,7 +472,7 @@ function ugcShowTab(tab, el) {
 // ── Settings ──
 function ugcBuildSettings(el) {
   var html = '<div class="ugc-section-title">⚙️ 平台设定</div>'
-    + '<div class="ugc-section-sub">每个平台的写作规则存入 Supabase，多人共用。</div>'
+    + '<div class="ugc-section-sub">每个平台的写作规则存入数据库，多人共用。</div>'
   UGC_PLATFORMS.forEach(function(p) {
     var r = (_ugcRules && _ugcRules[p.v]) || UGC_DEFAULT_RULES[p.v] || {}
     html += '<div class="ugc-rule-card" id="ugcr-'+p.v+'">'

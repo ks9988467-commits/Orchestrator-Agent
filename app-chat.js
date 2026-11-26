@@ -137,15 +137,11 @@ async function sendMsg() {
     try {
       const extMap = { pdf:'pdf', doc:'word', docx:'word', xls:'excel', xlsx:'excel', csv:'excel', jpg:'image', jpeg:'image', png:'image', gif:'image', webp:'image' }
       uploadedFiles = await Promise.all(filesToSend.map(async function(f) {
-        const fname = Date.now() + '_' + Math.random().toString(36).slice(2,6) + '_' + f.name.replace(/[^a-zA-Z0-9._-]/g, '_')
-        const up = await fetch(SUPABASE_URL + '/storage/v1/object/review-files/' + fname, {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + SUPABASE_ANON, 'Content-Type': f.type || 'application/octet-stream', 'x-upsert': 'false' },
-          body: f,
-        })
-        if (!up.ok) throw new Error('上传失败 ' + f.name + ': ' + up.status)
+        let up
+        try { up = await uploadFile('review-files', f) }
+        catch (err) { throw new Error('上传失败 ' + f.name + ': ' + err.message) }
         const ext = (f.name.split('.').pop()||'').toLowerCase()
-        return { url: SUPABASE_URL + '/storage/v1/object/public/review-files/' + fname, name: f.name, type: extMap[ext] || 'pdf' }
+        return { url: up.url, name: f.name, type: extMap[ext] || 'pdf' }
       }))
     } catch(e) {
       updateStreamBubble(bubble, '⚠️ ' + e.message, null)
@@ -195,13 +191,11 @@ async function sendMsg() {
       }
     }
 
-    // Single file → use legacy file_url path (review workflow + data extraction)
+    // Single file → file_url path (data extraction when the message asks for it, else normal chat)
     // Multiple files → use files[] path (joint analysis)
-    const submitter = _msgMyId ? (_msgStaff.find(function(s){return s.id===_msgMyId})?.name||'chat') : 'chat'
     let filePayload = {}
     if (uploadedFiles.length === 1) {
-      filePayload = { file_url: uploadedFiles[0].url, file_name: uploadedFiles[0].name, file_type: uploadedFiles[0].type,
-                      submitted_by: submitter, submitted_by_staff_id: _msgMyId||undefined }
+      filePayload = { file_url: uploadedFiles[0].url, file_name: uploadedFiles[0].name, file_type: uploadedFiles[0].type }
     } else if (uploadedFiles.length > 1) {
       filePayload = { files: uploadedFiles }
     }

@@ -1,0 +1,35 @@
+# Local Postgres + pgvector for the UCG local-first migration.
+#
+#   docker compose -f local/docker-compose.yml up -d
+#
+# Then point the backend at it:
+#   DB_DRIVER=postgres
+#   DATABASE_URL=postgresql://ucg:ucg_local_dev@localhost:5433/ucg
+#
+# Port 5433 (not 5432) to avoid clashing with any native Postgres install.
+# Credentials are local-dev only — this container must never be exposed.
+
+name: ucg-local   # explicit project name — otherwise compose infers the generic "local"
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: ucg-postgres
+    environment:
+      POSTGRES_USER: ucg
+      POSTGRES_PASSWORD: ucg_local_dev
+      POSTGRES_DB: ucg
+    ports:
+      - "5433:5432"
+    volumes:
+      - ucg_pgdata:/var/lib/postgresql/data
+      # Everything in initdb/ runs once, in filename order, on first start.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ucg -d ucg"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ucg_pgdata:
