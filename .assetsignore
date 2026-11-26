@@ -2,6 +2,7 @@
 # git history, config) must never be uploaded as a public asset.
 *
 !dashboard.html
+!privacy.html
 !app.css
 !app-core.js
 !app-home.js
